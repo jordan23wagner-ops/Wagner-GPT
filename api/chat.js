@@ -60,7 +60,7 @@ export default async function handler(req, res) {
 }
 
 async function callOllamaCloud(messages, apiKey) {
-  const response = await fetch('https://api.ollama.ai/v1/chat/completions', {
+  const response = await fetch('https://api.ollama.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
