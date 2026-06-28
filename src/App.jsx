@@ -172,7 +172,7 @@ export default function App() {
                   : 'bg-white border-gray-300 text-gray-900'
               }`}
             >
-              <option value="m3">MiniMax M3 (Ollama Cloud)</option>
+              <option value="m3">MiniMax M3 (NVIDIA NIM)</option>
               <option value="deepseek">DeepSeek (NVIDIA NIM)</option>
               <option value="qwen">Qwen (NVIDIA NIM)</option>
             </select>
