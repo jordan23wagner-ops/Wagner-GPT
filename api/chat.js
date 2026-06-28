@@ -26,9 +26,9 @@ export default async function handler(req, res) {
 
   // Provider-specific model IDs for each dropdown choice.
   const MODEL_MAP = {
-    m3:       { ollama: 'minimax-m3:cloud',        nim: 'minimaxai/minimax-m3' },
-    deepseek: { ollama: 'deepseek-v4-flash:cloud', nim: 'deepseek-ai/deepseek-v4-flash' },
-    qwen:     { ollama: 'deepseek-v4-pro:cloud',   nim: 'deepseek-ai/deepseek-v4-pro' }
+    m3:       { ollama: 'minimax-m3:cloud',        nim: 'minimaxai/minimax-m3',        order: ['ollama', 'nim'] },
+    deepseek: { ollama: 'deepseek-v4-flash:cloud', nim: 'deepseek-ai/deepseek-v4-flash', order: ['nim'] },
+    qwen:     { ollama: 'deepseek-v4-pro:cloud',   nim: 'deepseek-ai/deepseek-v4-pro',   order: ['nim'] }
   }
 
   const ids = MODEL_MAP[model]
