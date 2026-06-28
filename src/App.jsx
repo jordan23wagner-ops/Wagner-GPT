@@ -67,6 +67,32 @@ export default function App() {
   const sendToModel = async (history, payload) => {
     setError(null)
     setLoading(true)
+
+    // Create a placeholder assistant message we'll fill in as tokens stream in.
+    const assistantId = Date.now() + 1
+    let appended = false        // have we added the placeholder to the list yet?
+    let accumulated = ''        // full text so far (for error-rollback decisions)
+    let streamError = null      // terminal error reported by the backend
+
+    const ensureAssistant = () => {
+      if (appended) return
+      appended = true
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantId, role: 'assistant', content: '' }
+      ])
+    }
+
+    const appendDelta = (text) => {
+      ensureAssistant()
+      accumulated += text
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, content: m.content + text } : m
+        )
+      )
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -79,22 +105,70 @@ export default function App() {
         })
       })
 
-      const data = await response.json()
-
-      if (response.ok) {
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now() + 1, role: 'assistant', content: data.response }
-        ])
-        setLastAttempt(null)
-      } else {
-        // Backend already returns a friendly message; stash the attempt so Retry works.
-        setError(data.error || 'Failed to get a response.')
+      // Non-OK before streaming started (e.g. 400/500) — body may be JSON or NDJSON.
+      if (!response.ok || !response.body) {
+        let errMsg = 'Failed to get a response.'
+        try {
+          const data = await response.json()
+          errMsg = data.error || errMsg
+        } catch (_) { /* ignore parse failures */ }
+        setError(errMsg)
         setLastAttempt({ history, payload })
+        return
+      }
+
+      // Read the NDJSON stream: one JSON object per line.
+      //   { delta }  -> append token
+      //   { error }  -> terminal failure
+      //   { done }   -> terminal success
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const handleLine = (line) => {
+        const trimmed = line.trim()
+        if (!trimmed) return
+        let evt
+        try { evt = JSON.parse(trimmed) } catch { return }
+        if (evt.delta) appendDelta(evt.delta)
+        else if (evt.error) streamError = evt.error
+        // evt.done -> nothing to do; loop ends when reader closes
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let idx
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          handleLine(buffer.slice(0, idx))
+          buffer = buffer.slice(idx + 1)
+        }
+      }
+      if (buffer.length) handleLine(buffer)
+
+      if (streamError) {
+        // If nothing streamed, surface the error banner + retry. If we already
+        // streamed partial content, keep what we got and append a note inline.
+        if (accumulated) {
+          appendDelta(`\n\n⚠️ ${streamError}`)
+          setLastAttempt(null)
+        } else {
+          setError(streamError)
+          setLastAttempt({ history, payload })
+        }
+      } else {
+        setLastAttempt(null)
       }
     } catch (err) {
-      setError('Network error — check your connection and try again.')
-      setLastAttempt({ history, payload })
+      // Network drop mid-stream: keep any partial content, but offer retry only
+      // if we never received anything.
+      if (accumulated) {
+        appendDelta('\n\n⚠️ Connection interrupted.')
+      } else {
+        setError('Network error — check your connection and try again.')
+        setLastAttempt({ history, payload })
+      }
     } finally {
       setLoading(false)
     }
@@ -208,7 +282,7 @@ export default function App() {
                   </div>
                 </div>
               ))}
-              {loading && (
+              {loading && messages[messages.length - 1]?.role !== 'assistant' && (
                 <div className="flex justify-start">
                   <div className={`${darkMode ? 'bg-gray-800' : 'bg-gray-100'} px-4 py-2 rounded-lg`}>
                     <div className="flex gap-1">
