@@ -27,8 +27,7 @@ export default async function handler(req, res) {
   // Provider-specific model IDs for each dropdown choice.
   const MODEL_MAP = {
     m3:       { ollama: 'minimax-m3:cloud',        nim: 'minimaxai/minimax-m3',        order: ['ollama', 'nim'] },
-    gemma: { ollama: 'gemma4:cloud', nim: 'google/gemma-3-27b-it', order: ['ollama', 'nim'] },
-    qwen:     { ollama: 'qwen3.5:cloud', nim: 'qwen/qwen2.5-vl-72b-instruct', order: ['ollama', 'nim'] }
+    gemma:    { ollama: 'gemma4:cloud',            nim: 'google/gemma-3-27b-it',       order: ['ollama', 'nim'] }
   }
 
   const ids = MODEL_MAP[model]
