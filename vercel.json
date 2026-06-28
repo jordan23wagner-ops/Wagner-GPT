@@ -1,16 +1,6 @@
 {
   "buildCommand": "npm install && npm run build",
   "outputDirectory": "dist",
-  "env": [
-    {
-      "key": "OLLAMA_CLOUD_KEY",
-      "description": "Your Ollama Cloud API key"
-    },
-    {
-      "key": "NVIDIA_NIM_KEY",
-      "description": "Your NVIDIA NIM API key"
-    }
-  ],
   "rewrites": [
     {
       "source": "/api/:path*",
