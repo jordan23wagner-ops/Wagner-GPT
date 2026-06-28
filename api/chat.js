@@ -39,17 +39,12 @@ export default async function handler(req, res) {
     let response
 
     if (model === 'm3') {
-      // Try Ollama Cloud M3 first
-      try {
-        response = await callOllamaCloud(formattedMessages, OLLAMA_CLOUD_KEY)
-      } catch (err) {
-        console.log('Ollama Cloud failed, falling back to NIM:', err.message)
-        response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-r1', NVIDIA_NIM_KEY)
-      }
-    } else if (model === 'deepseek') {
-      response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-r1', NVIDIA_NIM_KEY)
-    } else if (model === 'qwen') {
-      response = await callNimModel(formattedMessages, 'Qwen/QwQ-32B-Preview', NVIDIA_NIM_KEY)
+  response = await callNimModel(formattedMessages, 'minimaxai/minimax-m3', NVIDIA_NIM_KEY)
+} else if (model === 'deepseek') {
+  response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-flash', NVIDIA_NIM_KEY)
+} else if (model === 'qwen') {
+  response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-pro', NVIDIA_NIM_KEY)
+}
     }
 
     return res.status(200).json({ response: response })
