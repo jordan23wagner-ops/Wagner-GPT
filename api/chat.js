@@ -5,11 +5,10 @@ export default async function handler(req, res) {
 
   const { messages, newMessage, image, model } = req.body
 
-  const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
 
-  if (!OLLAMA_CLOUD_KEY || !NVIDIA_NIM_KEY) {
-    return res.status(500).json({ error: 'API keys not configured' })
+  if (!NVIDIA_NIM_KEY) {
+    return res.status(500).json({ error: 'API key not configured' })
   }
 
   try {
@@ -20,7 +19,7 @@ export default async function handler(req, res) {
       })),
       {
         role: 'user',
-        content: image 
+        content: image
           ? [
               { type: 'text', text: newMessage },
               {
@@ -39,12 +38,13 @@ export default async function handler(req, res) {
     let response
 
     if (model === 'm3') {
-  response = await callNimModel(formattedMessages, 'minimaxai/minimax-m3', NVIDIA_NIM_KEY)
-} else if (model === 'deepseek') {
-  response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-flash', NVIDIA_NIM_KEY)
-} else if (model === 'qwen') {
-  response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-pro', NVIDIA_NIM_KEY)
-}
+      response = await callNimModel(formattedMessages, 'minimaxai/minimax-m3', NVIDIA_NIM_KEY)
+    } else if (model === 'deepseek') {
+      response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-flash', NVIDIA_NIM_KEY)
+    } else if (model === 'qwen') {
+      response = await callNimModel(formattedMessages, 'deepseek-ai/deepseek-v4-pro', NVIDIA_NIM_KEY)
+    } else {
+      return res.status(400).json({ error: `Unknown model: ${model}` })
     }
 
     return res.status(200).json({ response: response })
@@ -54,29 +54,6 @@ export default async function handler(req, res) {
   }
 }
 
-async function callOllamaCloud(messages, apiKey) {
-  const response = await fetch('https://api.ollama.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'minimax-m3:cloud',
-      messages: messages,
-      temperature: 0.7,
-      max_tokens: 2048
-    })
-  })
-
-  if (!response.ok) {
-    const err = await response.text()
-    throw new Error(`Ollama Cloud error: ${err}`)
-  }
-
-  const data = await response.json()
-  return data.choices[0].message.content
-}
 
 async function callNimModel(messages, model, apiKey) {
   // For NIM, strip out image data if present (these models don't support vision)
