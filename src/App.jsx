@@ -249,8 +249,8 @@ export default function App() {
               }`}
             >
               <option value="m3">MiniMax M3 (Ollama → NIM)</option>
-              <option value="deepseek">DeepSeek V4 Flash (Ollama → NIM)</option>
-              <option value="qwen">DeepSeek V4 Pro (Ollama → NIM)</option>
+             <option value="gemma">Gemma 4 — vision</option>
+              <option value="qwen">Qwen 3.5 — vision</option>
             </select>
           </div>
         </div>
