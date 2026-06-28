@@ -14,6 +14,8 @@ export default function App() {
   })
   const [image, setImage] = useState(null)
   const [imagePreview, setImagePreview] = useState(null)
+  const [error, setError] = useState(null)
+  const [lastAttempt, setLastAttempt] = useState(null)
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
 
@@ -60,6 +62,44 @@ export default function App() {
     }
   }
 
+  // Core send routine. `history` is the message list to send as context,
+  // `payload` is the new turn (text + optional image). Reused by submit and retry.
+  const sendToModel = async (history, payload) => {
+    setError(null)
+    setLoading(true)
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          newMessage: payload.text,
+          image: payload.image,
+          model: model
+        })
+      })
+
+      const data = await response.json()
+
+      if (response.ok) {
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now() + 1, role: 'assistant', content: data.response }
+        ])
+        setLastAttempt(null)
+      } else {
+        // Backend already returns a friendly message; stash the attempt so Retry works.
+        setError(data.error || 'Failed to get a response.')
+        setLastAttempt({ history, payload })
+      }
+    } catch (err) {
+      setError('Network error — check your connection and try again.')
+      setLastAttempt({ history, payload })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!input.trim() && !image) return
@@ -71,59 +111,21 @@ export default function App() {
       image: imagePreview
     }
 
+    // Snapshot the context (before adding this turn) and the new payload.
+    const history = messages
+    const payload = { text: input, image: image }
+
     setMessages((prev) => [...prev, userMessage])
     setInput('')
     setImage(null)
     setImagePreview(null)
-    setLoading(true)
 
-    try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: messages.map((m) => ({
-            role: m.role,
-            content: m.content
-          })),
-          newMessage: input,
-          image: image,
-          model: model
-        })
-      })
+    await sendToModel(history, payload)
+  }
 
-      const data = await response.json()
-
-      if (response.ok) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now() + 1,
-            role: 'assistant',
-            content: data.response
-          }
-        ])
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now() + 1,
-            role: 'assistant',
-            content: `Error: ${data.error || 'Failed to get response'}`
-          }
-        ])
-      }
-    } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          role: 'assistant',
-          content: `Error: ${error.message}`
-        }
-      ])
-    } finally {
-      setLoading(false)
+  const handleRetry = () => {
+    if (lastAttempt) {
+      sendToModel(lastAttempt.history, lastAttempt.payload)
     }
   }
 
@@ -172,9 +174,9 @@ export default function App() {
                   : 'bg-white border-gray-300 text-gray-900'
               }`}
             >
-              <option value="m3">MiniMax M3 (NVIDIA NIM)</option>
-              <option value="deepseek">DeepSeek (NVIDIA NIM)</option>
-              <option value="qwen">Qwen (NVIDIA NIM)</option>
+              <option value="m3">MiniMax M3 (Ollama → NIM)</option>
+              <option value="deepseek">DeepSeek V4 Flash (Ollama → NIM)</option>
+              <option value="qwen">DeepSeek V4 Pro (Ollama → NIM)</option>
             </select>
           </div>
         </div>
@@ -219,6 +221,46 @@ export default function App() {
               )}
               <div ref={messagesEndRef} />
             </>
+          )}
+
+          {error && (
+            <div className="flex justify-start">
+              <div
+                role="alert"
+                className={`max-w-xs px-4 py-3 rounded-lg border ${
+                  darkMode
+                    ? 'bg-red-950/40 border-red-800 text-red-200'
+                    : 'bg-red-50 border-red-200 text-red-700'
+                }`}
+              >
+                <p className="text-sm mb-2">{error}</p>
+                <div className="flex gap-2">
+                  {lastAttempt && (
+                    <button
+                      onClick={handleRetry}
+                      disabled={loading}
+                      className={`text-xs font-medium px-3 py-1 rounded ${
+                        darkMode
+                          ? 'bg-red-800 text-red-100 hover:bg-red-700 disabled:opacity-50'
+                          : 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-50'
+                      }`}
+                    >
+                      Retry
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setError(null)}
+                    className={`text-xs font-medium px-3 py-1 rounded ${
+                      darkMode
+                        ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                    }`}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </div>
 
