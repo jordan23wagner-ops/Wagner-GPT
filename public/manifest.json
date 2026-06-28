@@ -1,7 +1,7 @@
 {
   "name": "Chat - Free GPT",
   "short_name": "Chat",
-  "description": "Free AI chat using Ollama Cloud and NVIDIA NIM",
+  "description": "Free AI chat powered by NVIDIA NIM",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
