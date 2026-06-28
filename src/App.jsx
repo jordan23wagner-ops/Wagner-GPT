@@ -248,7 +248,7 @@ export default function App() {
                   : 'bg-white border-gray-300 text-gray-900'
               }`}
             >
-              <option value="m3">MiniMax M3 (Ollama → NIM)</option>
+              <option value="m3">MiniMax M3 — vision</option>
              <option value="gemma">Gemma 4 — vision</option>
             </select>
           </div>
