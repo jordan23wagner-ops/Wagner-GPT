@@ -40,13 +40,18 @@ No Docker. No database server. No monthly bills.
 - **Markdown rendering** — AI replies display with formatted headings, bold, italic, lists, and code.
 - **Dark mode** — global toggle, persisted.
 
+- **Web search** — toggle the globe in the input bar; current results (via Tavily) are injected into the answer with clickable source citations.
+- **Voice input** — tap the mic to dictate (Web Speech API; Chrome/Edge/Safari incl. iOS).
+
 ### Models
 
 | Dropdown | Ollama Cloud | NIM Fallback | Vision |
 |---|---|---|:---:|
-| Auto (default) | routes to best fit | per-model | Yes |
+| Auto (default) | code → Qwen3-Coder, general → GPT-OSS, vision/image → Gemma | per-model | Yes |
 | MiniMax M3 | `minimax-m3` | `minimaxai/minimax-m3` | Yes |
 | Gemma 4 | `gemma4:31b` | `meta/llama-3.3-70b-instruct` | Yes |
+| GPT-OSS 120B | `gpt-oss:120b` | `meta/llama-3.3-70b-instruct` | No |
+| Qwen3 Coder | `qwen3-coder:480b` | `meta/llama-3.3-70b-instruct` | No |
 
 ## Document Export
 
@@ -147,6 +152,7 @@ wife-gpt/
 | `OLLAMA_CLOUD_KEY` | Yes | Ollama Cloud chat (primary) |
 | `NVIDIA_NIM_KEY` | Yes | NIM chat fallback + image generation (FLUX.1-dev) |
 | `HUGGINGFACE_KEY` | Recommended | HuggingFace image fallback (free forever, fires when NIM 403s) |
+| `TAVILY_KEY` | Optional | Web search (free 1000/mo at tavily.com). Without it, the web-search toggle gracefully no-ops. |
 
 Supabase credentials are embedded in the frontend bundle (publishable anon key — this is standard Supabase practice, same as Stripe's publishable key).
 
