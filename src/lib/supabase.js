@@ -1,11 +1,12 @@
-// Supabase client — reads credentials from Vite env vars (VITE_ prefix).
-// Returns null if not configured, so the app gracefully falls back to
-// localStorage-only mode when Supabase isn't set up.
+// Supabase client — the anon key is publishable by design (like Stripe's
+// publishable key). Security comes from Row Level Security policies on the
+// database, not from hiding this key. This is standard Supabase practice
+// for frontend apps.
 
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY
+const url = 'https://mfzzcrsgslkpvzvtveao.supabase.co'
+const key = 'sb_publishable_7-pjVrDnXLzAAjxXawBpWw_mCVTSR-Z'
 
-export const supabase = url && key ? createClient(url, key) : null
-export const hasSupabase = !!supabase
+export const supabase = createClient(url, key)
+export const hasSupabase = true
