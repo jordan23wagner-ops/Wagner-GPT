@@ -1,19 +1,20 @@
 # Wagner-GPT — Free AI Chat PWA
 
-A mobile-first Progressive Web App for free AI chat with **live token streaming** and **photo upload (vision)** support. Models are served by **Ollama Cloud** (primary, free) with **NVIDIA NIM** as an automatic fallback.
+A mobile-first Progressive Web App for free AI chat with **live token streaming**, **photo upload (vision)**, and **AI image generation**. Chat models are served by **Ollama Cloud** (primary, free) with **NVIDIA NIM** as an automatic fallback; image generation runs on NIM's **FLUX.1-dev**.
 
 ## Features
 
 - 📱 **Mobile-first PWA** — Add to home screen, works like an app
 - ⚡ **Streaming responses** — Tokens appear live as the model generates them (no waiting for the full reply)
 - 🖼️ **Vision** — Upload a photo and ask about it; both models can analyze images
+- 🎨 **Image generation** — Ask the model to "draw" or "create an image of" something; it calls a `generate_image` tool wired to NIM's FLUX.1-dev and returns the picture inline
 - 🔄 **Model switching** — Toggle between two vision-capable models
 - 🔁 **Provider fallback** — Ollama Cloud first; if it fails before streaming, falls back to NIM
 - 📚 **Chat history** — Saved locally in the browser
 - 🌙 **Dark mode** — Eye-friendly night theme
 - 🆓 **Free tier** — Ollama Cloud, no per-token billing
 
-> **Image generation is not supported.** These are vision *input* models (photo → text). They cannot *create* images from a prompt. Text-to-image would require a separate provider and is not wired up.
+> **Two kinds of images, don't confuse them:** the chat models are vision *input* models (photo → text) — they read images you upload. *Creating* an image from a prompt is handled separately: the chat model calls the `generate_image` tool, which runs the prompt through NIM's FLUX.1-dev and streams back a JPEG. Image generation requires a `NVIDIA_NIM_KEY` and uses NIM credits (chat stays on free Ollama).
 
 ## Models
 
@@ -47,6 +48,7 @@ Browser (React)  ──POST /api/chat──►  Vercel serverless (api/chat.js)
 **Streaming protocol (server → client), newline-delimited JSON:**
 
 - `{"delta":"token text"}` — one or more, as tokens arrive
+- `{"image":"<base64 jpeg>","mediaType":"image/jpeg","prompt":"..."}` — an AI-generated image (sent when the model calls `generate_image`)
 - `{"done":true,"provider":"ollama"}` — terminal success
 - `{"error":"message"}` — terminal failure (only sent if nothing streamed yet)
 

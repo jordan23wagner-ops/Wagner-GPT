@@ -3,8 +3,13 @@
 // Each provider has a different streaming format; we normalize both into a single
 // newline-delimited JSON (NDJSON) stream to the client:
 //   {"delta":"token text"}\n   (zero or more)
+//   {"image":"<base64 jpeg>","mediaType":"image/jpeg","prompt":"..."}\n   (AI-generated image)
 //   {"done":true,"provider":"ollama"}\n   (terminal success)
 //   {"error":"message"}\n   (terminal failure, only if NOTHING streamed yet)
+//
+// Image generation is exposed to the chat model as a `generate_image` tool. When the
+// model decides to call it (e.g. "draw a garden"), we run the prompt through NVIDIA
+// NIM's FLUX.1-dev endpoint and stream the result as an {"image":...} event.
 //
 // Fallback caveat: once we've flushed the first delta the HTTP response is committed,
 // so provider fallback is only possible BEFORE the first token. The wroteAny flag
@@ -69,10 +74,16 @@ export default async function handler(req, res) {
 
   const errors = []
 
+  // Offer the image tool only when a NIM key is present (FLUX runs on NIM).
+  const tools = NVIDIA_NIM_KEY ? [IMAGE_TOOL] : undefined
+
   // 1) Try Ollama Cloud first (free path).
   if (OLLAMA_CLOUD_KEY) {
     try {
-      await streamOllama(fullMessages, ids.ollama, OLLAMA_CLOUD_KEY, writeDelta)
+      const { toolCall } = await streamOllama(fullMessages, ids.ollama, OLLAMA_CLOUD_KEY, writeDelta, tools)
+      if (toolCall) {
+        await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, res, writeDelta)
+      }
       res.write(JSON.stringify({ done: true, provider: 'ollama' }) + '\n')
       return res.end()
     } catch (err) {
@@ -184,7 +195,7 @@ async function* iterLines(response) {
 // Ollama Cloud: native /api/chat, stream:true -> NDJSON, one JSON object per line:
 //   { "message": { "content": "..." }, "done": false }
 // M3 supports vision; images go as a separate images:[base64] array on the message.
-async function streamOllama(messages, model, apiKey, onDelta) {
+async function streamOllama(messages, model, apiKey, onDelta, tools) {
   const ollamaMessages = messages.map(m => {
     if (Array.isArray(m.content)) {
       const text = m.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
@@ -196,27 +207,109 @@ async function streamOllama(messages, model, apiKey, onDelta) {
     return { role: m.role, content: m.content }
   })
 
+  const payload = { model, messages: ollamaMessages, stream: true }
+  if (tools && tools.length) payload.tools = tools
+
   const response = await openWithRetry('https://ollama.com/api/chat', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ model, messages: ollamaMessages, stream: true })
+    body: JSON.stringify(payload)
   })
 
   let got = false
+  let toolCall = null
   for await (const line of iterLines(response)) {
     const trimmed = line.trim()
     if (!trimmed) continue
     let obj
     try { obj = JSON.parse(trimmed) } catch { continue }
     if (obj.error) throw new Error(String(obj.error).slice(0, 200))
-    const piece = obj && obj.message && obj.message.content
-    if (piece) { got = true; onDelta(piece) }
+    const m = obj && obj.message
+    if (m) {
+      if (!toolCall && Array.isArray(m.tool_calls)) {
+        const tc = m.tool_calls.find(t => t.function && t.function.name === 'generate_image')
+        if (tc) toolCall = tc
+      }
+      if (m.content) { got = true; onDelta(m.content) }
+    }
     if (obj.done) break
   }
-  if (!got) throw new Error('empty response')
+  // A tool call is a valid outcome even when the model emits no text.
+  if (!got && !toolCall) throw new Error('empty response')
+  return { toolCall }
+}
+
+// ---- Image generation (generate_image tool -> NVIDIA NIM FLUX.1-dev) ----
+
+// Tool schema advertised to the chat model. Description is deliberately explicit so
+// the model reliably routes "draw / paint / create / show a picture" requests here.
+const IMAGE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'generate_image',
+    description: 'Generate an image from a text description. Call this whenever the user asks you to draw, paint, create, generate, render, or show a picture/image/photo of something.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'A detailed, vivid description of the image to generate.' }
+      },
+      required: ['prompt']
+    }
+  }
+}
+
+// FLUX.1-dev accepts width/height only from a fixed set; 1024 square is the safe default.
+async function generateImage(prompt, nimKey) {
+  const response = await fetch('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${nimKey}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify({
+      prompt: String(prompt).slice(0, 1500),
+      width: 1024,
+      height: 1024,
+      steps: 25,
+      cfg_scale: 3.5,
+      seed: Math.floor(Math.random() * 1e9)
+    })
+  })
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`${response.status} ${body.slice(0, 150)}`)
+  }
+  const data = await response.json()
+  const b64 = data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64
+  if (!b64) throw new Error('no image returned')
+  return b64
+}
+
+// Execute a generate_image tool call: pull the prompt, run FLUX, stream the image.
+// Never throws — on failure it streams a short note so the request still completes.
+async function runImageTool(toolCall, fallbackPrompt, nimKey, res, onDelta) {
+  let prompt = fallbackPrompt
+  try {
+    const args = toolCall.function.arguments
+    const parsed = typeof args === 'string' ? JSON.parse(args) : args
+    if (parsed && parsed.prompt) prompt = parsed.prompt
+  } catch { /* fall back to the user's raw message */ }
+
+  if (!nimKey) {
+    onDelta('\n\n⚠️ Image generation isn\'t configured (no NIM key).')
+    return
+  }
+  try {
+    const b64 = await generateImage(prompt, nimKey)
+    res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
+  } catch (err) {
+    console.error('FLUX failed:', err.message)
+    onDelta(`\n\n⚠️ Couldn't generate the image: ${err.message}`)
+  }
 }
 
 // NVIDIA NIM: OpenAI-compatible, stream:true -> SSE lines:

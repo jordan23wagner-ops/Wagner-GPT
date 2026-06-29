@@ -93,6 +93,16 @@ export default function App() {
       )
     }
 
+    // AI-generated image: attach it to the assistant bubble as a data URL.
+    const setAssistantImage = (b64, mediaType) => {
+      ensureAssistant()
+      accumulated += '[image]'
+      const url = `data:${mediaType || 'image/jpeg'};base64,${b64}`
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantId ? { ...m, image: url } : m))
+      )
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -131,6 +141,7 @@ export default function App() {
         let evt
         try { evt = JSON.parse(trimmed) } catch { return }
         if (evt.delta) appendDelta(evt.delta)
+        else if (evt.image) setAssistantImage(evt.image, evt.mediaType)
         else if (evt.error) streamError = evt.error
         // evt.done -> nothing to do; loop ends when reader closes
       }
