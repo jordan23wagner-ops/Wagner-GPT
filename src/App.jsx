@@ -1,13 +1,38 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2 } from 'lucide-react'
+import {
+  Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2,
+  Menu, Plus, X, FileText, Printer,
+} from 'lucide-react'
 import Garden from './Garden'
+import {
+  loadConversations, saveConversations, loadActiveId, saveActiveId,
+  newConversation, titleFromMessages,
+} from './lib/conversations'
+import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
+import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
+import { exportWord, exportPdf } from './lib/exportChat'
+
+// Inset so the header/input clear the phone's status bar (time/battery) and home
+// indicator. Harmless 0 on desktop; real values on notched phones (viewport-fit=cover).
+const TOP_INSET = 'calc(env(safe-area-inset-top, 0px) + 0.75rem)'
+const BOTTOM_INSET = 'calc(env(safe-area-inset-bottom, 0px) + 1rem)'
+
+const MODEL_LABELS = { auto: 'Auto', m3: 'MiniMax M3', gemma: 'Gemma 4' }
 
 export default function App() {
-  const [messages, setMessages] = useState([])
+  // Load conversations once and derive the active id from the SAME instance — a fresh
+  // load (or legacy migration) mints new ids, so calling the loader twice would leave
+  // activeId pointing at a conversation that isn't in state.
+  const initialConvs = useRef(null)
+  if (!initialConvs.current) initialConvs.current = loadConversations()
+  const [conversations, setConversations] = useState(initialConvs.current)
+  const [activeId, setActiveId] = useState(() => loadActiveId(initialConvs.current))
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [model, setModel] = useState('m3')
+  const [model, setModel] = useState(() => localStorage.getItem('model') || 'auto')
   const [tab, setTab] = useState('chat')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [usage, setUsage] = useState(loadUsage)
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('darkMode') === 'true' || window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -21,33 +46,40 @@ export default function App() {
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
 
+  // Keep the active id reachable inside async stream closures without stale capture.
+  const activeIdRef = useRef(activeId)
+  activeIdRef.current = activeId
+
+  const activeConv = conversations.find((c) => c.id === activeId) || conversations[0]
+  const messages = activeConv ? activeConv.messages : []
+
+  // setMessages shim: updates the active conversation's messages (and auto-titles it),
+  // so the streaming code below stays unchanged from the single-history version.
+  const setMessages = (updater) => {
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== activeIdRef.current) return c
+        const next = typeof updater === 'function' ? updater(c.messages) : updater
+        const title = c.title === 'New chat' ? titleFromMessages(next) || c.title : c.title
+        return { ...c, messages: next, title, updatedAt: Date.now() }
+      })
+    )
+  }
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+  useEffect(() => { scrollToBottom() }, [messages])
 
   useEffect(() => {
     localStorage.setItem('darkMode', darkMode)
-    if (darkMode) {
-      document.documentElement.classList.add('dark')
-    } else {
-      document.documentElement.classList.remove('dark')
-    }
+    document.documentElement.classList.toggle('dark', darkMode)
   }, [darkMode])
 
-  useEffect(() => {
-    const saved = localStorage.getItem('chatHistory')
-    if (saved) {
-      setMessages(JSON.parse(saved))
-    }
-  }, [])
-
-  useEffect(() => {
-    localStorage.setItem('chatHistory', JSON.stringify(messages))
-  }, [messages])
+  useEffect(() => { saveConversations(conversations) }, [conversations])
+  useEffect(() => { saveActiveId(activeId) }, [activeId])
+  useEffect(() => { localStorage.setItem('model', model) }, [model])
 
   const handleImageUpload = (e) => {
     const file = e.target.files[0]
@@ -57,7 +89,7 @@ export default function App() {
         setImagePreview(event.target.result)
         setImage({
           data: event.target.result.split(',')[1],
-          mediaType: file.type
+          mediaType: file.type,
         })
       }
       reader.readAsDataURL(file)
@@ -74,6 +106,9 @@ export default function App() {
     const assistantId = Date.now() + 1
     let appended = false        // have we added the placeholder to the list yet?
     let accumulated = ''        // full text so far (for error-rollback decisions)
+    let streamedText = ''       // text-only content (for caching)
+    let producedImage = false   // did this turn generate an image?
+    let routedModel = null      // which model the backend actually used
     let streamError = null      // terminal error reported by the backend
 
     const ensureAssistant = () => {
@@ -81,13 +116,14 @@ export default function App() {
       appended = true
       setMessages((prev) => [
         ...prev,
-        { id: assistantId, role: 'assistant', content: '' }
+        { id: assistantId, role: 'assistant', content: '' },
       ])
     }
 
     const appendDelta = (text) => {
       ensureAssistant()
       accumulated += text
+      streamedText += text
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantId ? { ...m, content: m.content + text } : m
@@ -99,6 +135,7 @@ export default function App() {
     const setAssistantImage = (b64, mediaType) => {
       ensureAssistant()
       accumulated += '[image]'
+      producedImage = true
       const url = `data:${mediaType || 'image/jpeg'};base64,${b64}`
       setMessages((prev) =>
         prev.map((m) => (m.id === assistantId ? { ...m, image: url } : m))
@@ -113,8 +150,8 @@ export default function App() {
           messages: history.map((m) => ({ role: m.role, content: m.content })),
           newMessage: payload.text,
           image: payload.image,
-          model: model
-        })
+          model: model,
+        }),
       })
 
       // Non-OK before streaming started (e.g. 400/500) — body may be JSON or NDJSON.
@@ -131,8 +168,9 @@ export default function App() {
 
       // Read the NDJSON stream: one JSON object per line.
       //   { delta }  -> append token
+      //   { image }  -> AI-generated image
+      //   { done }   -> terminal success (carries routed provider/model)
       //   { error }  -> terminal failure
-      //   { done }   -> terminal success
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
@@ -145,7 +183,7 @@ export default function App() {
         if (evt.delta) appendDelta(evt.delta)
         else if (evt.image) setAssistantImage(evt.image, evt.mediaType)
         else if (evt.error) streamError = evt.error
-        // evt.done -> nothing to do; loop ends when reader closes
+        else if (evt.done) routedModel = evt.model || null
       }
 
       while (true) {
@@ -172,6 +210,18 @@ export default function App() {
         }
       } else {
         setLastAttempt(null)
+        // Tag the reply with the model that actually answered (useful in Auto mode).
+        if (appended && routedModel) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, via: routedModel } : m))
+          )
+        }
+        // Usage: one chat request, plus an image if one was generated.
+        setUsage(bumpUsage({ chat: 1, image: producedImage ? 1 : 0 }))
+        // Cache plain text answers so identical prompts return instantly next time.
+        if (!producedImage && !payload.image && streamedText.trim()) {
+          setCached(cacheKey(model, history, payload.text), streamedText)
+        }
       }
     } catch (err) {
       // Network drop mid-stream: keep any partial content, but offer retry only
@@ -189,45 +239,97 @@ export default function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (loading) return // dedupe: never run two requests at once
     if (!input.trim() && !image) return
 
+    const text = input
     const userMessage = {
       id: Date.now(),
       role: 'user',
-      content: input,
-      image: imagePreview
+      content: text,
+      image: imagePreview,
     }
 
     // Snapshot the context (before adding this turn) and the new payload.
     const history = messages
-    const payload = { text: input, image: image }
+    const payload = { text, image: image }
 
     setMessages((prev) => [...prev, userMessage])
     setInput('')
     setImage(null)
     setImagePreview(null)
 
+    // Cache hit: serve an identical text-only, non-image prompt instantly (no request).
+    if (!image && !looksLikeImageRequest(text)) {
+      const cached = getCached(cacheKey(model, history, text))
+      if (cached) {
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now() + 1, role: 'assistant', content: cached, cached: true },
+        ])
+        return
+      }
+    }
+
     await sendToModel(history, payload)
   }
 
   const handleRetry = () => {
-    if (lastAttempt) {
-      sendToModel(lastAttempt.history, lastAttempt.payload)
-    }
+    if (lastAttempt) sendToModel(lastAttempt.history, lastAttempt.payload)
   }
 
   const clearHistory = () => {
-    if (window.confirm('Clear all chat history?')) {
-      setMessages([])
-    }
+    if (window.confirm('Clear this conversation?')) setMessages([])
   }
+
+  // ---- Conversation management ----
+  const startNewChat = () => {
+    const c = newConversation([])
+    setConversations((prev) => [c, ...prev])
+    setActiveId(c.id)
+    setSidebarOpen(false)
+    setError(null)
+  }
+
+  const selectChat = (id) => {
+    setActiveId(id)
+    setSidebarOpen(false)
+    setError(null)
+  }
+
+  const deleteChat = (id) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id)
+      if (next.length === 0) {
+        const fresh = newConversation([])
+        setActiveId(fresh.id)
+        return [fresh]
+      }
+      if (id === activeIdRef.current) setActiveId(next[0].id)
+      return next
+    })
+  }
+
+  const imageLimitHit = usage.image >= IMAGE_DAILY_SOFT_LIMIT
 
   return (
     <div className={darkMode ? 'dark' : ''}>
-      <div className={`flex flex-col h-screen ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+      <div className={`flex flex-col h-[100dvh] ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
         {/* Header */}
-        <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 py-3 flex items-center justify-between`}>
+        <div
+          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 pb-3 flex items-center justify-between`}
+          style={{ paddingTop: TOP_INSET }}
+        >
           <div className="flex items-center gap-1">
+            {tab === 'chat' && (
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-200 text-gray-600'}`}
+                aria-label="Chat history"
+              >
+                <Menu size={18} />
+              </button>
+            )}
             {[
               { id: 'chat', label: 'Chat', Icon: MessageSquare },
               { id: 'garden', label: 'Garden', Icon: Flower2 },
@@ -269,9 +371,9 @@ export default function App() {
 
         {tab === 'chat' && (
         <>
-        {/* Model Selector */}
+        {/* Model Selector + usage */}
         <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 py-2`}>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Model:</span>
             <select
               value={model}
@@ -282,9 +384,16 @@ export default function App() {
                   : 'bg-white border-gray-300 text-gray-900'
               }`}
             >
+              <option value="auto">Auto — smart routing</option>
               <option value="m3">MiniMax M3 — vision</option>
-             <option value="gemma">Gemma 4 — vision</option>
+              <option value="gemma">Gemma 4 — vision + images</option>
             </select>
+            <span
+              className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : darkMode ? 'text-gray-500' : 'text-gray-400'}`}
+              title={`Today's usage — resets daily. Image soft-limit ${IMAGE_DAILY_SOFT_LIMIT}/day to avoid throttling.`}
+            >
+              {usage.chat} chats · {usage.image} imgs{imageLimitHit ? ' ⚠' : ''}
+            </span>
           </div>
         </div>
 
@@ -312,6 +421,11 @@ export default function App() {
                       <img src={msg.image} alt="uploaded" className="max-w-xs rounded mb-2" />
                     )}
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    {msg.role === 'assistant' && (msg.via || msg.cached) && (
+                      <p className={`text-[10px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                        {msg.cached ? 'cached' : `via ${MODEL_LABELS[msg.via] || msg.via}`}
+                      </p>
+                    )}
                   </div>
                 </div>
               ))}
@@ -372,7 +486,10 @@ export default function App() {
         </div>
 
         {/* Input Area */}
-        <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-t p-4`}>
+        <div
+          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-t px-4 pt-4`}
+          style={{ paddingBottom: BOTTOM_INSET }}
+        >
           {imagePreview && (
             <div className="mb-3 flex items-center justify-between">
               <img src={imagePreview} alt="preview" className="h-16 rounded-lg" />
@@ -434,6 +551,83 @@ export default function App() {
           </form>
         </div>
         </>
+        )}
+
+        {/* Chat history sidebar */}
+        {sidebarOpen && (
+          <div className="fixed inset-0 z-30 flex">
+            <div
+              className="absolute inset-0 bg-black/40"
+              onClick={() => setSidebarOpen(false)}
+            />
+            <div
+              className={`relative w-72 max-w-[80%] h-full flex flex-col shadow-xl ${darkMode ? 'bg-gray-800' : 'bg-white'}`}
+              style={{ paddingTop: TOP_INSET }}
+            >
+              <div className={`flex items-center justify-between px-4 pb-3 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+                <span className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Chats</span>
+                <button
+                  onClick={() => setSidebarOpen(false)}
+                  className={`p-1.5 rounded-lg ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}
+                  aria-label="Close"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="p-3 flex flex-col gap-2 border-b border-dashed border-gray-300/40">
+                <button
+                  onClick={startNewChat}
+                  className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                >
+                  <Plus size={16} /> New chat
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => exportWord(activeConv?.title || 'chat', messages)}
+                    disabled={messages.length === 0}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 ${darkMode ? 'bg-gray-700 text-gray-200 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                  >
+                    <FileText size={14} /> Word
+                  </button>
+                  <button
+                    onClick={() => { if (!exportPdf(activeConv?.title || 'chat', messages)) alert('Allow pop-ups to export PDF.') }}
+                    disabled={messages.length === 0}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 ${darkMode ? 'bg-gray-700 text-gray-200 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                  >
+                    <Printer size={14} /> PDF
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-2">
+                {conversations.map((c) => (
+                  <div
+                    key={c.id}
+                    className={`group flex items-center gap-1 rounded-lg mb-1 ${
+                      c.id === activeId
+                        ? darkMode ? 'bg-gray-700' : 'bg-gray-100'
+                        : ''
+                    }`}
+                  >
+                    <button
+                      onClick={() => selectChat(c.id)}
+                      className={`flex-1 text-left px-3 py-2 text-sm truncate ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}
+                    >
+                      {c.title || 'New chat'}
+                    </button>
+                    <button
+                      onClick={() => deleteChat(c.id)}
+                      className={`p-1.5 mr-1 rounded ${darkMode ? 'text-gray-500 hover:text-red-400' : 'text-gray-400 hover:text-red-500'}`}
+                      aria-label="Delete chat"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

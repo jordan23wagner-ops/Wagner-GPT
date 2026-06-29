@@ -13,3 +13,6 @@ dist/
 
 .vercel
 .env*
+
+# local preview/dev config
+.claude/
