@@ -37,8 +37,9 @@ No Docker. No database server. No monthly bills.
 - **Response cache** — identical text prompts return instantly without an API call.
 - **Request deduplication** — prevents double-sends while in-flight.
 - **Usage monitor** — daily chat/image counts with early warning before soft-limits.
-- **Markdown rendering** — AI replies display with formatted headings, bold, italic, lists, and code.
-- **Dark mode** — global toggle, persisted.
+- **Markdown rendering** — replies display formatted headings, bold, italic, lists, **tables**, and scrollable **code blocks** (in chat and in exports).
+- **Response style** — a selector (Balanced / Quick answer / Info only / Code) injects a system prompt so replies match your preference — no unwanted code or long-winded walls of text.
+- **Themes** — 5 themes via the palette button: Light, Dark, Matte Yellow, Ocean, Rose. Text contrast is tuned per theme. Persisted.
 
 - **Web search** — toggle the globe in the input bar; current results (via Tavily) are injected into the answer with clickable source citations.
 - **Voice input** — tap the mic to dictate (Web Speech API; Chrome/Edge/Safari incl. iOS).
