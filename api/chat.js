@@ -45,10 +45,9 @@ export default async function handler(req, res) {
     // reasoning + reliable tool-calling; qwen3-coder is tuned for code. llama-3.3 is the
     // text-only NIM backstop for both.
     gptoss:   { ollama: 'gpt-oss:120b',            nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
-    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
-    // Candidates under evaluation (not yet in the dropdown) — heavier reasoning models.
-    glm:      { ollama: 'glm-5',                   nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
-    deepseek: { ollama: 'deepseek-v3.1:671b',      nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
+    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
+    // Evaluated glm-5 and deepseek-v3.1:671b — neither tag resolves on the free tier
+    // (both fall back to NIM) and DeepSeek is slow. gpt-oss:120b stays the smart pick.
   }
 
   // Resolve the effective model.
