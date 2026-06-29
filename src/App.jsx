@@ -13,6 +13,8 @@ import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
 import { Download } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
+import { hasSupabase } from './lib/supabase'
+import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
 
 // Inset so the header/input clear the phone's status bar (time/battery) and home
 // indicator. Harmless 0 on desktop; real values on notched phones (viewport-fit=cover).
@@ -82,6 +84,27 @@ export default function App() {
   useEffect(() => { saveConversations(conversations) }, [conversations])
   useEffect(() => { saveActiveId(activeId) }, [activeId])
   useEffect(() => { localStorage.setItem('model', model) }, [model])
+
+  // Supabase: pull remote conversations on mount, merge with local.
+  const [synced, setSynced] = useState(false)
+  useEffect(() => {
+    if (!hasSupabase) { setSynced(true); return }
+    syncConversationsDown(conversations).then((merged) => {
+      setConversations(merged)
+      setSynced(true)
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Push the active conversation to Supabase whenever it changes (debounced).
+  const pushTimerRef = useRef(null)
+  useEffect(() => {
+    if (!synced || !hasSupabase) return
+    clearTimeout(pushTimerRef.current)
+    pushTimerRef.current = setTimeout(() => {
+      const conv = conversations.find((c) => c.id === activeIdRef.current)
+      if (conv) syncConversationUp(conv)
+    }, 1500)
+  }, [conversations, synced])
 
   const handleImageUpload = (e) => {
     const file = e.target.files[0]
@@ -300,6 +323,7 @@ export default function App() {
   }
 
   const deleteChat = (id) => {
+    syncDeleteConversation(id)
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id)
       if (next.length === 0) {

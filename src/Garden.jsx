@@ -1,4 +1,4 @@
-import React, { useReducer, useEffect, useState } from 'react'
+import React, { useReducer, useEffect, useState, useRef } from 'react'
 import { Eraser, Trash2, Coins, Sparkles, Lock } from 'lucide-react'
 import {
   gardenReducer, initialGarden, key,
@@ -6,6 +6,8 @@ import {
   CATS, SPECIES, SPECIES_BY_ID, DECORATIONS,
   tileEmoji, growthStage, isHarvestable,
 } from './gardenReducer'
+import { hasSupabase } from './lib/supabase'
+import { syncGardenDown, syncGardenUp } from './lib/sync'
 
 const STORAGE_KEY = 'gardenState'
 
@@ -28,15 +30,28 @@ export default function Garden({ darkMode }) {
   const [flash, setFlash] = useState(null)
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) dispatch({ type: 'LOAD', state: JSON.parse(saved) })
-    } catch { /* ignore corrupt state */ }
-    setLoaded(true)
+    const init = async () => {
+      let local = null
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY)
+        if (saved) local = JSON.parse(saved)
+      } catch { /* ignore corrupt state */ }
+      // Merge with Supabase (latest wins), then load into reducer.
+      const merged = await syncGardenDown(local)
+      if (merged) dispatch({ type: 'LOAD', state: merged })
+      setLoaded(true)
+    }
+    init()
   }, [])
 
+  // Persist locally + push to Supabase (debounced).
+  const gardenPushRef = useRef(null)
   useEffect(() => {
-    if (loaded) localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    if (!loaded) return
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    if (!hasSupabase) return
+    clearTimeout(gardenPushRef.current)
+    gardenPushRef.current = setTimeout(() => syncGardenUp(state), 2000)
   }, [state, loaded])
 
   // Repaint periodically so timestamp-derived growth advances on screen.
