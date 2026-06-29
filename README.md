@@ -42,6 +42,8 @@ No Docker. No database server. No monthly bills.
 
 - **Web search** — toggle the globe in the input bar; current results (via Tavily) are injected into the answer with clickable source citations.
 - **Voice input** — tap the mic to dictate (Web Speech API; Chrome/Edge/Safari incl. iOS).
+- **Voice output (TTS)** — a "Listen" button on each reply reads it aloud via the browser's built-in SpeechSynthesis (free, no key).
+- **Document input** — upload a PDF, Word (.docx), CSV, or text file; it's parsed in the browser and the model can summarize, answer about, or rewrite it. Pairs with Word/PDF export for a full "upload résumé → improve it → download" loop. Parsers (pdf.js, mammoth, papaparse) are lazy-loaded so they don't affect startup.
 
 ### Models
 
@@ -128,6 +130,7 @@ wife-gpt/
 │   │   ├── usage.js            # Daily usage counters + soft limits
 │   │   ├── exportChat.js       # Document export: per-reply + whole-chat
 │   │   ├── renderMarkdown.js   # Markdown to HTML for chat bubbles
+│   │   ├── parseDocument.js    # Client-side PDF/Word/CSV/text extraction (lazy-loaded)
 │   │   ├── supabase.js         # Supabase client
 │   │   └── sync.js             # Local-first sync (localStorage + Supabase)
 │   ├── main.jsx
