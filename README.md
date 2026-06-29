@@ -1,89 +1,162 @@
-# Wagner-GPT — Free AI Chat PWA
+# Wagner-GPT
 
-A mobile-first Progressive Web App for free AI chat with **live token streaming**, **photo upload (vision)**, and **AI image generation**. Chat models are served by **Ollama Cloud** (primary, free) with **NVIDIA NIM** as an automatic fallback; image generation runs on NIM's **FLUX.1-dev**.
+A **100% free** AI assistant PWA with chat, document creation, image generation, and a garden farming game. Mobile-first, serverless, zero monthly cost.
 
-## Features
+**Live:** https://wagner-gpt.vercel.app
 
-- 📱 **Mobile-first PWA** — Add to home screen, works like an app
-- ⚡ **Streaming responses** — Tokens appear live as the model generates them (no waiting for the full reply)
-- 🖼️ **Vision** — Upload a photo and ask about it; both models can analyze images
-- 🎨 **Image generation** — Ask the model to "draw" or "create an image of" something; it calls a `generate_image` tool wired to NIM's FLUX.1-dev and returns the picture inline
-- 🔄 **Model switching** — Toggle between two vision-capable models
-- 🔁 **Provider fallback** — Ollama Cloud first; if it fails before streaming, falls back to NIM
-- 📚 **Chat history** — Saved locally in the browser
-- 🌙 **Dark mode** — Eye-friendly night theme
-- 🆓 **Free tier** — Ollama Cloud, no per-token billing
+## What It Does
 
-> **Two kinds of images, don't confuse them:** the chat models are vision *input* models (photo → text) — they read images you upload. *Creating* an image from a prompt is handled separately: the chat model calls the `generate_image` tool, which runs the prompt through NIM's FLUX.1-dev and streams back a JPEG. Image generation requires a `NVIDIA_NIM_KEY` and uses NIM credits (chat stays on free Ollama).
+- **AI Chat** with live token streaming — responses appear word-by-word as they generate
+- **Document creation** — ask the AI to write a resume, to-do list, letter, or any document, then tap **Word** or **PDF** to download it with proper formatting
+- **Image generation** — ask "draw a sunset" or "create a picture of a garden" and get a 1024x1024 image inline in chat
+- **Photo analysis (vision)** — upload a photo and ask "what's in this?" — the AI describes what it sees
+- **Garden game** — a farming economy with 40 real plant species, coins, harvestable plots, and decorations
+- **Cloud sync** — chat history and garden state persist across devices via Supabase
+- **Works offline** — installable PWA with service worker
 
-## Models
+## Stack
 
-The dropdown exposes two options. Each tries Ollama Cloud first, then NIM:
+| Layer | Technology | Cost |
+|---|---|---|
+| Frontend | React 18 + Vite + Tailwind CSS | Free |
+| Backend | Vercel serverless functions | Free (Hobby) |
+| Chat AI | Ollama Cloud (primary) + NVIDIA NIM (fallback) | Free tier |
+| Image gen | NVIDIA NIM FLUX.1-dev + HuggingFace FLUX.1-schnell (fallback) | Free tier / free forever |
+| Storage | Browser localStorage (fast) + Supabase Postgres (durable) | Free tier |
+| Hosting | Vercel, auto-deploys on push to `main` | Free (Hobby) |
 
-| Dropdown value | Ollama Cloud tag | NIM fallback ID          | Vision |
-|----------------|------------------|--------------------------|:------:|
-| `m3`           | `minimax-m3`     | `minimaxai/minimax-m3`        |   ✅   |
-| `gemma`        | `gemma4:31b`     | `meta/llama-3.3-70b-instruct` |   ✅   |
+No Docker. No database server. No monthly bills.
 
-> Ollama Cloud tags must match exactly what `GET https://ollama.com/api/tags` returns
-> for the account (no `:cloud` suffix). NIM fallback IDs must be live in the catalog at
-> `https://integrate.api.nvidia.com/v1/models` — retired models return `410 Gone`.
+## Chat
 
-> Earlier builds listed DeepSeek V4 Flash/Pro. Those are heavy **reasoning** models that don't emit a first token within Vercel's function timeout, so requests timed out. They were replaced with fast, vision-capable models that stream quickly.
+- **Auto routing** (default) — classifies each prompt: MiniMax M3 for reasoning/coding/math, Gemma 4 for creative/casual/vision. Manual model override available.
+- **Image requests always work** — even if MiniMax M3 is manually selected, image prompts auto-route to Gemma 4, the model that reliably calls the image generation tool.
+- **Streaming** — NDJSON protocol delivers tokens incrementally.
+- **Provider fallback** — Ollama Cloud primary, NVIDIA NIM fallback (per-model, before first token).
+- **Multiple conversations** — slide-in sidebar to create, switch, and delete chats.
+- **Response cache** — identical text prompts return instantly without an API call.
+- **Request deduplication** — prevents double-sends while in-flight.
+- **Usage monitor** — daily chat/image counts with early warning before soft-limits.
+- **Markdown rendering** — AI replies display with formatted headings, bold, italic, lists, and code.
+- **Dark mode** — global toggle, persisted.
+
+### Models
+
+| Dropdown | Ollama Cloud | NIM Fallback | Vision |
+|---|---|---|:---:|
+| Auto (default) | routes to best fit | per-model | Yes |
+| MiniMax M3 | `minimax-m3` | `minimaxai/minimax-m3` | Yes |
+| Gemma 4 | `gemma4:31b` | `meta/llama-3.3-70b-instruct` | Yes |
+
+## Document Export
+
+Every assistant reply has **Word** and **PDF** buttons underneath:
+
+- **Word** — downloads a `.doc` file. On mobile, opens in Word / Google Docs / Pages or saves to Files.
+- **PDF** — opens a styled page and auto-triggers the print/save-as-PDF dialog.
+- **Whole-chat export** — Word/PDF of the full conversation from the history sidebar.
+- Markdown (headings, bold, italic, lists) is converted to proper HTML formatting in both the chat display and exports.
+
+## Image Generation
+
+- **Tool-calling** — the chat model decides when to generate an image by calling a `generate_image` tool. No brittle keyword matching.
+- **Two providers** — NVIDIA NIM FLUX.1-dev (faster, higher quality) with HuggingFace FLUX.1-schnell as automatic fallback when NIM credits run out.
+- **Inline** — generated images appear directly in the chat bubble.
+
+## Garden Game
+
+A farming economy where you grow plants, harvest them for coins, and expand your garden:
+
+- **40 real species** across 4 categories, each a dropdown of 10 tiers (free starter to expensive):
+  - **Flowers** (consumed on harvest): Daisy, Marigold, Tulip, Lavender, Sunflower, Hibiscus, Cherry Blossom, Rose, Lotus, Dahlia
+  - **Plants** (consumed on harvest): Lettuce, Carrot, Onion, Garlic, Potato, Tomato, Pepper, Corn, Eggplant, Pumpkin
+  - **Bushes** (perennial — regrow after harvest): Boxwood, Holly, Blueberry, Raspberry, Currant, Gooseberry, Hydrangea, Azalea, Rosemary, Blackberry
+  - **Trees** (perennial — regrow after harvest): Maple, Almond, Olive, Fig, Pear, Apple, Peach, Cherry, Orange, Lemon
+- **Stacked 4x4 plots** — start with one, buy up to 9 more for rising prices (150 to 16,000 coins).
+- **No fail states** — plants never wither. Growth is timestamp-based and advances while the app is closed.
+- **6 free decorations** — Fence, Bench, Fountain, Lantern, Pot, Stepping Stone.
+
+## Persistence
+
+- **localStorage** — fast local cache for everything (chat, garden, settings).
+- **Supabase cloud sync** — conversations and garden state sync to Postgres in the background. Open the app on a new device or browser and everything loads from the cloud.
+- **Local-first** — works fully offline; Supabase syncs when available.
 
 ## Architecture
 
 ```
-Browser (React)  ──POST /api/chat──►  Vercel serverless (api/chat.js)
-       ▲                                      │
-       │  NDJSON stream                       ├─1─►  Ollama Cloud  (primary, free)
-       │  {"delta":"..."}                     │      https://ollama.com/api/chat
-       │  {"done":true,"provider":"..."}      │      NDJSON stream: {message:{content}}
-       └──────────────────────────────────────┘
-                                              └─2─►  NVIDIA NIM    (fallback)
-                                                     OpenAI-compatible SSE
-                                                     data: {choices[0].delta.content}
+Browser (React PWA)
+  |
+  |-- Chat --POST /api/chat--> Vercel serverless (api/chat.js)
+  |   ^                            |
+  |   | NDJSON stream              |--1--> Ollama Cloud (free, primary)
+  |   | {"delta":"..."}            |--2--> NVIDIA NIM   (fallback)
+  |   | {"image":"<b64>"}          |
+  |   | {"done":true}              '-- Image tool call:
+  |   '----------------------------     |--1--> NIM FLUX.1-dev
+  |                                     '--2--> HuggingFace FLUX.1-schnell
+  |-- localStorage (fast cache)
+  |
+  '-- Supabase Postgres (cloud sync)
 ```
 
-**Streaming protocol (server → client), newline-delimited JSON:**
+**Streaming protocol (NDJSON, server to client):**
 
-- `{"delta":"token text"}` — one or more, as tokens arrive
-- `{"image":"<base64 jpeg>","mediaType":"image/jpeg","prompt":"..."}` — an AI-generated image (sent when the model calls `generate_image`)
-- `{"done":true,"provider":"ollama"}` — terminal success
-- `{"error":"message"}` — terminal failure (only sent if nothing streamed yet)
+| Event | Meaning |
+|---|---|
+| `{"delta":"text"}` | Token chunk (zero or more) |
+| `{"image":"<base64>","mediaType":"image/jpeg","prompt":"..."}` | AI-generated image |
+| `{"done":true,"provider":"ollama","model":"gemma"}` | Terminal success |
+| `{"error":"message"}` | Terminal failure (only if nothing streamed yet) |
 
-**Fallback rule:** the function can only switch providers *before* the first token is flushed (HTTP headers commit on first write). Once Ollama starts streaming, NIM is no longer an option for that request.
+## File Structure
 
-## Configuration
-
-### Environment variables (Vercel → Settings → Environment Variables)
-
-| Variable           | Required | Purpose                                  |
-|--------------------|----------|------------------------------------------|
-| `OLLAMA_CLOUD_KEY` | Yes      | Ollama Cloud auth (primary provider)     |
-| `NVIDIA_NIM_KEY`   | Optional | NIM fallback; `nvapi-...` from build.nvidia.com |
-
-If only one key is set, only that provider is used.
-
-### `vercel.json`
-
-The chat function needs a longer timeout than the Hobby default (10s) so the first
-token has time to arrive:
-
-```json
-{
-  "functions": {
-    "api/chat.js": { "maxDuration": 60 }
-  }
-}
+```
+wife-gpt/
+├── src/
+│   ├── App.jsx                 # Chat UI, tabs, sidebar, model selector, usage
+│   ├── Garden.jsx              # Garden tab: plots, seed shop, harvesting
+│   ├── gardenReducer.js        # Species catalog, prices, growth, reducer
+│   ├── lib/
+│   │   ├── conversations.js    # Multi-conversation history + localStorage
+│   │   ├── cache.js            # Response cache + image-intent detection
+│   │   ├── usage.js            # Daily usage counters + soft limits
+│   │   ├── exportChat.js       # Document export: per-reply + whole-chat
+│   │   ├── renderMarkdown.js   # Markdown to HTML for chat bubbles
+│   │   ├── supabase.js         # Supabase client
+│   │   └── sync.js             # Local-first sync (localStorage + Supabase)
+│   ├── main.jsx
+│   └── index.css
+├── api/
+│   └── chat.js                 # Serverless: routing, streaming, tool-calling, image gen
+├── public/
+│   ├── sw.js                   # Service worker (network-first pages, cache-first assets)
+│   └── manifest.json
+├── supabase-schema.sql         # Database schema (run in Supabase SQL Editor)
+├── index.html
+├── vite.config.js
+├── tailwind.config.js
+├── vercel.json                 # maxDuration 60s for chat function
+└── package.json
 ```
 
-## Deploy to Vercel
+## Environment Variables (Vercel)
 
-1. Push to GitHub.
-2. Import the repo at [vercel.com/new](https://vercel.com/new).
-3. Add `OLLAMA_CLOUD_KEY` (and optionally `NVIDIA_NIM_KEY`) under Environment Variables.
-4. Deploy. Live in ~2 minutes.
+| Variable | Required | Purpose |
+|---|---|---|
+| `OLLAMA_CLOUD_KEY` | Yes | Ollama Cloud chat (primary) |
+| `NVIDIA_NIM_KEY` | Yes | NIM chat fallback + image generation (FLUX.1-dev) |
+| `HUGGINGFACE_KEY` | Recommended | HuggingFace image fallback (free forever, fires when NIM 403s) |
+
+Supabase credentials are embedded in the frontend bundle (publishable anon key — this is standard Supabase practice, same as Stripe's publishable key).
+
+## Deploy
+
+1. Push to GitHub: `git push origin main`
+2. Import at [vercel.com/new](https://vercel.com/new)
+3. Add environment variables (see table above)
+4. Run `supabase-schema.sql` in the Supabase SQL Editor to create tables
+5. Live in ~2 minutes. Auto-deploys on every push to `main`.
 
 ## Local Development
 
@@ -94,74 +167,17 @@ npm run dev
 
 Visit `http://localhost:5173`.
 
-## Verify streaming (curl)
-
-PowerShell — put the body in a file to avoid quoting issues:
-
-```powershell
-'{"model":"m3","messages":[],"newMessage":"say hi"}' | Out-File -Encoding ascii body.json
-curl.exe -i -N -X POST https://<your-app>.vercel.app/api/chat -H "Content-Type: application/json" -d "@body.json"
-```
-
-Expect `{"delta":...}` lines arriving incrementally, then `{"done":true,"provider":"ollama"}`.
-
 ## Troubleshooting
 
-**Request hangs, then 504 `FUNCTION_INVOCATION_TIMEOUT`**
-- The selected model isn't producing a first token within `maxDuration`. Heavy
-  reasoning ("thinking") models do this. Use a fast model, or raise `maxDuration`
-  (Hobby max 60s, Pro up to 300s).
+**Blank page after deploy:** Service worker cached an old build. Clear site data in browser settings, or close and reopen the tab 2-3 times (the network-first SW self-heals).
 
-**`Unknown model: <x>`**
-- The dropdown value in `App.jsx` doesn't match a key in `MODEL_MAP` in `api/chat.js`.
-  Keep the two in sync.
+**"All available models failed":** API keys expired or revoked. Regenerate at [ollama.com/settings/keys](https://ollama.com/settings/keys) or [build.nvidia.com](https://build.nvidia.com) and update in Vercel. A redeploy is required after changing env vars.
 
-**`NIM: 404 page not found` in the error**
-- Ollama failed and the NIM fallback ID is wrong/unavailable. Fix the `nim:` ID in
-  `MODEL_MAP`, or rely on Ollama only.
+**Image generation fails:** NIM credits depleted. The HuggingFace fallback should catch this automatically. If both fail, request more NIM credits (free) at the [NVIDIA developer forum](https://forums.developer.nvidia.com).
 
-**Empty response / nothing streams**
-- Confirm the latest commit is the live Vercel production deploy.
-- Hard-refresh the browser (`Ctrl+Shift+R`) to clear a cached build.
+**Garden plants not growing:** Close and reopen the tab. Growth is timestamp-based and catches up on reload.
 
-**Rate limit errors (429)**
-- Built-in retry with exponential backoff handles transient 429/5xx. Persistent
-  limits: wait ~60s.
-
-## What's Included
-
-```
-wife-gpt/
-├── src/
-│   ├── App.jsx           (Chat UI + streaming reader)
-│   ├── main.jsx          (React entry)
-│   └── index.css         (Tailwind base)
-├── api/
-│   └── chat.js           (Serverless fn: streams Ollama/NIM as NDJSON)
-├── public/
-│   ├── sw.js             (Service worker for PWA)
-│   └── manifest.json     (PWA metadata)
-├── index.html
-├── vite.config.js
-├── tailwind.config.js
-├── postcss.config.js
-├── vercel.json           (maxDuration config)
-└── package.json
-```
-
-## API Reference
-
-**Ollama Cloud (primary):**
-- Endpoint: `https://ollama.com/api/chat`
-- Auth: `Authorization: Bearer $OLLAMA_CLOUD_KEY`
-- Streaming: `stream: true` → NDJSON, `{message:{content}}` per line
-- Vision: images sent as a separate `images: [base64]` array on the message
-
-**NVIDIA NIM (fallback):**
-- Endpoint: `https://integrate.api.nvidia.com/v1/chat/completions`
-- Auth: `Authorization: Bearer $NVIDIA_NIM_KEY`
-- OpenAI-compatible; `stream: true` → SSE, `data: {choices[0].delta.content}`
-- Text only (images stripped before the request)
+**Chat history lost after clearing browser data:** With Supabase configured, reopen the app and conversations reload from the cloud automatically.
 
 ## License
 
