@@ -11,8 +11,9 @@ import {
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
 import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
-import { Download, Globe, Mic } from 'lucide-react'
+import { Download, Globe, Mic, FileUp, Volume2, Square, Loader2 } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
+import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
 
@@ -49,8 +50,12 @@ export default function App() {
   const [lastAttempt, setLastAttempt] = useState(null)
   const [webSearch, setWebSearch] = useState(() => localStorage.getItem('webSearch') === 'true')
   const [listening, setListening] = useState(false)
+  const [doc, setDoc] = useState(null)          // { name, text, chars, truncated }
+  const [docLoading, setDocLoading] = useState(false)
+  const [speakingId, setSpeakingId] = useState(null) // id of the reply being read aloud
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
+  const docInputRef = useRef(null)
   const recognitionRef = useRef(null)
 
   // Web Speech API — present on Chrome/Edge/Safari (incl. iOS), absent on Firefox.
@@ -114,6 +119,47 @@ export default function App() {
     recognitionRef.current = rec
     setListening(true)
     rec.start()
+  }
+
+  // Text-to-speech via the browser's built-in SpeechSynthesis. Reads a reply aloud;
+  // tapping again (or starting another) stops it.
+  const ttsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+  const speak = (id, text) => {
+    if (!ttsSupported) return
+    window.speechSynthesis.cancel()
+    if (speakingId === id) { setSpeakingId(null); return }
+    // Strip markdown so it reads naturally, not "asterisk asterisk".
+    const clean = String(text || '')
+      .replace(/[#*`_>]/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .slice(0, 4000)
+    const u = new SpeechSynthesisUtterance(clean)
+    u.onend = () => setSpeakingId((cur) => (cur === id ? null : cur))
+    u.onerror = () => setSpeakingId((cur) => (cur === id ? null : cur))
+    setSpeakingId(id)
+    window.speechSynthesis.speak(u)
+  }
+
+  // Document upload: parse client-side to text and attach it to the next message.
+  const handleDocUpload = async (e) => {
+    const file = e.target.files[0]
+    e.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    if (!isSupportedDocument(file)) {
+      setError('Unsupported file. Try PDF, Word (.docx), CSV, or a text file.')
+      return
+    }
+    setDocLoading(true)
+    setError(null)
+    try {
+      const parsed = await parseDocument(file)
+      setDoc(parsed)
+    } catch (err) {
+      setError(err.message || 'Could not read that document.')
+      setDoc(null)
+    } finally {
+      setDocLoading(false)
+    }
   }
 
   // Supabase: pull remote conversations on mount, merge with local.
@@ -203,9 +249,14 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          // Re-attach any document text from prior turns so follow-ups keep context.
+          messages: history.map((m) => ({
+            role: m.role,
+            content: m.docText ? `${m.content}\n\n[Attached document: ${m.docName}]\n${m.docText}` : m.content,
+          })),
           newMessage: payload.text,
           image: payload.image,
+          document: payload.document,
           model: model,
           webSearch: webSearch,
         }),
@@ -298,7 +349,7 @@ export default function App() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (loading) return // dedupe: never run two requests at once
-    if (!input.trim() && !image) return
+    if (!input.trim() && !image && !doc) return
 
     const text = input
     const userMessage = {
@@ -306,19 +357,24 @@ export default function App() {
       role: 'user',
       content: text,
       image: imagePreview,
+      // Keep the document text on the message so follow-up turns retain context,
+      // but display only the filename chip (docText is hidden from the bubble).
+      docName: doc ? doc.name : undefined,
+      docText: doc ? doc.text : undefined,
     }
 
     // Snapshot the context (before adding this turn) and the new payload.
     const history = messages
-    const payload = { text, image: image }
+    const payload = { text, image: image, document: doc ? { name: doc.name, text: doc.text } : null }
 
     setMessages((prev) => [...prev, userMessage])
     setInput('')
     setImage(null)
     setImagePreview(null)
+    setDoc(null)
 
-    // Cache hit: serve an identical text-only, non-image prompt instantly (no request).
-    if (!image && !webSearch && !looksLikeImageRequest(text)) {
+    // Cache hit: serve an identical text-only, non-image, non-doc prompt instantly.
+    if (!image && !doc && !webSearch && !looksLikeImageRequest(text)) {
       const cached = getCached(cacheKey(model, history, text))
       if (cached) {
         setMessages((prev) => [
@@ -481,10 +537,15 @@ export default function App() {
                     {msg.image && (
                       <img src={msg.image} alt="uploaded" className="max-w-xs rounded mb-2" />
                     )}
+                    {msg.docName && (
+                      <div className="flex items-center gap-1.5 mb-2 text-xs opacity-90">
+                        <FileUp size={13} /> <span className="truncate">{msg.docName}</span>
+                      </div>
+                    )}
                     {msg.role === 'assistant' ? (
                       <div className="text-sm prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
                     ) : (
-                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                      msg.content && <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     )}
                     {msg.role === 'assistant' && (msg.via || msg.cached) && (
                       <p className={`text-[10px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -493,6 +554,20 @@ export default function App() {
                     )}
                     {msg.role === 'assistant' && msg.content && msg.content.length > 20 && !loading && (
                       <div className="flex gap-1.5 mt-2 pt-1.5 border-t border-current/10">
+                        {ttsSupported && (
+                          <button
+                            onClick={() => speak(msg.id, msg.content)}
+                            className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${
+                              speakingId === msg.id
+                                ? 'bg-blue-500 text-white'
+                                : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'
+                            }`}
+                            title={speakingId === msg.id ? 'Stop reading' : 'Read aloud'}
+                          >
+                            {speakingId === msg.id ? <Square size={12} /> : <Volume2 size={12} />}
+                            {speakingId === msg.id ? 'Stop' : 'Listen'}
+                          </button>
+                        )}
                         <button
                           onClick={() => exportReplyWord(msg.content)}
                           className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'}`}
@@ -587,6 +662,26 @@ export default function App() {
               </button>
             </div>
           )}
+          {(doc || docLoading) && (
+            <div className={`mb-3 flex items-center justify-between gap-2 px-3 py-2 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`}>
+              <div className="flex items-center gap-2 min-w-0">
+                {docLoading
+                  ? <Loader2 size={16} className="animate-spin shrink-0" />
+                  : <FileUp size={16} className="shrink-0 text-blue-500" />}
+                <span className={`text-sm truncate ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>
+                  {docLoading ? 'Reading document…' : `${doc.name}${doc.truncated ? ' (truncated)' : ''}`}
+                </span>
+              </div>
+              {doc && (
+                <button
+                  onClick={() => setDoc(null)}
+                  className={`text-sm px-2 py-1 rounded shrink-0 ${darkMode ? 'bg-gray-600 text-red-400' : 'bg-gray-300 text-red-600'}`}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          )}
           {/* Web search toggle */}
           <div className="mb-2 flex items-center gap-2">
             <button
@@ -618,6 +713,22 @@ export default function App() {
             >
               <Paperclip size={20} />
             </button>
+            <input
+              type="file"
+              ref={docInputRef}
+              onChange={handleDocUpload}
+              accept=".pdf,.docx,.csv,.txt,.md,.markdown,.json,.log,text/*"
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => docInputRef.current?.click()}
+              disabled={docLoading}
+              className={`p-2 rounded-lg shrink-0 ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'} disabled:opacity-50`}
+              aria-label="Upload document"
+            >
+              {docLoading ? <Loader2 size={20} className="animate-spin" /> : <FileUp size={20} />}
+            </button>
             {speechSupported && (
               <button
                 type="button"
@@ -646,9 +757,9 @@ export default function App() {
             />
             <button
               type="submit"
-              disabled={loading || (!input.trim() && !image)}
+              disabled={loading || (!input.trim() && !image && !doc)}
               className={`p-2 rounded-lg shrink-0 ${
-                loading || (!input.trim() && !image)
+                loading || (!input.trim() && !image && !doc)
                   ? darkMode
                     ? 'bg-gray-700 text-gray-500'
                     : 'bg-gray-200 text-gray-400'

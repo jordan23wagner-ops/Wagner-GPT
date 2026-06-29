@@ -21,7 +21,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { messages, newMessage, image, model, webSearch } = req.body
+  const { messages, newMessage, image, model, webSearch, document } = req.body
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
@@ -101,10 +101,18 @@ export default async function handler(req, res) {
         ]
       : newMessage
   }
-  // Prepend search results as a system message when we have them.
-  const fullMessages = searchData
-    ? [buildSearchSystem(newMessage, searchData), ...history, userTurn]
-    : [...history, userTurn]
+  // Prepend any context system messages (attached document, then web search).
+  const systemMsgs = []
+  if (document && document.text) {
+    systemMsgs.push({
+      role: 'system',
+      content:
+        `The user attached a document named "${document.name}". Use its contents to ` +
+        `answer, summarize, or rewrite as asked. Document contents:\n\n${document.text}`,
+    })
+  }
+  if (searchData) systemMsgs.push(buildSearchSystem(newMessage, searchData))
+  const fullMessages = [...systemMsgs, ...history, userTurn]
 
   // Stream headers. We commit these immediately; everything after is NDJSON chunks.
   res.statusCode = 200
