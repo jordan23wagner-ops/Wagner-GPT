@@ -11,7 +11,7 @@ import {
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
 import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
-import { Download } from 'lucide-react'
+import { Download, Globe, Mic } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
@@ -21,7 +21,7 @@ import { syncConversationsDown, syncConversationUp, syncDeleteConversation } fro
 const TOP_INSET = 'calc(env(safe-area-inset-top, 0px) + 0.75rem)'
 const BOTTOM_INSET = 'calc(env(safe-area-inset-bottom, 0px) + 1rem)'
 
-const MODEL_LABELS = { auto: 'Auto', m3: 'MiniMax M3', gemma: 'Gemma 4' }
+const MODEL_LABELS = { auto: 'Auto', m3: 'MiniMax M3', gemma: 'Gemma 4', gptoss: 'GPT-OSS 120B', qwen: 'Qwen3 Coder' }
 
 export default function App() {
   // Load conversations once and derive the active id from the SAME instance — a fresh
@@ -47,8 +47,15 @@ export default function App() {
   const [imagePreview, setImagePreview] = useState(null)
   const [error, setError] = useState(null)
   const [lastAttempt, setLastAttempt] = useState(null)
+  const [webSearch, setWebSearch] = useState(() => localStorage.getItem('webSearch') === 'true')
+  const [listening, setListening] = useState(false)
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
+  const recognitionRef = useRef(null)
+
+  // Web Speech API — present on Chrome/Edge/Safari (incl. iOS), absent on Firefox.
+  const speechSupported = typeof window !== 'undefined' &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition)
 
   // Keep the active id reachable inside async stream closures without stale capture.
   const activeIdRef = useRef(activeId)
@@ -84,6 +91,30 @@ export default function App() {
   useEffect(() => { saveConversations(conversations) }, [conversations])
   useEffect(() => { saveActiveId(activeId) }, [activeId])
   useEffect(() => { localStorage.setItem('model', model) }, [model])
+  useEffect(() => { localStorage.setItem('webSearch', webSearch) }, [webSearch])
+
+  // Voice input via the Web Speech API. Live interim transcript fills the input;
+  // tapping the mic again (or the API ending) stops it.
+  const toggleVoice = () => {
+    if (!speechSupported) return
+    if (listening) { recognitionRef.current?.stop(); return }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    const rec = new SR()
+    rec.lang = 'en-US'
+    rec.interimResults = true
+    rec.continuous = false
+    const base = input ? input.trim() + ' ' : ''
+    rec.onresult = (e) => {
+      let transcript = ''
+      for (let i = 0; i < e.results.length; i++) transcript += e.results[i][0].transcript
+      setInput(base + transcript)
+    }
+    rec.onend = () => { setListening(false); recognitionRef.current = null }
+    rec.onerror = () => { setListening(false); recognitionRef.current = null }
+    recognitionRef.current = rec
+    setListening(true)
+    rec.start()
+  }
 
   // Supabase: pull remote conversations on mount, merge with local.
   const [synced, setSynced] = useState(false)
@@ -176,6 +207,7 @@ export default function App() {
           newMessage: payload.text,
           image: payload.image,
           model: model,
+          webSearch: webSearch,
         }),
       })
 
@@ -244,7 +276,8 @@ export default function App() {
         // Usage: one chat request, plus an image if one was generated.
         setUsage(bumpUsage({ chat: 1, image: producedImage ? 1 : 0 }))
         // Cache plain text answers so identical prompts return instantly next time.
-        if (!producedImage && !payload.image && streamedText.trim()) {
+        // Never cache web-search answers — they're time-sensitive.
+        if (!producedImage && !payload.image && !webSearch && streamedText.trim()) {
           setCached(cacheKey(model, history, payload.text), streamedText)
         }
       }
@@ -285,7 +318,7 @@ export default function App() {
     setImagePreview(null)
 
     // Cache hit: serve an identical text-only, non-image prompt instantly (no request).
-    if (!image && !looksLikeImageRequest(text)) {
+    if (!image && !webSearch && !looksLikeImageRequest(text)) {
       const cached = getCached(cacheKey(model, history, text))
       if (cached) {
         setMessages((prev) => [
@@ -413,6 +446,8 @@ export default function App() {
               <option value="auto">Auto — smart routing</option>
               <option value="m3">MiniMax M3 — vision</option>
               <option value="gemma">Gemma 4 — vision + images</option>
+              <option value="gptoss">GPT-OSS 120B — smartest</option>
+              <option value="qwen">Qwen3 Coder — coding</option>
             </select>
             <span
               className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : darkMode ? 'text-gray-500' : 'text-gray-400'}`}
@@ -552,7 +587,22 @@ export default function App() {
               </button>
             </div>
           )}
-          <form onSubmit={handleSubmit} className="flex gap-2">
+          {/* Web search toggle */}
+          <div className="mb-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setWebSearch((v) => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                webSearch
+                  ? 'bg-blue-500 text-white border-blue-500'
+                  : darkMode ? 'bg-gray-700 text-gray-300 border-gray-600' : 'bg-gray-100 text-gray-600 border-gray-200'
+              }`}
+              title="Search the web for current information"
+            >
+              <Globe size={13} /> Web search {webSearch ? 'on' : 'off'}
+            </button>
+          </div>
+          <form onSubmit={handleSubmit} className="flex gap-1.5">
             <input
               type="file"
               ref={fileInputRef}
@@ -563,17 +613,31 @@ export default function App() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+              className={`p-2 rounded-lg shrink-0 ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
               aria-label="Upload image"
             >
               <Paperclip size={20} />
             </button>
+            {speechSupported && (
+              <button
+                type="button"
+                onClick={toggleVoice}
+                className={`p-2 rounded-lg shrink-0 ${
+                  listening
+                    ? 'bg-red-500 text-white animate-pulse'
+                    : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                }`}
+                aria-label={listening ? 'Stop voice input' : 'Start voice input'}
+              >
+                <Mic size={20} />
+              </button>
+            )}
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Type a message..."
-              className={`flex-1 px-4 py-2 rounded-lg border ${
+              placeholder={listening ? 'Listening…' : 'Type a message...'}
+              className={`flex-1 min-w-0 px-4 py-2 rounded-lg border ${
                 darkMode
                   ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400'
                   : 'bg-white border-gray-300 text-gray-900'
@@ -583,7 +647,7 @@ export default function App() {
             <button
               type="submit"
               disabled={loading || (!input.trim() && !image)}
-              className={`p-2 rounded-lg ${
+              className={`p-2 rounded-lg shrink-0 ${
                 loading || (!input.trim() && !image)
                   ? darkMode
                     ? 'bg-gray-700 text-gray-500'

@@ -21,11 +21,12 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { messages, newMessage, image, model } = req.body
+  const { messages, newMessage, image, model, webSearch } = req.body
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
   const HUGGINGFACE_KEY = process.env.HUGGINGFACE_KEY
+  const TAVILY_KEY = process.env.TAVILY_KEY
 
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
@@ -39,7 +40,12 @@ export default async function handler(req, res) {
     m3:       { ollama: 'minimax-m3',              nim: 'minimaxai/minimax-m3',          order: ['ollama', 'nim'] },
     // NIM fallback is text-only (images are stripped), so gemma's backstop is just a
     // reliable text model. The NIM gemma deployments 404/time-out; llama-3.3 is steady.
-    gemma:    { ollama: 'gemma4:31b',              nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
+    gemma:    { ollama: 'gemma4:31b',              nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
+    // Smarter free Ollama Cloud models (no vision). gpt-oss is a fast MoE with strong
+    // reasoning + reliable tool-calling; qwen3-coder is tuned for code. llama-3.3 is the
+    // text-only NIM backstop for both.
+    gptoss:   { ollama: 'gpt-oss:120b',            nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
+    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
   }
 
   // Resolve the effective model.
@@ -60,6 +66,17 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: `Unknown model: ${model}` })
   }
 
+  // Optional web search (Tavily): run BEFORE the model so we can inject current
+  // results as context. Skipped for image requests (no point searching "draw a cat").
+  let searchData = null
+  if (webSearch && TAVILY_KEY && newMessage && !wantsImage) {
+    try {
+      searchData = await runWebSearch(newMessage, TAVILY_KEY)
+    } catch (err) {
+      console.error('Web search failed:', err.message)
+    }
+  }
+
   // Build a normalized message list (text + optional image part).
   const history = (messages || []).map(m => ({ role: m.role, content: m.content }))
   const userTurn = {
@@ -71,7 +88,10 @@ export default async function handler(req, res) {
         ]
       : newMessage
   }
-  const fullMessages = [...history, userTurn]
+  // Prepend search results as a system message when we have them.
+  const fullMessages = searchData
+    ? [buildSearchSystem(newMessage, searchData), ...history, userTurn]
+    : [...history, userTurn]
 
   // Stream headers. We commit these immediately; everything after is NDJSON chunks.
   res.statusCode = 200
@@ -100,6 +120,7 @@ export default async function handler(req, res) {
       if (toolCall) {
         await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, HUGGINGFACE_KEY, res, writeDelta)
       }
+      if (searchData) writeDelta(sourcesMarkdown(searchData))
       res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
@@ -118,6 +139,7 @@ export default async function handler(req, res) {
   if (NVIDIA_NIM_KEY && !state.wroteAny) {
     try {
       await streamNim(fullMessages, ids.nim, NVIDIA_NIM_KEY, writeDelta)
+      if (searchData) writeDelta(sourcesMarkdown(searchData))
       res.write(JSON.stringify({ done: true, provider: 'nim', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
@@ -158,6 +180,57 @@ const REASONING_RE =
 
 function classifyQuery(text) {
   return typeof text === 'string' && REASONING_RE.test(text) ? 'm3' : 'gemma'
+}
+
+// ---- Web search (Tavily) ----
+//
+// Tavily is LLM-optimized: one call returns a synthesized answer plus ranked source
+// snippets. We inject those as a system message so the model answers from current
+// info, then append a clickable Sources list to the reply.
+
+async function runWebSearch(query, key) {
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: String(query).slice(0, 400),
+      max_results: 5,
+      include_answer: true,
+      search_depth: 'basic',
+    }),
+  })
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Tavily ${response.status} ${body.slice(0, 120)}`)
+  }
+  const data = await response.json()
+  const results = Array.isArray(data.results) ? data.results.slice(0, 5) : []
+  if (!results.length && !data.answer) throw new Error('no results')
+  return { answer: data.answer || '', results }
+}
+
+function buildSearchSystem(query, search) {
+  const today = new Date().toISOString().slice(0, 10)
+  const lines = search.results
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${String(r.content || '').slice(0, 500)}`)
+    .join('\n\n')
+  return {
+    role: 'system',
+    content:
+      `Today's date is ${today}. The user enabled web search; current results are below. ` +
+      `Answer using them, cite inline like [1], [2], and be concise. If the results don't ` +
+      `cover the question, say so.\n\nQuery: ${query}\n\n` +
+      (search.answer ? `Quick summary: ${search.answer}\n\n` : '') +
+      `Results:\n${lines}`,
+  }
+}
+
+function sourcesMarkdown(search) {
+  if (!search.results.length) return ''
+  return (
+    '\n\n**Sources:**\n' +
+    search.results.map((r, i) => `${i + 1}. [${r.title}](${r.url})`).join('\n')
+  )
 }
 
 // ---- Provider streamers ----

@@ -13,6 +13,8 @@ function esc(s) {
 
 function inline(text) {
   let s = esc(text)
+  // Links first so bold/italic don't mangle URLs: [label](url)
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#3b82f6;text-decoration:underline">$1</a>')
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>')
   s = s.replace(/`(.+?)`/g, '<code style="background:rgba(128,128,128,.15);padding:1px 4px;border-radius:3px;font-size:0.85em">$1</code>')
