@@ -10,7 +10,9 @@ import {
 } from './lib/conversations'
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
 import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
-import { exportWord, exportPdf } from './lib/exportChat'
+import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
+import { Download } from 'lucide-react'
+import renderMarkdown from './lib/renderMarkdown'
 
 // Inset so the header/input clear the phone's status bar (time/battery) and home
 // indicator. Harmless 0 on desktop; real values on notched phones (viewport-fit=cover).
@@ -420,11 +422,33 @@ export default function App() {
                     {msg.image && (
                       <img src={msg.image} alt="uploaded" className="max-w-xs rounded mb-2" />
                     )}
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    {msg.role === 'assistant' ? (
+                      <div className="text-sm prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    )}
                     {msg.role === 'assistant' && (msg.via || msg.cached) && (
                       <p className={`text-[10px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                         {msg.cached ? 'cached' : `via ${MODEL_LABELS[msg.via] || msg.via}`}
                       </p>
+                    )}
+                    {msg.role === 'assistant' && msg.content && msg.content.length > 20 && !loading && (
+                      <div className="flex gap-1.5 mt-2 pt-1.5 border-t border-current/10">
+                        <button
+                          onClick={() => exportReplyWord(msg.content)}
+                          className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'}`}
+                          title="Download as Word document"
+                        >
+                          <FileText size={12} /> Word
+                        </button>
+                        <button
+                          onClick={() => { if (!exportReplyPdf(msg.content)) alert('Allow pop-ups to save PDF.') }}
+                          className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'}`}
+                          title="Open as PDF (print/save)"
+                        >
+                          <Download size={12} /> PDF
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

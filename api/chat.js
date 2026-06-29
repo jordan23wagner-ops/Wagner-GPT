@@ -1,5 +1,6 @@
 // Wagner-GPT chat backend (streaming)
 // Strategy: try Ollama Cloud first (free), fall back to NVIDIA NIM (dev credits) on failure.
+// Image generation: NVIDIA NIM FLUX.1-dev primary, Hugging Face FLUX.1-schnell fallback.
 // Each provider has a different streaming format; we normalize both into a single
 // newline-delimited JSON (NDJSON) stream to the client:
 //   {"delta":"token text"}\n   (zero or more)
@@ -24,6 +25,7 @@ export default async function handler(req, res) {
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
+  const HUGGINGFACE_KEY = process.env.HUGGINGFACE_KEY
 
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
@@ -87,15 +89,16 @@ export default async function handler(req, res) {
 
   const errors = []
 
-  // Offer the image tool only when a NIM key is present (FLUX runs on NIM).
-  const tools = NVIDIA_NIM_KEY ? [IMAGE_TOOL] : undefined
+  // Offer the image tool when any image provider is available.
+  const hasImageProvider = NVIDIA_NIM_KEY || HUGGINGFACE_KEY
+  const tools = hasImageProvider ? [IMAGE_TOOL] : undefined
 
   // 1) Try Ollama Cloud first (free path).
   if (OLLAMA_CLOUD_KEY) {
     try {
       const { toolCall } = await streamOllama(fullMessages, ids.ollama, OLLAMA_CLOUD_KEY, writeDelta, tools)
       if (toolCall) {
-        await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, res, writeDelta)
+        await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, HUGGINGFACE_KEY, res, writeDelta)
       }
       res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel }) + '\n')
       return res.end()
@@ -325,9 +328,36 @@ async function generateImage(prompt, nimKey) {
   return b64
 }
 
-// Execute a generate_image tool call: pull the prompt, run FLUX, stream the image.
+// Hugging Face Inference API: FLUX.1-schnell (free, rate-limited, no credit pool).
+// Returns raw image bytes; we base64-encode them for the NDJSON stream.
+async function generateImageHF(prompt, hfKey) {
+  const response = await fetch(
+    'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${hfKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'image/jpeg',
+      },
+      body: JSON.stringify({ inputs: String(prompt).slice(0, 1500) }),
+    }
+  )
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`HF ${response.status} ${body.slice(0, 150)}`)
+  }
+  const buf = await response.arrayBuffer()
+  if (!buf || buf.byteLength < 1000) throw new Error('HF returned empty image')
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}
+
+// Execute a generate_image tool call: pull the prompt, try NIM then HF, stream the image.
 // Never throws — on failure it streams a short note so the request still completes.
-async function runImageTool(toolCall, fallbackPrompt, nimKey, res, onDelta) {
+async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelta) {
   let prompt = fallbackPrompt
   try {
     const args = toolCall.function.arguments
@@ -335,17 +365,35 @@ async function runImageTool(toolCall, fallbackPrompt, nimKey, res, onDelta) {
     if (parsed && parsed.prompt) prompt = parsed.prompt
   } catch { /* fall back to the user's raw message */ }
 
-  if (!nimKey) {
-    onDelta('\n\n⚠️ Image generation isn\'t configured (no NIM key).')
+  if (!nimKey && !hfKey) {
+    onDelta('\n\n⚠️ Image generation isn\'t configured (no NIM or HuggingFace key).')
     return
   }
-  try {
-    const b64 = await generateImage(prompt, nimKey)
-    res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
-  } catch (err) {
-    console.error('FLUX failed:', err.message)
-    onDelta(`\n\n⚠️ Couldn't generate the image: ${err.message}`)
+
+  // Try NVIDIA NIM first (faster, higher quality), fall back to HuggingFace.
+  if (nimKey) {
+    try {
+      const b64 = await generateImage(prompt, nimKey)
+      res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
+      return
+    } catch (err) {
+      console.error('NIM FLUX failed, trying HuggingFace:', err.message)
+    }
   }
+
+  if (hfKey) {
+    try {
+      const b64 = await generateImageHF(prompt, hfKey)
+      res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
+      return
+    } catch (err) {
+      console.error('HuggingFace FLUX failed:', err.message)
+      onDelta(`\n\n⚠️ Couldn't generate the image: ${err.message}`)
+      return
+    }
+  }
+
+  onDelta('\n\n⚠️ All image providers failed.')
 }
 
 // NVIDIA NIM: OpenAI-compatible, stream:true -> SSE lines:
