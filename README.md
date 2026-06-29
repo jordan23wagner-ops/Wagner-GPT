@@ -1,57 +1,87 @@
 # Wagner-GPT — Free AI Chat PWA
 
-A mobile-first Progressive Web App for free AI chat. All models route through the **NVIDIA NIM** API.
+A mobile-first Progressive Web App for free AI chat with **live token streaming** and **photo upload (vision)** support. Models are served by **Ollama Cloud** (primary, free) with **NVIDIA NIM** as an automatic fallback.
 
 ## Features
 
 - 📱 **Mobile-first PWA** — Add to home screen, works like an app
-- 🔄 **Model switching** — Toggle between three NIM-hosted models
-- 📚 **Chat history** — Saved locally in browser
+- ⚡ **Streaming responses** — Tokens appear live as the model generates them (no waiting for the full reply)
+- 🖼️ **Vision** — Upload a photo and ask about it; both models can analyze images
+- 🔄 **Model switching** — Toggle between two vision-capable models
+- 🔁 **Provider fallback** — Ollama Cloud first; if it fails before streaming, falls back to NIM
+- 📚 **Chat history** — Saved locally in the browser
 - 🌙 **Dark mode** — Eye-friendly night theme
-- ⚡ **Free tier** — NVIDIA NIM, no paid API
+- 🆓 **Free tier** — Ollama Cloud, no per-token billing
 
-> **Note on images:** the upload UI is present but the NIM models used here are text-only. Image data is silently stripped server-side before the request. Vision is not currently supported.
+> **Image generation is not supported.** These are vision *input* models (photo → text). They cannot *create* images from a prompt. Text-to-image would require a separate provider and is not wired up.
 
 ## Models
 
-The dropdown exposes three options, all served by NVIDIA NIM:
+The dropdown exposes two options. Each tries Ollama Cloud first, then NIM:
 
-| Dropdown value | NIM model ID                      |
-|----------------|-----------------------------------|
-| `m3`           | `minimaxai/minimax-m3`            |
-| `deepseek`     | `deepseek-ai/deepseek-v4-flash`  |
-| `qwen`         | `deepseek-ai/deepseek-v4-pro`    |
+| Dropdown value | Ollama Cloud tag | NIM fallback ID          | Vision |
+|----------------|------------------|--------------------------|:------:|
+| `m3`           | `minimax-m3`     | `minimaxai/minimax-m3`   |   ✅   |
+| `gemma`        | `gemma4:31b`     | `google/gemma-4-31b-it`  |   ✅   |
 
-> The `qwen` label is historical — it currently maps to DeepSeek v4 Pro, not a Qwen model.
+> Ollama Cloud tags must match exactly what `GET https://ollama.com/api/tags` returns
+> for the account (no `:cloud` suffix). NIM fallback IDs must be live in the catalog at
+> `https://integrate.api.nvidia.com/v1/models` — retired models return `410 Gone`.
 
-## Deploy to Vercel (5 minutes)
+> Earlier builds listed DeepSeek V4 Flash/Pro. Those are heavy **reasoning** models that don't emit a first token within Vercel's function timeout, so requests timed out. They were replaced with fast, vision-capable models that stream quickly.
 
-### 1. Push to GitHub
+## Architecture
 
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin <your-github-url>
-git push -u origin main
+```
+Browser (React)  ──POST /api/chat──►  Vercel serverless (api/chat.js)
+       ▲                                      │
+       │  NDJSON stream                       ├─1─►  Ollama Cloud  (primary, free)
+       │  {"delta":"..."}                     │      https://ollama.com/api/chat
+       │  {"done":true,"provider":"..."}      │      NDJSON stream: {message:{content}}
+       └──────────────────────────────────────┘
+                                              └─2─►  NVIDIA NIM    (fallback)
+                                                     OpenAI-compatible SSE
+                                                     data: {choices[0].delta.content}
 ```
 
-### 2. Import the repo on Vercel
+**Streaming protocol (server → client), newline-delimited JSON:**
 
-- Visit [vercel.com/new](https://vercel.com/new)
-- Select "Import Git Repository"
-- Choose your repo and click "Import"
+- `{"delta":"token text"}` — one or more, as tokens arrive
+- `{"done":true,"provider":"ollama"}` — terminal success
+- `{"error":"message"}` — terminal failure (only sent if nothing streamed yet)
 
-### 3. Add environment variable
+**Fallback rule:** the function can only switch providers *before* the first token is flushed (HTTP headers commit on first write). Once Ollama starts streaming, NIM is no longer an option for that request.
 
-- **NVIDIA_NIM_KEY**: Your NVIDIA NIM API key from [build.nvidia.com](https://build.nvidia.com)
-  - Format: `nvapi-...` (starts with `nvapi-`)
+## Configuration
 
-This is the only env var the app reads.
+### Environment variables (Vercel → Settings → Environment Variables)
 
-### 4. Deploy
+| Variable           | Required | Purpose                                  |
+|--------------------|----------|------------------------------------------|
+| `OLLAMA_CLOUD_KEY` | Yes      | Ollama Cloud auth (primary provider)     |
+| `NVIDIA_NIM_KEY`   | Optional | NIM fallback; `nvapi-...` from build.nvidia.com |
 
-Click "Deploy" — Vercel builds and deploys automatically. Live in ~2 minutes.
+If only one key is set, only that provider is used.
+
+### `vercel.json`
+
+The chat function needs a longer timeout than the Hobby default (10s) so the first
+token has time to arrive:
+
+```json
+{
+  "functions": {
+    "api/chat.js": { "maxDuration": 60 }
+  }
+}
+```
+
+## Deploy to Vercel
+
+1. Push to GitHub.
+2. Import the repo at [vercel.com/new](https://vercel.com/new).
+3. Add `OLLAMA_CLOUD_KEY` (and optionally `NVIDIA_NIM_KEY`) under Environment Variables.
+4. Deploy. Live in ~2 minutes.
 
 ## Local Development
 
@@ -60,69 +90,76 @@ npm install
 npm run dev
 ```
 
-Visit `http://localhost:5173`
+Visit `http://localhost:5173`.
 
-## How It Works
+## Verify streaming (curl)
 
-1. **Frontend** (React + Vite + Tailwind)
-   - Chat UI with model selector
-   - Dark mode + local chat history
+PowerShell — put the body in a file to avoid quoting issues:
 
-2. **Backend** (Vercel serverless function at `/api/chat.js`)
-   - Receives messages + selected model
-   - Routes the request to the matching NIM model
-   - Returns the response to the frontend
+```powershell
+'{"model":"m3","messages":[],"newMessage":"say hi"}' | Out-File -Encoding ascii body.json
+curl.exe -i -N -X POST https://<your-app>.vercel.app/api/chat -H "Content-Type: application/json" -d "@body.json"
+```
 
-3. **Free tier limits**
-   - NVIDIA NIM: ~40 requests/minute on the free tier
-   - Free tier is for prototyping; production would need a paid tier or self-hosted inference
+Expect `{"delta":...}` lines arriving incrementally, then `{"done":true,"provider":"ollama"}`.
 
 ## Troubleshooting
 
-**"API key not configured"**
-- Go to Vercel dashboard → Settings → Environment Variables
-- Confirm `NVIDIA_NIM_KEY` is set to a real `nvapi-` key (not a placeholder)
-- Redeploy (or wait for auto-redeploy after the env change)
+**Request hangs, then 504 `FUNCTION_INVOCATION_TIMEOUT`**
+- The selected model isn't producing a first token within `maxDuration`. Heavy
+  reasoning ("thinking") models do this. Use a fast model, or raise `maxDuration`
+  (Hobby max 60s, Pro up to 300s).
+
+**`Unknown model: <x>`**
+- The dropdown value in `App.jsx` doesn't match a key in `MODEL_MAP` in `api/chat.js`.
+  Keep the two in sync.
+
+**`NIM: 404 page not found` in the error**
+- Ollama failed and the NIM fallback ID is wrong/unavailable. Fix the `nim:` ID in
+  `MODEL_MAP`, or rely on Ollama only.
+
+**Empty response / nothing streams**
+- Confirm the latest commit is the live Vercel production deploy.
+- Hard-refresh the browser (`Ctrl+Shift+R`) to clear a cached build.
 
 **Rate limit errors (429)**
-- You've hit the NIM RPM limit
-- Wait ~60 seconds and retry
-- Load is shared across all users of the deployment
-
-**PWA doesn't install**
-- On iOS: Safari → Share → Add to Home Screen
-- On Android: Chrome menu → Install app
-- Must be served over HTTPS (Vercel does this automatically)
+- Built-in retry with exponential backoff handles transient 429/5xx. Persistent
+  limits: wait ~60s.
 
 ## What's Included
 
 ```
 wife-gpt/
 ├── src/
-│   ├── App.jsx           (Chat UI component)
+│   ├── App.jsx           (Chat UI + streaming reader)
 │   ├── main.jsx          (React entry)
 │   └── index.css         (Tailwind base)
 ├── api/
-│   └── chat.js           (Vercel serverless function)
+│   └── chat.js           (Serverless fn: streams Ollama/NIM as NDJSON)
 ├── public/
 │   ├── sw.js             (Service worker for PWA)
 │   └── manifest.json     (PWA metadata)
-├── index.html            (HTML shell)
-├── vite.config.js        (Vite config)
-├── tailwind.config.js    (Tailwind config)
-├── postcss.config.js     (PostCSS config)
-├── vercel.json           (Vercel config)
-└── package.json          (Dependencies)
+├── index.html
+├── vite.config.js
+├── tailwind.config.js
+├── postcss.config.js
+├── vercel.json           (maxDuration config)
+└── package.json
 ```
 
-## API Docs
+## API Reference
 
-**NVIDIA NIM:**
+**Ollama Cloud (primary):**
+- Endpoint: `https://ollama.com/api/chat`
+- Auth: `Authorization: Bearer $OLLAMA_CLOUD_KEY`
+- Streaming: `stream: true` → NDJSON, `{message:{content}}` per line
+- Vision: images sent as a separate `images: [base64]` array on the message
+
+**NVIDIA NIM (fallback):**
 - Endpoint: `https://integrate.api.nvidia.com/v1/chat/completions`
-- Models: `minimaxai/minimax-m3`, `deepseek-ai/deepseek-v4-flash`, `deepseek-ai/deepseek-v4-pro`
-- Supports: text only
-- Rate limit: ~40 req/min (free tier)
-- Cost: Free tier (no per-token billing)
+- Auth: `Authorization: Bearer $NVIDIA_NIM_KEY`
+- OpenAI-compatible; `stream: true` → SSE, `data: {choices[0].delta.content}`
+- Text only (images stripped before the request)
 
 ## License
 

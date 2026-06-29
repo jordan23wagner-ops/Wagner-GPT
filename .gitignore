@@ -10,3 +10,6 @@ dist/
 *.swo
 *~
 .vercel/
+
+.vercel
+.env*

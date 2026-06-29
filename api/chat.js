@@ -17,17 +17,20 @@ export default async function handler(req, res) {
 
   const { messages, newMessage, image, model } = req.body
 
-  const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY
+  const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
 
-  if (!OLLAMA_API_KEY && !NVIDIA_NIM_KEY) {
-    return res.status(500).json({ error: 'No API keys configured (need OLLAMA_API_KEY and/or NVIDIA_NIM_KEY).' })
+  if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
+    return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
   }
 
   // Provider-specific model IDs for each dropdown choice.
+  // Ollama Cloud tags must match exactly what `GET https://ollama.com/api/tags`
+  // returns for this account (no `:cloud` suffix). NIM IDs must be live in the
+  // catalog at https://integrate.api.nvidia.com/v1/models (EOL models 410/Gone).
   const MODEL_MAP = {
-    m3:       { ollama: 'minimax-m3:cloud',        nim: 'minimaxai/minimax-m3',        order: ['ollama', 'nim'] },
-    gemma:    { ollama: 'gemma4:cloud',            nim: 'google/gemma-3-27b-it',       order: ['ollama', 'nim'] }
+    m3:       { ollama: 'minimax-m3',              nim: 'minimaxai/minimax-m3',        order: ['ollama', 'nim'] },
+    gemma:    { ollama: 'gemma4:31b',              nim: 'google/gemma-4-31b-it',       order: ['ollama', 'nim'] }
   }
 
   const ids = MODEL_MAP[model]
@@ -65,9 +68,9 @@ export default async function handler(req, res) {
   const errors = []
 
   // 1) Try Ollama Cloud first (free path).
-  if (OLLAMA_API_KEY) {
+  if (OLLAMA_CLOUD_KEY) {
     try {
-      await streamOllama(fullMessages, ids.ollama, OLLAMA_API_KEY, writeDelta)
+      await streamOllama(fullMessages, ids.ollama, OLLAMA_CLOUD_KEY, writeDelta)
       res.write(JSON.stringify({ done: true, provider: 'ollama' }) + '\n')
       return res.end()
     } catch (err) {
