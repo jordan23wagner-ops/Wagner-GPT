@@ -45,7 +45,10 @@ export default async function handler(req, res) {
     // reasoning + reliable tool-calling; qwen3-coder is tuned for code. llama-3.3 is the
     // text-only NIM backstop for both.
     gptoss:   { ollama: 'gpt-oss:120b',            nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
-    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
+    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
+    // Candidates under evaluation (not yet in the dropdown) — heavier reasoning models.
+    glm:      { ollama: 'glm-5',                   nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
+    deepseek: { ollama: 'deepseek-v3.1:671b',      nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
   }
 
   // Resolve the effective model.
