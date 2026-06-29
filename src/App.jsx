@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { ChevronDown, Send, Paperclip, MoreVertical, Sun, Moon, Trash2 } from 'lucide-react'
+import { Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2 } from 'lucide-react'
+import Garden from './Garden'
 
 export default function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [model, setModel] = useState('m3')
+  const [tab, setTab] = useState('chat')
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('darkMode') === 'true' || window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -225,9 +227,24 @@ export default function App() {
       <div className={`flex flex-col h-screen ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
         {/* Header */}
         <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 py-3 flex items-center justify-between`}>
-          <h1 className={`text-xl font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-            Chat
-          </h1>
+          <div className="flex items-center gap-1">
+            {[
+              { id: 'chat', label: 'Chat', Icon: MessageSquare },
+              { id: 'garden', label: 'Garden', Icon: Flower2 },
+            ].map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${
+                  tab === id
+                    ? darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900 shadow-sm'
+                    : darkMode ? 'text-gray-400' : 'text-gray-500'
+                }`}
+              >
+                <Icon size={16} /> {label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setDarkMode(!darkMode)}
@@ -236,16 +253,22 @@ export default function App() {
             >
               {darkMode ? <Sun size={18} /> : <Moon size={18} />}
             </button>
-            <button
-              onClick={clearHistory}
-              className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-red-400 hover:bg-gray-600' : 'bg-gray-200 text-red-600 hover:bg-gray-300'}`}
-              aria-label="Clear chat"
-            >
-              <Trash2 size={18} />
-            </button>
+            {tab === 'chat' && (
+              <button
+                onClick={clearHistory}
+                className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-red-400 hover:bg-gray-600' : 'bg-gray-200 text-red-600 hover:bg-gray-300'}`}
+                aria-label="Clear chat"
+              >
+                <Trash2 size={18} />
+              </button>
+            )}
           </div>
         </div>
 
+        {tab === 'garden' && <Garden darkMode={darkMode} />}
+
+        {tab === 'chat' && (
+        <>
         {/* Model Selector */}
         <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 py-2`}>
           <div className="flex items-center gap-2">
@@ -410,6 +433,8 @@ export default function App() {
             </button>
           </form>
         </div>
+        </>
+        )}
       </div>
     </div>
   )
