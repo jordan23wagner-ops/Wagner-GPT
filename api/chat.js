@@ -40,7 +40,20 @@ export default async function handler(req, res) {
     gemma:    { ollama: 'gemma4:31b',              nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
   }
 
-  const ids = MODEL_MAP[model]
+  // Resolve the effective model.
+  //  - 'auto' classifies the query: M3 for reasoning/coding/math, Gemma otherwise.
+  //  - Image requests ALWAYS route to Gemma — it reliably drives the generate_image
+  //    tool; M3 frequently refuses to call it. This holds even if the user manually
+  //    selected M3, so "draw me X" just works without a manual model switch.
+  const wantsImage = isImageRequest(newMessage)
+  let effectiveModel = model
+  if (model === 'auto') {
+    effectiveModel = wantsImage ? 'gemma' : classifyQuery(newMessage)
+  } else if (wantsImage && model === 'm3') {
+    effectiveModel = 'gemma'
+  }
+
+  const ids = MODEL_MAP[effectiveModel]
   if (!ids) {
     return res.status(400).json({ error: `Unknown model: ${model}` })
   }
@@ -84,7 +97,7 @@ export default async function handler(req, res) {
       if (toolCall) {
         await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, res, writeDelta)
       }
-      res.write(JSON.stringify({ done: true, provider: 'ollama' }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
       console.error('Ollama failed:', err.message)
@@ -102,7 +115,7 @@ export default async function handler(req, res) {
   if (NVIDIA_NIM_KEY && !state.wroteAny) {
     try {
       await streamNim(fullMessages, ids.nim, NVIDIA_NIM_KEY, writeDelta)
-      res.write(JSON.stringify({ done: true, provider: 'nim' }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'nim', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
       console.error('NIM failed:', err.message)
@@ -120,6 +133,29 @@ export default async function handler(req, res) {
   return res.end()
 }
 
+
+// ---- Auto-routing heuristics ----
+//
+// Cheap, deterministic intent detection so 'auto' mode and image-request switching
+// cost zero extra API calls. Tuned to be permissive on image intent (cheap to be
+// wrong — Gemma just answers normally) and conservative on the M3 reasoning route.
+
+// Does this read like an image-generation request?
+const IMAGE_INTENT_RE =
+  /\b(draw|paint|sketch|render|generate|create|make|design|show me)\b[^.?!]*\b(image|picture|photo|pic|art|drawing|painting|illustration|logo|wallpaper|portrait|scene|landscape|icon|avatar)\b|\b(draw|paint|sketch)\s+(me\s+)?(a|an|the|some)\b/i
+
+function isImageRequest(text) {
+  return typeof text === 'string' && IMAGE_INTENT_RE.test(text)
+}
+
+// M3 is the stronger reasoner (code, math, logic, structured analysis). Everything
+// else — creative writing, casual chat, vision — goes to Gemma, the safe default.
+const REASONING_RE =
+  /\b(code|coding|program|programming|function|debug|bug|stack trace|algorithm|regex|sql|python|javascript|typescript|c\+\+|rust|golang|compile|refactor|math|calculate|equation|solve|derivative|integral|proof|logic|analy[sz]e|analysis|compare|trade-?offs?|step by step|reason|optimi[sz]e|complexity|architecture|formula|spreadsheet)\b/i
+
+function classifyQuery(text) {
+  return typeof text === 'string' && REASONING_RE.test(text) ? 'm3' : 'gemma'
+}
 
 // ---- Provider streamers ----
 //
