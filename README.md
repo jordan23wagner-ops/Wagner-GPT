@@ -21,8 +21,8 @@ The dropdown exposes two options. Each tries Ollama Cloud first, then NIM:
 
 | Dropdown value | Ollama Cloud tag | NIM fallback ID          | Vision |
 |----------------|------------------|--------------------------|:------:|
-| `m3`           | `minimax-m3`     | `minimaxai/minimax-m3`   |   ✅   |
-| `gemma`        | `gemma4:31b`     | `google/gemma-4-31b-it`  |   ✅   |
+| `m3`           | `minimax-m3`     | `minimaxai/minimax-m3`        |   ✅   |
+| `gemma`        | `gemma4:31b`     | `meta/llama-3.3-70b-instruct` |   ✅   |
 
 > Ollama Cloud tags must match exactly what `GET https://ollama.com/api/tags` returns
 > for the account (no `:cloud` suffix). NIM fallback IDs must be live in the catalog at

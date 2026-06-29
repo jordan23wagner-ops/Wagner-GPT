@@ -29,8 +29,10 @@ export default async function handler(req, res) {
   // returns for this account (no `:cloud` suffix). NIM IDs must be live in the
   // catalog at https://integrate.api.nvidia.com/v1/models (EOL models 410/Gone).
   const MODEL_MAP = {
-    m3:       { ollama: 'minimax-m3',              nim: 'minimaxai/minimax-m3',        order: ['ollama', 'nim'] },
-    gemma:    { ollama: 'gemma4:31b',              nim: 'google/gemma-4-31b-it',       order: ['ollama', 'nim'] }
+    m3:       { ollama: 'minimax-m3',              nim: 'minimaxai/minimax-m3',          order: ['ollama', 'nim'] },
+    // NIM fallback is text-only (images are stripped), so gemma's backstop is just a
+    // reliable text model. The NIM gemma deployments 404/time-out; llama-3.3 is steady.
+    gemma:    { ollama: 'gemma4:31b',              nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
   }
 
   const ids = MODEL_MAP[model]
