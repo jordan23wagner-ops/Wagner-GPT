@@ -314,17 +314,17 @@ export default function App() {
 
   return (
     <div className={darkMode ? 'dark' : ''}>
-      <div className={`flex flex-col h-[100dvh] ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+      <div className={`flex flex-col h-[100dvh] overflow-x-hidden ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
         {/* Header */}
         <div
-          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 pb-3 flex items-center justify-between`}
+          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-2 sm:px-4 pb-3 flex items-center justify-between gap-1`}
           style={{ paddingTop: TOP_INSET }}
         >
           <div className="flex items-center gap-1">
             {tab === 'chat' && (
               <button
                 onClick={() => setSidebarOpen(true)}
-                className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-200 text-gray-600'}`}
+                className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-200 text-gray-600'}`}
                 aria-label="Chat history"
               >
                 <Menu size={18} />
@@ -337,7 +337,7 @@ export default function App() {
               <button
                 key={id}
                 onClick={() => setTab(id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-sm font-medium ${
                   tab === id
                     ? darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900 shadow-sm'
                     : darkMode ? 'text-gray-400' : 'text-gray-500'
@@ -347,10 +347,10 @@ export default function App() {
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={() => setDarkMode(!darkMode)}
-              className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-yellow-400' : 'bg-gray-200 text-gray-600'}`}
+              className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-yellow-400' : 'bg-gray-200 text-gray-600'}`}
               aria-label="Toggle dark mode"
             >
               {darkMode ? <Sun size={18} /> : <Moon size={18} />}
@@ -358,7 +358,7 @@ export default function App() {
             {tab === 'chat' && (
               <button
                 onClick={clearHistory}
-                className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-red-400 hover:bg-gray-600' : 'bg-gray-200 text-red-600 hover:bg-gray-300'}`}
+                className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-red-400 hover:bg-gray-600' : 'bg-gray-200 text-red-600 hover:bg-gray-300'}`}
                 aria-label="Clear chat"
               >
                 <Trash2 size={18} />
