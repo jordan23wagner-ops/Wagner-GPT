@@ -49,14 +49,20 @@ export default async function handler(req, res) {
   }
 
   // Resolve the effective model.
-  //  - 'auto' classifies the query: M3 for reasoning/coding/math, Gemma otherwise.
-  //  - Image requests ALWAYS route to Gemma — it reliably drives the generate_image
-  //    tool; M3 frequently refuses to call it. This holds even if the user manually
-  //    selected M3, so "draw me X" just works without a manual model switch.
+  //  - 'auto' routes by intent: Qwen3-Coder for code, GPT-OSS for everything else,
+  //    and Gemma whenever vision or image generation is involved (the others are
+  //    text-only and can't see uploads or drive the generate_image tool).
+  //  - Image requests / photo uploads ALWAYS route to Gemma, even under a manual
+  //    non-Gemma selection, so "draw me X" and "what's in this photo?" just work.
   const wantsImage = isImageRequest(newMessage)
+  const hasVisionInput = !!image
   let effectiveModel = model
   if (model === 'auto') {
-    effectiveModel = wantsImage ? 'gemma' : classifyQuery(newMessage)
+    if (wantsImage || hasVisionInput) effectiveModel = 'gemma'
+    else effectiveModel = classifyQuery(newMessage)
+  } else if ((wantsImage || hasVisionInput) && model !== 'gemma' && model !== 'm3') {
+    // Manual GPT-OSS / Qwen can't see images or generate them — fall to Gemma.
+    effectiveModel = 'gemma'
   } else if (wantsImage && model === 'm3') {
     effectiveModel = 'gemma'
   }
@@ -173,13 +179,15 @@ function isImageRequest(text) {
   return typeof text === 'string' && IMAGE_INTENT_RE.test(text)
 }
 
-// M3 is the stronger reasoner (code, math, logic, structured analysis). Everything
-// else — creative writing, casual chat, vision — goes to Gemma, the safe default.
-const REASONING_RE =
-  /\b(code|coding|program|programming|function|debug|bug|stack trace|algorithm|regex|sql|python|javascript|typescript|c\+\+|rust|golang|compile|refactor|math|calculate|equation|solve|derivative|integral|proof|logic|analy[sz]e|analysis|compare|trade-?offs?|step by step|reason|optimi[sz]e|complexity|architecture|formula|spreadsheet)\b/i
+// Auto routing for text queries: coding-flavored prompts go to Qwen3-Coder; everything
+// else goes to GPT-OSS 120B, the smartest fast generalist. (Vision/image requests are
+// handled earlier and never reach here.)
+const CODING_RE =
+  /\b(code|coding|program|programming|function|debug|bug|stack trace|algorithm|regex|sql|python|javascript|typescript|java|c\+\+|c#|rust|golang|\bgo\b|php|ruby|swift|kotlin|html|css|react|vue|node|api|json|yaml|docker|kubernetes|compile|refactor|syntax error|terminal|command line|\bgit\b|leetcode)\b/i
 
 function classifyQuery(text) {
-  return typeof text === 'string' && REASONING_RE.test(text) ? 'm3' : 'gemma'
+  if (typeof text !== 'string') return 'gptoss'
+  return CODING_RE.test(text) ? 'qwen' : 'gptoss'
 }
 
 // ---- Web search (Tavily) ----
