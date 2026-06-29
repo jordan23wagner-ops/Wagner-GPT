@@ -16,55 +16,78 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
 }
 
-// Lightweight markdown → HTML for document formatting.
-// Handles: **bold**, *italic*, ## headings, - bullet lists, numbered lists,
-// blank-line paragraph breaks. Keeps it simple — no nested lists or tables.
+function isTableSeparator(line) {
+  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line)
+}
+function splitRow(line) {
+  let s = line.trim()
+  if (s.startsWith('|')) s = s.slice(1)
+  if (s.endsWith('|')) s = s.slice(0, -1)
+  return s.split('|').map((c) => c.trim())
+}
+
+// Markdown → HTML for document export. Handles tables, fenced code, headings, lists,
+// rules, links, bold/italic/code.
 function mdToHtml(text) {
   const lines = String(text || '').split('\n')
   const out = []
+  let i = 0
   let inList = false
   let listType = null
+  const closeList = () => { if (inList) { out.push(listType === 'ol' ? '</ol>' : '</ul>'); inList = false } }
 
-  const closeList = () => {
-    if (inList) { out.push(listType === 'ol' ? '</ol>' : '</ul>'); inList = false }
-  }
+  while (i < lines.length) {
+    const line = lines[i]
 
-  for (const raw of lines) {
-    const line = raw
+    // Fenced code block
+    if (/^\s*```/.test(line)) {
+      closeList()
+      const buf = []
+      i++
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++ }
+      i++
+      out.push(`<pre style="background:#f3f4f6;padding:10px 12px;border-radius:6px;overflow-x:auto;font-size:12.5px;font-family:Consolas,monospace;margin:8px 0">${escapeHtml(buf.join('\n'))}</pre>`)
+      continue
+    }
 
-    // Headings
+    // Table
+    if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      closeList()
+      const header = splitRow(line)
+      i += 2
+      const rows = []
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rows.push(splitRow(lines[i])); i++ }
+      const th = header.map((c) => `<th style="border:1px solid #ccc;padding:5px 9px;text-align:left;background:#f3f4f6">${formatInline(c)}</th>`).join('')
+      const body = rows.map((r) => '<tr>' + header.map((_, k) => `<td style="border:1px solid #ccc;padding:5px 9px">${formatInline(r[k] || '')}</td>`).join('') + '</tr>').join('')
+      out.push(`<table style="border-collapse:collapse;margin:10px 0;font-size:13px"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`)
+      continue
+    }
+
     const h3 = line.match(/^###\s+(.+)/)
-    if (h3) { closeList(); out.push(`<h3 style="font-size:16px;margin:18px 0 6px;font-weight:600">${formatInline(h3[1])}</h3>`); continue }
+    if (h3) { closeList(); out.push(`<h3 style="font-size:16px;margin:18px 0 6px;font-weight:600">${formatInline(h3[1])}</h3>`); i++; continue }
     const h2 = line.match(/^##\s+(.+)/)
-    if (h2) { closeList(); out.push(`<h2 style="font-size:18px;margin:20px 0 8px;font-weight:700">${formatInline(h2[1])}</h2>`); continue }
+    if (h2) { closeList(); out.push(`<h2 style="font-size:18px;margin:20px 0 8px;font-weight:700">${formatInline(h2[1])}</h2>`); i++; continue }
     const h1 = line.match(/^#\s+(.+)/)
-    if (h1) { closeList(); out.push(`<h1 style="font-size:22px;margin:24px 0 10px;font-weight:700">${formatInline(h1[1])}</h1>`); continue }
+    if (h1) { closeList(); out.push(`<h1 style="font-size:22px;margin:24px 0 10px;font-weight:700">${formatInline(h1[1])}</h1>`); i++; continue }
 
-    // Unordered list
     const ul = line.match(/^\s*[-*]\s+(.+)/)
     if (ul) {
       if (!inList || listType !== 'ul') { closeList(); out.push('<ul style="margin:4px 0 4px 20px">'); inList = true; listType = 'ul' }
-      out.push(`<li style="margin:2px 0">${formatInline(ul[1])}</li>`)
-      continue
+      out.push(`<li style="margin:2px 0">${formatInline(ul[1])}</li>`); i++; continue
     }
 
-    // Ordered list
     const ol = line.match(/^\s*\d+[.)]\s+(.+)/)
     if (ol) {
       if (!inList || listType !== 'ol') { closeList(); out.push('<ol style="margin:4px 0 4px 20px">'); inList = true; listType = 'ol' }
-      out.push(`<li style="margin:2px 0">${formatInline(ol[1])}</li>`)
-      continue
+      out.push(`<li style="margin:2px 0">${formatInline(ol[1])}</li>`); i++; continue
     }
 
-    // Horizontal rule
-    if (/^---+$/.test(line.trim())) { closeList(); out.push('<hr style="border:none;border-top:1px solid #ccc;margin:16px 0"/>'); continue }
+    if (/^---+$/.test(line.trim())) { closeList(); out.push('<hr style="border:none;border-top:1px solid #ccc;margin:16px 0"/>'); i++; continue }
+    if (!line.trim()) { closeList(); out.push('<div style="height:10px"></div>'); i++; continue }
 
-    // Blank line = paragraph break
-    if (!line.trim()) { closeList(); out.push('<div style="height:10px"></div>'); continue }
-
-    // Normal text
     closeList()
     out.push(`<p style="margin:3px 0;line-height:1.5">${formatInline(line)}</p>`)
+    i++
   }
   closeList()
   return out.join('\n')

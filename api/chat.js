@@ -21,7 +21,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { messages, newMessage, image, model, webSearch, document } = req.body
+  const { messages, newMessage, image, model, webSearch, document, style } = req.body
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
@@ -96,8 +96,10 @@ export default async function handler(req, res) {
         ]
       : newMessage
   }
-  // Prepend any context system messages (attached document, then web search).
+  // Prepend any context system messages (style guidance, attached document, web search).
   const systemMsgs = []
+  const styleMsg = STYLE_PROMPTS[style]
+  if (styleMsg) systemMsgs.push({ role: 'system', content: styleMsg })
   if (document && document.text) {
     systemMsgs.push({
       role: 'system',
@@ -198,6 +200,14 @@ const CODING_RE =
 function classifyQuery(text) {
   if (typeof text !== 'string') return 'gptoss'
   return CODING_RE.test(text) ? 'qwen' : 'gptoss'
+}
+
+// Response-style guidance, injected as a system message so the user controls verbosity
+// and whether code is included. 'default' adds nothing.
+const STYLE_PROMPTS = {
+  quick: 'Answer as briefly as possible — at most 2-3 sentences. Skip preamble and do not include code unless the user explicitly asks for it.',
+  info: 'Explain clearly in prose. Do NOT include code blocks or code examples unless the user explicitly requests code. Focus on concepts and information.',
+  code: 'When relevant, include practical, well-formatted code examples with short explanations.',
 }
 
 // ---- Web search (Tavily) ----

@@ -14,6 +14,8 @@ import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/ex
 import { Download, Globe, Mic, FileUp, Volume2, Square, Loader2 } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
 import { parseDocument, isSupportedDocument } from './lib/parseDocument'
+import { THEMES, isDarkTheme } from './lib/themes'
+import { Palette } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
 
@@ -35,15 +37,20 @@ export default function App() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [model, setModel] = useState(() => localStorage.getItem('model') || 'auto')
+  const [style, setStyle] = useState(() => localStorage.getItem('style') || 'default')
   const [tab, setTab] = useState('chat')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [usage, setUsage] = useState(loadUsage)
-  const [darkMode, setDarkMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('darkMode') === 'true' || window.matchMedia('(prefers-color-scheme: dark)').matches
-    }
-    return false
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('theme')
+    if (saved) return saved
+    // Migrate the old boolean dark-mode pref into a theme.
+    const wasDark = localStorage.getItem('darkMode') === 'true' ||
+      (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    return wasDark ? 'dark' : 'light'
   })
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false)
+  const darkMode = isDarkTheme(theme) // many conditionals below still key off this
   const [image, setImage] = useState(null)
   const [imagePreview, setImagePreview] = useState(null)
   const [error, setError] = useState(null)
@@ -89,13 +96,15 @@ export default function App() {
   useEffect(() => { scrollToBottom() }, [messages])
 
   useEffect(() => {
-    localStorage.setItem('darkMode', darkMode)
-    document.documentElement.classList.toggle('dark', darkMode)
-  }, [darkMode])
+    localStorage.setItem('theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+    document.documentElement.classList.toggle('dark', isDarkTheme(theme))
+  }, [theme])
 
   useEffect(() => { saveConversations(conversations) }, [conversations])
   useEffect(() => { saveActiveId(activeId) }, [activeId])
   useEffect(() => { localStorage.setItem('model', model) }, [model])
+  useEffect(() => { localStorage.setItem('style', style) }, [style])
   useEffect(() => { localStorage.setItem('webSearch', webSearch) }, [webSearch])
 
   // Voice input via the Web Speech API. Live interim transcript fills the input;
@@ -259,6 +268,7 @@ export default function App() {
           document: payload.document,
           model: model,
           webSearch: webSearch,
+          style: style,
         }),
       })
 
@@ -429,17 +439,17 @@ export default function App() {
 
   return (
     <div className={darkMode ? 'dark' : ''}>
-      <div className={`flex flex-col h-[100dvh] overflow-x-hidden ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+      <div className="flex flex-col h-[100dvh] overflow-x-hidden bg-[var(--bg)] text-[var(--text)]">
         {/* Header */}
         <div
-          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-2 sm:px-4 pb-3 flex items-center justify-between gap-1`}
+          className="bg-[var(--surface)] border-[var(--border)] border-b px-2 sm:px-4 pb-3 flex items-center justify-between gap-1"
           style={{ paddingTop: TOP_INSET }}
         >
           <div className="flex items-center gap-1">
             {tab === 'chat' && (
               <button
                 onClick={() => setSidebarOpen(true)}
-                className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-200 text-gray-600'}`}
+                className="p-1.5 sm:p-2 rounded-lg bg-[var(--surface-2)] text-[var(--text)]"
                 aria-label="Chat history"
               >
                 <Menu size={18} />
@@ -454,8 +464,8 @@ export default function App() {
                 onClick={() => setTab(id)}
                 className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-sm font-medium ${
                   tab === id
-                    ? darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900 shadow-sm'
-                    : darkMode ? 'text-gray-400' : 'text-gray-500'
+                    ? 'bg-[var(--surface-2)] text-[var(--text)] shadow-sm'
+                    : 'text-[var(--muted)]'
                 }`}
               >
                 <Icon size={16} /> {label}
@@ -463,17 +473,42 @@ export default function App() {
             ))}
           </div>
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setDarkMode(!darkMode)}
-              className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-yellow-400' : 'bg-gray-200 text-gray-600'}`}
-              aria-label="Toggle dark mode"
-            >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
+            <div className="relative">
+              <button
+                onClick={() => setThemeMenuOpen((o) => !o)}
+                className="p-1.5 sm:p-2 rounded-lg bg-[var(--surface-2)] text-[var(--text)]"
+                aria-label="Change theme"
+              >
+                <Palette size={18} />
+              </button>
+              {themeMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setThemeMenuOpen(false)} />
+                  <div className="absolute right-0 mt-1 z-50 w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl p-1">
+                    {THEMES.map((t) => (
+                      <button
+                        key={t.id}
+                        onClick={() => { setTheme(t.id); setThemeMenuOpen(false) }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm text-left ${
+                          theme === t.id ? 'bg-[var(--surface-2)] font-medium' : ''
+                        } text-[var(--text)] hover:bg-[var(--surface-2)]`}
+                      >
+                        <span
+                          className="w-4 h-4 rounded-full border border-[var(--border)] shrink-0"
+                          style={{ background: t.swatch }}
+                        />
+                        {t.name}
+                        {theme === t.id && <span className="ml-auto text-xs text-[var(--accent)]">●</span>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             {tab === 'chat' && (
               <button
                 onClick={clearHistory}
-                className={`p-1.5 sm:p-2 rounded-lg ${darkMode ? 'bg-gray-700 text-red-400 hover:bg-gray-600' : 'bg-gray-200 text-red-600 hover:bg-gray-300'}`}
+                className="p-1.5 sm:p-2 rounded-lg bg-[var(--surface-2)] text-red-500 hover:opacity-80"
                 aria-label="Clear chat"
               >
                 <Trash2 size={18} />
@@ -487,17 +522,13 @@ export default function App() {
         {tab === 'chat' && (
         <>
         {/* Model Selector + usage */}
-        <div className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-b px-4 py-2`}>
+        <div className="bg-[var(--surface)] border-[var(--border)] border-b px-4 py-2">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Model:</span>
+            <span className="text-sm text-[var(--muted)]">Model:</span>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className={`px-3 py-1 rounded-lg text-sm border ${
-                darkMode
-                  ? 'bg-gray-700 border-gray-600 text-white'
-                  : 'bg-white border-gray-300 text-gray-900'
-              }`}
+              className="px-3 py-1 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)]"
             >
               <option value="auto">Auto — smart routing</option>
               <option value="m3">MiniMax M3 — vision</option>
@@ -505,8 +536,19 @@ export default function App() {
               <option value="gptoss">GPT-OSS 120B — smartest</option>
               <option value="qwen">Qwen3 Coder — coding</option>
             </select>
+            <select
+              value={style}
+              onChange={(e) => setStyle(e.target.value)}
+              className="px-3 py-1 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)]"
+              title="Response style"
+            >
+              <option value="default">Balanced</option>
+              <option value="quick">Quick answer</option>
+              <option value="info">Info only (no code)</option>
+              <option value="code">Code suggestions</option>
+            </select>
             <span
-              className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : darkMode ? 'text-gray-500' : 'text-gray-400'}`}
+              className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : 'text-[var(--muted)]'}`}
               title={`Today's usage — resets daily. Image soft-limit ${IMAGE_DAILY_SOFT_LIMIT}/day to avoid throttling.`}
             >
               {usage.chat} chats · {usage.image} imgs{imageLimitHit ? ' ⚠' : ''}
@@ -515,9 +557,9 @@ export default function App() {
         </div>
 
         {/* Messages */}
-        <div className={`flex-1 overflow-y-auto p-4 space-y-4 ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[var(--bg)]">
           {messages.length === 0 ? (
-            <div className={`flex items-center justify-center h-full text-center ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className="flex items-center justify-center h-full text-center text-[var(--muted)]">
               <div>
                 <p className="text-lg mb-2">No messages yet</p>
                 <p className="text-sm">Start typing to begin a conversation</p>
@@ -528,10 +570,10 @@ export default function App() {
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
-                    className={`max-w-xs px-4 py-2 rounded-lg ${
+                    className={`max-w-[88%] sm:max-w-[80%] min-w-0 px-4 py-2 rounded-lg break-words ${
                       msg.role === 'user'
-                        ? `${darkMode ? 'bg-blue-600' : 'bg-blue-500'} text-white`
-                        : `${darkMode ? 'bg-gray-800' : 'bg-gray-100'} ${darkMode ? 'text-gray-100' : 'text-gray-900'}`
+                        ? 'bg-[var(--user-bubble)] text-[var(--user-text)]'
+                        : 'bg-[var(--assistant-bubble)] text-[var(--assistant-text)]'
                     }`}
                   >
                     {msg.image && (
@@ -559,8 +601,8 @@ export default function App() {
                             onClick={() => speak(msg.id, msg.content)}
                             className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${
                               speakingId === msg.id
-                                ? 'bg-blue-500 text-white'
-                                : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'
+                                ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                                : 'bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80'
                             }`}
                             title={speakingId === msg.id ? 'Stop reading' : 'Read aloud'}
                           >
@@ -570,14 +612,14 @@ export default function App() {
                         )}
                         <button
                           onClick={() => exportReplyWord(msg.content)}
-                          className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'}`}
+                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80"
                           title="Download as Word document"
                         >
                           <FileText size={12} /> Word
                         </button>
                         <button
                           onClick={() => { if (!exportReplyPdf(msg.content)) alert('Allow pop-ups to save PDF.') }}
-                          className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200/80 text-gray-500 hover:bg-gray-300'}`}
+                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80"
                           title="Open as PDF (print/save)"
                         >
                           <Download size={12} /> PDF
@@ -589,11 +631,11 @@ export default function App() {
               ))}
               {loading && messages[messages.length - 1]?.role !== 'assistant' && (
                 <div className="flex justify-start">
-                  <div className={`${darkMode ? 'bg-gray-800' : 'bg-gray-100'} px-4 py-2 rounded-lg`}>
+                  <div className="bg-[var(--assistant-bubble)] px-4 py-2 rounded-lg">
                     <div className="flex gap-1">
-                      <div className={`w-2 h-2 rounded-full ${darkMode ? 'bg-gray-400' : 'bg-gray-600'} animate-bounce`}></div>
-                      <div className={`w-2 h-2 rounded-full ${darkMode ? 'bg-gray-400' : 'bg-gray-600'} animate-bounce`} style={{ animationDelay: '0.1s' }}></div>
-                      <div className={`w-2 h-2 rounded-full ${darkMode ? 'bg-gray-400' : 'bg-gray-600'} animate-bounce`} style={{ animationDelay: '0.2s' }}></div>
+                      <div className="w-2 h-2 rounded-full bg-[var(--muted)] animate-bounce"></div>
+                      <div className="w-2 h-2 rounded-full bg-[var(--muted)] animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                      <div className="w-2 h-2 rounded-full bg-[var(--muted)] animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                     </div>
                   </div>
                 </div>
@@ -645,7 +687,7 @@ export default function App() {
 
         {/* Input Area */}
         <div
-          className={`${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'} border-t px-4 pt-4`}
+          className="bg-[var(--surface)] border-[var(--border)] border-t px-4 pt-4"
           style={{ paddingBottom: BOTTOM_INSET }}
         >
           {imagePreview && (
@@ -656,26 +698,26 @@ export default function App() {
                   setImage(null)
                   setImagePreview(null)
                 }}
-                className={`text-sm px-2 py-1 rounded ${darkMode ? 'bg-gray-700 text-red-400' : 'bg-gray-200 text-red-600'}`}
+                className="text-sm px-2 py-1 rounded bg-[var(--surface-2)] text-red-500"
               >
                 Remove
               </button>
             </div>
           )}
           {(doc || docLoading) && (
-            <div className={`mb-3 flex items-center justify-between gap-2 px-3 py-2 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`}>
+            <div className="mb-3 flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--surface-2)]">
               <div className="flex items-center gap-2 min-w-0">
                 {docLoading
                   ? <Loader2 size={16} className="animate-spin shrink-0" />
-                  : <FileUp size={16} className="shrink-0 text-blue-500" />}
-                <span className={`text-sm truncate ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>
+                  : <FileUp size={16} className="shrink-0 text-[var(--accent)]" />}
+                <span className="text-sm truncate text-[var(--text)]">
                   {docLoading ? 'Reading document…' : `${doc.name}${doc.truncated ? ' (truncated)' : ''}`}
                 </span>
               </div>
               {doc && (
                 <button
                   onClick={() => setDoc(null)}
-                  className={`text-sm px-2 py-1 rounded shrink-0 ${darkMode ? 'bg-gray-600 text-red-400' : 'bg-gray-300 text-red-600'}`}
+                  className="text-sm px-2 py-1 rounded shrink-0 bg-[var(--surface)] text-red-500"
                 >
                   Remove
                 </button>
@@ -689,8 +731,8 @@ export default function App() {
               onClick={() => setWebSearch((v) => !v)}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
                 webSearch
-                  ? 'bg-blue-500 text-white border-blue-500'
-                  : darkMode ? 'bg-gray-700 text-gray-300 border-gray-600' : 'bg-gray-100 text-gray-600 border-gray-200'
+                  ? 'bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)]'
+                  : 'bg-[var(--surface-2)] text-[var(--muted)] border-[var(--border)]'
               }`}
               title="Search the web for current information"
             >
@@ -708,7 +750,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`p-2 rounded-lg shrink-0 ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+              className={`p-2 rounded-lg shrink-0 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80`}
               aria-label="Upload image"
             >
               <Paperclip size={20} />
@@ -724,7 +766,7 @@ export default function App() {
               type="button"
               onClick={() => docInputRef.current?.click()}
               disabled={docLoading}
-              className={`p-2 rounded-lg shrink-0 ${darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'} disabled:opacity-50`}
+              className={`p-2 rounded-lg shrink-0 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50`}
               aria-label="Upload document"
             >
               {docLoading ? <Loader2 size={20} className="animate-spin" /> : <FileUp size={20} />}
@@ -748,11 +790,7 @@ export default function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={listening ? 'Listening…' : 'Type a message...'}
-              className={`flex-1 min-w-0 px-4 py-2 rounded-lg border ${
-                darkMode
-                  ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400'
-                  : 'bg-white border-gray-300 text-gray-900'
-              }`}
+              className="flex-1 min-w-0 px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
               disabled={loading}
             />
             <button
@@ -760,12 +798,8 @@ export default function App() {
               disabled={loading || (!input.trim() && !image && !doc)}
               className={`p-2 rounded-lg shrink-0 ${
                 loading || (!input.trim() && !image && !doc)
-                  ? darkMode
-                    ? 'bg-gray-700 text-gray-500'
-                    : 'bg-gray-200 text-gray-400'
-                  : darkMode
-                  ? 'bg-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-blue-500 text-white hover:bg-blue-600'
+                  ? 'bg-[var(--surface-2)] text-[var(--muted)] opacity-60'
+                  : 'bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]'
               }`}
               aria-label="Send message"
             >
@@ -784,24 +818,24 @@ export default function App() {
               onClick={() => setSidebarOpen(false)}
             />
             <div
-              className={`relative w-72 max-w-[80%] h-full flex flex-col shadow-xl ${darkMode ? 'bg-gray-800' : 'bg-white'}`}
+              className="relative w-72 max-w-[80%] h-full flex flex-col shadow-xl bg-[var(--surface)] text-[var(--text)]"
               style={{ paddingTop: TOP_INSET }}
             >
-              <div className={`flex items-center justify-between px-4 pb-3 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-                <span className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Chats</span>
+              <div className="flex items-center justify-between px-4 pb-3 border-b border-[var(--border)]">
+                <span className="font-semibold text-[var(--text)]">Chats</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className={`p-1.5 rounded-lg ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}
+                  className="p-1.5 rounded-lg text-[var(--muted)] hover:bg-[var(--surface-2)]"
                   aria-label="Close"
                 >
                   <X size={18} />
                 </button>
               </div>
 
-              <div className="p-3 flex flex-col gap-2 border-b border-dashed border-gray-300/40">
+              <div className="p-3 flex flex-col gap-2 border-b border-[var(--border)]">
                 <button
                   onClick={startNewChat}
-                  className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]"
                 >
                   <Plus size={16} /> New chat
                 </button>
@@ -809,14 +843,14 @@ export default function App() {
                   <button
                     onClick={() => exportWord(activeConv?.title || 'chat', messages)}
                     disabled={messages.length === 0}
-                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 ${darkMode ? 'bg-gray-700 text-gray-200 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80"
                   >
                     <FileText size={14} /> Word
                   </button>
                   <button
                     onClick={() => { if (!exportPdf(activeConv?.title || 'chat', messages)) alert('Allow pop-ups to export PDF.') }}
                     disabled={messages.length === 0}
-                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 ${darkMode ? 'bg-gray-700 text-gray-200 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80"
                   >
                     <Printer size={14} /> PDF
                   </button>
@@ -828,20 +862,18 @@ export default function App() {
                   <div
                     key={c.id}
                     className={`group flex items-center gap-1 rounded-lg mb-1 ${
-                      c.id === activeId
-                        ? darkMode ? 'bg-gray-700' : 'bg-gray-100'
-                        : ''
+                      c.id === activeId ? 'bg-[var(--surface-2)]' : ''
                     }`}
                   >
                     <button
                       onClick={() => selectChat(c.id)}
-                      className={`flex-1 text-left px-3 py-2 text-sm truncate ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}
+                      className="flex-1 text-left px-3 py-2 text-sm truncate text-[var(--text)]"
                     >
                       {c.title || 'New chat'}
                     </button>
                     <button
                       onClick={() => deleteChat(c.id)}
-                      className={`p-1.5 mr-1 rounded ${darkMode ? 'text-gray-500 hover:text-red-400' : 'text-gray-400 hover:text-red-500'}`}
+                      className="p-1.5 mr-1 rounded text-[var(--muted)] hover:text-red-500"
                       aria-label="Delete chat"
                     >
                       <Trash2 size={15} />
