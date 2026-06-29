@@ -77,18 +77,11 @@ export default async function handler(req, res) {
   // Optional web search (Tavily): run BEFORE the model so we can inject current
   // results as context. Skipped for image requests (no point searching "draw a cat").
   let searchData = null
-  let searchStatus = null // diagnostic, surfaced in the done event when webSearch is on
-  if (webSearch && !wantsImage) {
-    if (!TAVILY_KEY) {
-      searchStatus = 'no-key'
-    } else if (newMessage) {
-      try {
-        searchData = await runWebSearch(newMessage, TAVILY_KEY)
-        searchStatus = `ok:${searchData.results.length}`
-      } catch (err) {
-        console.error('Web search failed:', err.message)
-        searchStatus = `err:${err.message}`.slice(0, 120)
-      }
+  if (webSearch && TAVILY_KEY && newMessage && !wantsImage) {
+    try {
+      searchData = await runWebSearch(newMessage, TAVILY_KEY)
+    } catch (err) {
+      console.error('Web search failed:', err.message)
     }
   }
 
@@ -144,7 +137,7 @@ export default async function handler(req, res) {
         await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, HUGGINGFACE_KEY, res, writeDelta)
       }
       if (searchData) writeDelta(sourcesMarkdown(searchData))
-      res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel, search: searchStatus }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
       console.error('Ollama failed:', err.message)
@@ -163,7 +156,7 @@ export default async function handler(req, res) {
     try {
       await streamNim(fullMessages, ids.nim, NVIDIA_NIM_KEY, writeDelta)
       if (searchData) writeDelta(sourcesMarkdown(searchData))
-      res.write(JSON.stringify({ done: true, provider: 'nim', model: effectiveModel, search: searchStatus }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'nim', model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
       console.error('NIM failed:', err.message)
