@@ -26,7 +26,7 @@ export default async function handler(req, res) {
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
   const HUGGINGFACE_KEY = process.env.HUGGINGFACE_KEY
-  const TAVILY_KEY = process.env.TAVILY_KEY
+  const TAVILY_KEY = process.env.TAVILY_KEY || process.env.TAVILY_API_KEY || process.env.TAVILY
 
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
