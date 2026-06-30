@@ -11,7 +11,7 @@ import {
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
 import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
-import { Download, Globe, Mic, FileUp, Volume2, Square, Loader2 } from 'lucide-react'
+import { Download, Globe, Mic, FileUp, Volume2, Square, Loader2, Copy, Check, RefreshCw, Pencil, Search } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
 import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { THEMES, isDarkTheme } from './lib/themes'
@@ -60,10 +60,13 @@ export default function App() {
   const [doc, setDoc] = useState(null)          // { name, text, chars, truncated }
   const [docLoading, setDocLoading] = useState(false)
   const [speakingId, setSpeakingId] = useState(null) // id of the reply being read aloud
+  const [copiedId, setCopiedId] = useState(null)     // id of the message just copied
+  const [convSearch, setConvSearch] = useState('')   // sidebar conversation filter
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
   const docInputRef = useRef(null)
   const recognitionRef = useRef(null)
+  const abortRef = useRef(null)                       // AbortController for the live stream
 
   // Web Speech API — present on Chrome/Edge/Safari (incl. iOS), absent on Firefox.
   const speechSupported = typeof window !== 'undefined' &&
@@ -253,9 +256,13 @@ export default function App() {
       )
     }
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           // Re-attach any document text from prior turns so follow-ups keep context.
@@ -343,9 +350,11 @@ export default function App() {
         }
       }
     } catch (err) {
-      // Network drop mid-stream: keep any partial content, but offer retry only
-      // if we never received anything.
-      if (accumulated) {
+      // User pressed Stop: keep whatever streamed, no error.
+      if (err.name === 'AbortError') {
+        setLastAttempt(null)
+      } else if (accumulated) {
+        // Network drop mid-stream: keep partial content.
         appendDelta('\n\n⚠️ Connection interrupted.')
       } else {
         setError('Network error — check your connection and try again.')
@@ -353,7 +362,63 @@ export default function App() {
       }
     } finally {
       setLoading(false)
+      abortRef.current = null
     }
+  }
+
+  const stopGeneration = () => abortRef.current?.abort()
+
+  // Reconstruct a send payload (text + image + document) from a stored user message,
+  // used by regenerate and edit.
+  const payloadFromUserMessage = (m) => {
+    let image = null
+    if (m.image && m.image.startsWith('data:')) {
+      const [meta, b64] = m.image.split(',')
+      const mediaType = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg'
+      image = { data: b64, mediaType }
+    }
+    const document = m.docText ? { name: m.docName, text: m.docText } : null
+    return { text: m.content || '', image, document }
+  }
+
+  // Regenerate: drop the latest assistant reply and re-send the last user turn.
+  const regenerateLast = () => {
+    if (loading) return
+    const msgs = messages
+    let userIdx = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') { userIdx = i; break }
+    }
+    if (userIdx === -1) return
+    const history = msgs.slice(0, userIdx)
+    const payload = payloadFromUserMessage(msgs[userIdx])
+    setMessages(() => msgs.slice(0, userIdx + 1)) // keep the user msg, drop old reply
+    sendToModel(history, payload)
+  }
+
+  // Edit: pull a user message back into the composer and truncate the chat to before it.
+  const editMessage = (id) => {
+    if (loading) return
+    const idx = messages.findIndex((m) => m.id === id)
+    if (idx === -1) return
+    const m = messages[idx]
+    setInput(m.content || '')
+    if (m.image && m.image.startsWith('data:')) {
+      setImagePreview(m.image)
+      const [meta, b64] = m.image.split(',')
+      const mediaType = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg'
+      setImage({ data: b64, mediaType })
+    }
+    if (m.docText) setDoc({ name: m.docName, text: m.docText, chars: m.docText.length, truncated: false })
+    setMessages(() => messages.slice(0, idx))
+  }
+
+  const copyMessage = (id, text) => {
+    if (!navigator.clipboard) return
+    navigator.clipboard.writeText(text || '').then(() => {
+      setCopiedId(id)
+      setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500)
+    }).catch(() => {})
   }
 
   const handleSubmit = async (e) => {
@@ -567,7 +632,7 @@ export default function App() {
             </div>
           ) : (
             <>
-              {messages.map((msg) => (
+              {messages.map((msg, mi) => (
                 <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
                     className={`max-w-[88%] sm:max-w-[80%] min-w-0 px-4 py-2 rounded-lg break-words ${
@@ -623,6 +688,34 @@ export default function App() {
                           title="Open as PDF (print/save)"
                         >
                           <Download size={12} /> PDF
+                        </button>
+                        <button
+                          onClick={() => copyMessage(msg.id, msg.content)}
+                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80"
+                          title="Copy reply"
+                        >
+                          {copiedId === msg.id ? <Check size={12} /> : <Copy size={12} />}
+                          {copiedId === msg.id ? 'Copied' : 'Copy'}
+                        </button>
+                        {mi === messages.length - 1 && (
+                          <button
+                            onClick={regenerateLast}
+                            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80"
+                            title="Regenerate this reply"
+                          >
+                            <RefreshCw size={12} /> Retry
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {msg.role === 'user' && !loading && (
+                      <div className="flex justify-end mt-1">
+                        <button
+                          onClick={() => editMessage(msg.id)}
+                          className="flex items-center gap-1 text-[10px] opacity-70 hover:opacity-100"
+                          title="Edit & resend"
+                        >
+                          <Pencil size={11} /> Edit
                         </button>
                       </div>
                     )}
@@ -793,18 +886,29 @@ export default function App() {
               className="flex-1 min-w-0 px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
               disabled={loading}
             />
-            <button
-              type="submit"
-              disabled={loading || (!input.trim() && !image && !doc)}
-              className={`p-2 rounded-lg shrink-0 ${
-                loading || (!input.trim() && !image && !doc)
-                  ? 'bg-[var(--surface-2)] text-[var(--muted)] opacity-60'
-                  : 'bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]'
-              }`}
-              aria-label="Send message"
-            >
-              <Send size={20} />
-            </button>
+            {loading ? (
+              <button
+                type="button"
+                onClick={stopGeneration}
+                className="p-2 rounded-lg shrink-0 bg-red-500 text-white hover:bg-red-600"
+                aria-label="Stop generating"
+              >
+                <Square size={20} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim() && !image && !doc}
+                className={`p-2 rounded-lg shrink-0 ${
+                  !input.trim() && !image && !doc
+                    ? 'bg-[var(--surface-2)] text-[var(--muted)] opacity-60'
+                    : 'bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]'
+                }`}
+                aria-label="Send message"
+              >
+                <Send size={20} />
+              </button>
+            )}
           </form>
         </div>
         </>
@@ -857,8 +961,28 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="px-3 pt-2 pb-1">
+                <div className="relative">
+                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+                  <input
+                    type="text"
+                    value={convSearch}
+                    onChange={(e) => setConvSearch(e.target.value)}
+                    placeholder="Search chats…"
+                    className="w-full pl-8 pr-2 py-1.5 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
+                  />
+                </div>
+              </div>
+
               <div className="flex-1 overflow-y-auto p-2">
-                {conversations.map((c) => (
+                {conversations
+                  .filter((c) => {
+                    const q = convSearch.trim().toLowerCase()
+                    if (!q) return true
+                    if ((c.title || '').toLowerCase().includes(q)) return true
+                    return (c.messages || []).some((m) => (m.content || '').toLowerCase().includes(q))
+                  })
+                  .map((c) => (
                   <div
                     key={c.id}
                     className={`group flex items-center gap-1 rounded-lg mb-1 ${
