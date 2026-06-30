@@ -76,6 +76,17 @@ Every assistant reply has **Word** and **PDF** buttons underneath:
 - **Two providers** — NVIDIA NIM FLUX.1-dev (faster, higher quality) with HuggingFace FLUX.1-schnell as automatic fallback when NIM credits run out.
 - **Inline** — generated images appear directly in the chat bubble.
 
+## Coding Mode (Phase 8)
+
+A free, browser-based fallback coding assistant — edit your GitHub repos straight from the app, no local machine and no Claude required. Built for "I ran out of Claude usage, keep going."
+
+- **Password-gated** — the site is public, so Coding Mode is locked behind `CODING_MODE_PASSWORD`. The GitHub token never reaches the browser; it lives only in `GITHUB_TOKEN` and is used server-side by `api/github.js`. The password is held only in `sessionStorage` and checked in constant time.
+- **Flow** — unlock → pick any of your repos → browse/open a file → describe the change in plain English → the AI (`qwen3-coder`, NIM `llama-3.3` fallback) rewrites the whole file → **review a before/after diff** → confirm → it commits to the default branch → Vercel redeploys.
+- **Safe by default** — nothing is committed until you approve the diff. Stale-write (409) conflicts auto-reload the latest file. Every commit is a normal, revertible git commit.
+- **Scope v1** — single-file edits. Multi-file/agentic editing can come later.
+
+Requires two extra Vercel env vars (see the table below): `GITHUB_TOKEN` and `CODING_MODE_PASSWORD`. Until both are set, Coding Mode reports "not configured" and does nothing.
+
 ## Garden Game
 
 A farming economy where you grow plants, harvest them for coins, and expand your garden:
@@ -162,6 +173,8 @@ wife-gpt/
 | `NVIDIA_NIM_KEY` | Yes | NIM chat fallback + image generation (FLUX.1-dev) |
 | `HUGGINGFACE_KEY` | Recommended | HuggingFace image fallback (free forever, fires when NIM 403s) |
 | `TAVILY_KEY` | Optional | Web search (free 1000/mo at tavily.com). Without it, the web-search toggle gracefully no-ops. |
+| `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
+| `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 
 Supabase credentials are embedded in the frontend bundle (publishable anon key — this is standard Supabase practice, same as Stripe's publishable key).
 
