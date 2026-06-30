@@ -37,7 +37,10 @@ No Docker. No database server. No monthly bills.
 - **Response cache** — identical text prompts return instantly without an API call.
 - **Request deduplication** — prevents double-sends while in-flight.
 - **Usage monitor** — daily chat/image counts with early warning before soft-limits.
-- **Markdown rendering** — replies display formatted headings, bold, italic, lists, **tables**, and scrollable **code blocks** (in chat and in exports).
+- **Markdown rendering** — replies display formatted headings, bold, italic, lists, **tables**, scrollable **code blocks** with **syntax highlighting**, and **math** (KaTeX). All lazy-loaded.
+- **Message controls** — stop generation mid-stream, copy any reply, regenerate the last answer, and edit & resend your own messages.
+- **Follow-up suggestions** — tappable suggested next questions after each reply.
+- **Conversation search** — filter the chat sidebar by title or message content.
 - **Response style** — a selector (Balanced / Quick answer / Info only / Code) injects a system prompt so replies match your preference — no unwanted code or long-winded walls of text.
 - **Themes** — 5 themes via the palette button: Light, Dark, Matte Yellow, Ocean, Rose. Text contrast is tuned per theme. Persisted.
 
