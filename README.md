@@ -75,6 +75,7 @@ Every assistant reply has **Word** and **PDF** buttons underneath:
 - **Tool-calling** — the chat model decides when to generate an image by calling a `generate_image` tool. No brittle keyword matching.
 - **Two providers** — NVIDIA NIM FLUX.1-dev (faster, higher quality) with HuggingFace FLUX.1-schnell as automatic fallback when NIM credits run out.
 - **Inline** — generated images appear directly in the chat bubble.
+- **Photo transformation (image-to-image)** — upload a photo and ask to change it ("show this garden in full summer bloom", "add roses along the fence"). Your *actual* photo is edited via FLUX.1 Kontext on NVIDIA NIM (`flux.1-kontext-dev`, same `NVIDIA_NIM_KEY`, non-commercial license). Uploads are downscaled in the browser to stay under the inline-image limit and keep it fast. Triggered automatically when an image is attached and the message reads like an edit; plain questions about a photo stay as vision Q&A. Robustness: 45s timeout with empty-result guard.
 
 ## Coding Mode (Phase 8)
 

@@ -85,6 +85,27 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: `Unknown model: ${model}` })
   }
 
+  // Photo transformation (image-to-image): when the user uploads a photo AND asks to
+  // change/transform it ("show this garden in full summer bloom"), edit the ACTUAL photo
+  // with FLUX.1 Kontext rather than describing it or drawing something unrelated. Done
+  // deterministically (no flaky tool-calling) — call Kontext directly and stream the
+  // edited image back. Requires the NIM key; falls through to normal vision otherwise.
+  if (hasVisionInput && NVIDIA_NIM_KEY && (wantsImage || isEditRequest(newMessage))) {
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    try {
+      const dataUri = `data:${image.mediaType || 'image/jpeg'};base64,${image.data}`
+      const b64 = await editImage(newMessage, dataUri, NVIDIA_NIM_KEY)
+      res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: newMessage }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'nim', model: 'kontext' }) + '\n')
+    } catch (err) {
+      console.error('Kontext edit failed:', err.message)
+      res.write(JSON.stringify({ error: `Couldn't transform the photo: ${err.message}` }) + '\n')
+    }
+    return res.end()
+  }
+
   // Optional web search (Tavily): run BEFORE the model so we can inject current
   // results as context. Skipped for image requests (no point searching "draw a cat").
   let searchData = null
@@ -216,6 +237,17 @@ const IMAGE_INTENT_RE =
 
 function isImageRequest(text) {
   return typeof text === 'string' && IMAGE_INTENT_RE.test(text)
+}
+
+// Does this read like a request to TRANSFORM an uploaded photo (image-to-image)? Only
+// consulted when an image is actually attached, so it can be fairly liberal — the cost of
+// a false positive is editing instead of describing. Intentionally excludes pure
+// questions ("what's in this?", "describe this") which should stay as vision Q&A.
+const EDIT_INTENT_RE =
+  /\b(edit|change|turn|transform|convert|add|remove|replace|repaint|restyle|redesign|recolou?r|enhance|improve|make (it|this|the|them)|show (it|this|the|me)|what (would|will) (it|this|the)|in (summer|winter|spring|autumn|fall)|fully grown|matured?|next (year|season|month)|years? (from now|later)|in (full )?bloom|blooming|grown( up)?|future)\b/i
+
+function isEditRequest(text) {
+  return typeof text === 'string' && EDIT_INTENT_RE.test(text)
 }
 
 // Auto routing for text queries: coding-flavored prompts go to Qwen3-Coder; everything
@@ -475,6 +507,39 @@ async function generateImage(prompt, nimKey) {
   const b64 = data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64
   if (!b64) throw new Error('no image returned')
   if (b64.length < MIN_IMAGE_B64) throw new Error('image came back empty')
+  return b64
+}
+
+// Image-to-image editing (FLUX.1 Kontext on NVIDIA NIM). Takes the user's actual photo
+// (as a data URI) + a plain-language instruction and returns the edited photo. Same host
+// and key as text-to-image; `image` carries the input, `aspect_ratio: match_input_image`
+// keeps the framing. Non-commercial license — fine for this personal app.
+async function editImage(prompt, imageDataUri, nimKey) {
+  const response = await fetchWithTimeout('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-kontext-dev', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${nimKey}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify({
+      prompt: String(prompt).slice(0, 1500),
+      image: imageDataUri,
+      cfg_scale: 3.5,
+      steps: 30,
+      aspect_ratio: 'match_input_image',
+      seed: Math.floor(Math.random() * 1e9)
+    })
+  }, 45000, 'NIM photo edit')
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    // 413/422 here usually means the photo is still too large for inline upload.
+    throw new Error(`${response.status} ${body.slice(0, 150)}`)
+  }
+  const data = await response.json()
+  const b64 = (data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64) || data.image
+  if (!b64) throw new Error('no image returned')
+  if (b64.length < MIN_IMAGE_B64) throw new Error('edited image came back empty')
   return b64
 }
 

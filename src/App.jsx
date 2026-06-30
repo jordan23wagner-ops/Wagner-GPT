@@ -339,16 +339,43 @@ export default function App() {
     }, 1500)
   }, [conversations, synced])
 
-  const handleImageUpload = (e) => {
+  // Shrink an image to <= maxDim on its longest side and re-encode as JPEG. Phone photos
+  // are several MB; this keeps vision uploads fast and, crucially, small enough for the
+  // FLUX.1 Kontext inline photo-edit limit. Falls back to the raw file if canvas fails.
+  const downscaleImage = (file, maxDim = 1024, quality = 0.82) =>
+    new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file)
+      const img = new Image()
+      img.onload = () => {
+        URL.revokeObjectURL(url)
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height))
+        const w = Math.round(img.width * scale)
+        const h = Math.round(img.height * scale)
+        const canvas = document.createElement('canvas')
+        canvas.width = w
+        canvas.height = h
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h)
+        const dataUrl = canvas.toDataURL('image/jpeg', quality)
+        resolve({ dataUrl, data: dataUrl.split(',')[1], mediaType: 'image/jpeg' })
+      }
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image decode failed')) }
+      img.src = url
+    })
+
+  const handleImageUpload = async (e) => {
     const file = e.target.files[0]
-    if (file) {
+    e.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    try {
+      const { dataUrl, data, mediaType } = await downscaleImage(file)
+      setImagePreview(dataUrl)
+      setImage({ data, mediaType })
+    } catch {
+      // Fallback: send the original file untouched.
       const reader = new FileReader()
       reader.onload = (event) => {
         setImagePreview(event.target.result)
-        setImage({
-          data: event.target.result.split(',')[1],
-          mediaType: file.type,
-        })
+        setImage({ data: event.target.result.split(',')[1], mediaType: file.type })
       }
       reader.readAsDataURL(file)
     }
@@ -1199,7 +1226,11 @@ export default function App() {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={listening ? 'Listening…' : 'Type a message...'}
+              placeholder={
+                listening ? 'Listening…'
+                : imagePreview ? 'Ask about the photo, or say "show this in full summer bloom"…'
+                : 'Type a message...'
+              }
               className="flex-1 min-w-0 px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
               disabled={loading}
             />
