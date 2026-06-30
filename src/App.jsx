@@ -63,6 +63,8 @@ export default function App() {
   const [speakingId, setSpeakingId] = useState(null) // id of the reply being read aloud
   const [copiedId, setCopiedId] = useState(null)     // id of the message just copied
   const [convSearch, setConvSearch] = useState('')   // sidebar conversation filter
+  const [suggestions, setSuggestions] = useState([]) // follow-up question chips
+  const suggestedForRef = useRef(null)               // last reply id we fetched for
   const messagesEndRef = useRef(null)
   const messagesContainerRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -105,6 +107,47 @@ export default function App() {
     if (loading) return
     enhanceMessages(messagesContainerRef.current)
   }, [messages, loading])
+
+  // After a reply completes, fetch 3 follow-up suggestions (once per reply).
+  useEffect(() => {
+    if (loading) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || !last.content || last.content.length < 12) return
+    if (suggestedForRef.current === last.id) return
+    suggestedForRef.current = last.id
+    fetchSuggestions(messages)
+  }, [loading, messages]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchSuggestions = async (convMessages) => {
+    try {
+      const recent = convMessages.slice(-6).map((m) => ({ role: m.role, content: m.content || '' }))
+      const res = await fetch('/api/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: recent }),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      if (Array.isArray(data.suggestions)) setSuggestions(data.suggestions.slice(0, 3))
+    } catch { /* best-effort; show nothing */ }
+  }
+
+  // Send arbitrary text (used by follow-up chips). Mirrors handleSubmit minus uploads.
+  const sendText = async (text) => {
+    if (loading || !text.trim()) return
+    setSuggestions([])
+    const userMessage = { id: Date.now(), role: 'user', content: text }
+    const history = messages
+    setMessages((prev) => [...prev, userMessage])
+    if (!webSearch && !looksLikeImageRequest(text)) {
+      const cached = getCached(cacheKey(model, history, text))
+      if (cached) {
+        setMessages((prev) => [...prev, { id: Date.now() + 1, role: 'assistant', content: cached, cached: true }])
+        return
+      }
+    }
+    await sendToModel(history, { text, image: null, document: null })
+  }
 
   useEffect(() => {
     localStorage.setItem('theme', theme)
@@ -400,6 +443,7 @@ export default function App() {
     if (userIdx === -1) return
     const history = msgs.slice(0, userIdx)
     const payload = payloadFromUserMessage(msgs[userIdx])
+    setSuggestions([])
     setMessages(() => msgs.slice(0, userIdx + 1)) // keep the user msg, drop old reply
     sendToModel(history, payload)
   }
@@ -455,6 +499,7 @@ export default function App() {
     setImage(null)
     setImagePreview(null)
     setDoc(null)
+    setSuggestions([])
 
     // Cache hit: serve an identical text-only, non-image, non-doc prompt instantly.
     if (!image && !doc && !webSearch && !looksLikeImageRequest(text)) {
@@ -739,6 +784,19 @@ export default function App() {
                       <div className="w-2 h-2 rounded-full bg-[var(--muted)] animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                     </div>
                   </div>
+                </div>
+              )}
+              {!loading && suggestions.length > 0 && (
+                <div className="flex flex-col items-start gap-1.5 pt-1">
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => sendText(s)}
+                      className="text-xs text-left px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--accent)] hover:bg-[var(--surface-2)]"
+                    >
+                      {s}
+                    </button>
+                  ))}
                 </div>
               )}
               <div ref={messagesEndRef} />
