@@ -18,6 +18,7 @@ import { THEMES, isDarkTheme } from './lib/themes'
 import { Palette } from 'lucide-react'
 import { enhanceMessages } from './lib/enhanceMessages'
 import { attachRunButtons } from './lib/codeRunner'
+import { attachArtifacts } from './lib/artifacts'
 import {
   storeMemory, retrieveMemories, listMemories, deleteMemory,
   loadSettings, saveSettings, memoryAvailable,
@@ -149,6 +150,7 @@ export default function App() {
     if (loading) return
     enhanceMessages(messagesContainerRef.current)
     attachRunButtons(messagesContainerRef.current)
+    attachArtifacts(messagesContainerRef.current)
   }, [messages, loading])
 
   // After a reply completes, fetch 3 follow-up suggestions (once per reply).
