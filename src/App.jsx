@@ -17,6 +17,7 @@ import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { THEMES, isDarkTheme } from './lib/themes'
 import { Palette } from 'lucide-react'
 import { enhanceMessages } from './lib/enhanceMessages'
+import { attachRunButtons } from './lib/codeRunner'
 import {
   storeMemory, retrieveMemories, listMemories, deleteMemory,
   loadSettings, saveSettings, memoryAvailable,
@@ -142,10 +143,12 @@ export default function App() {
 
   useEffect(() => { scrollToBottom() }, [messages])
 
-  // Apply syntax highlighting + math rendering once a reply finishes streaming.
+  // Apply syntax highlighting + math rendering once a reply finishes streaming, then
+  // bolt a "Run" button onto any Python code blocks (Phase 3 — Pyodide interpreter).
   useEffect(() => {
     if (loading) return
     enhanceMessages(messagesContainerRef.current)
+    attachRunButtons(messagesContainerRef.current)
   }, [messages, loading])
 
   // After a reply completes, fetch 3 follow-up suggestions (once per reply).
