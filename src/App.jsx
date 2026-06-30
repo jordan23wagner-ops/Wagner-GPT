@@ -65,8 +65,9 @@ export default function App() {
   })
   const [themeMenuOpen, setThemeMenuOpen] = useState(false)
   const darkMode = isDarkTheme(theme) // many conditionals below still key off this
-  const [image, setImage] = useState(null)
-  const [imagePreview, setImagePreview] = useState(null)
+  const [images, setImages] = useState([])              // uploaded: [{ data, mediaType }]
+  const [imagePreviews, setImagePreviews] = useState([]) // matching data URLs for preview
+  const MAX_IMAGES = 4
   const [error, setError] = useState(null)
   const [lastAttempt, setLastAttempt] = useState(null)
   const [webSearch, setWebSearch] = useState(() => localStorage.getItem('webSearch') === 'true')
@@ -219,7 +220,7 @@ export default function App() {
         return
       }
     }
-    await sendToModel(history, { text, image: null, document: null })
+    await sendToModel(history, { text, images: [], document: null })
   }
 
   useEffect(() => {
@@ -362,23 +363,48 @@ export default function App() {
       img.src = url
     })
 
-  const handleImageUpload = async (e) => {
-    const file = e.target.files[0]
-    e.target.value = '' // allow re-selecting the same file
-    if (!file) return
-    try {
-      const { dataUrl, data, mediaType } = await downscaleImage(file)
-      setImagePreview(dataUrl)
-      setImage({ data, mediaType })
-    } catch {
-      // Fallback: send the original file untouched.
+  const readAsDataURL = (file) =>
+    new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onload = (event) => {
-        setImagePreview(event.target.result)
-        setImage({ data: event.target.result.split(',')[1], mediaType: file.type })
-      }
+      reader.onload = (event) => resolve(event.target.result)
+      reader.onerror = () => reject(new Error('read failed'))
       reader.readAsDataURL(file)
+    })
+
+  // Accept several images at once, up to MAX_IMAGES total. Each is downscaled (falling
+  // back to the raw file), then appended to the existing selection.
+  const handleImageUpload = async (e) => {
+    const files = Array.from(e.target.files || [])
+    e.target.value = '' // allow re-selecting the same file(s)
+    if (!files.length) return
+    const slots = Math.max(0, MAX_IMAGES - images.length)
+    if (slots === 0) {
+      setError(`You can attach up to ${MAX_IMAGES} images.`)
+      return
     }
+    const picked = files.slice(0, slots)
+    const added = []
+    for (const file of picked) {
+      try {
+        const { dataUrl, data, mediaType } = await downscaleImage(file)
+        added.push({ dataUrl, img: { data, mediaType } })
+      } catch {
+        try {
+          const dataUrl = await readAsDataURL(file)
+          added.push({ dataUrl, img: { data: dataUrl.split(',')[1], mediaType: file.type } })
+        } catch { /* skip unreadable file */ }
+      }
+    }
+    if (added.length) {
+      setImagePreviews((prev) => [...prev, ...added.map((a) => a.dataUrl)])
+      setImages((prev) => [...prev, ...added.map((a) => a.img)])
+    }
+  }
+
+  // Remove one selected image (by index) before sending.
+  const removeImage = (idx) => {
+    setImages((prev) => prev.filter((_, i) => i !== idx))
+    setImagePreviews((prev) => prev.filter((_, i) => i !== idx))
   }
 
   // Core send routine. `history` is the message list to send as context,
@@ -486,7 +512,7 @@ export default function App() {
             return { role: m.role, content: `${m.content}\n\n[Attached document: ${m.docName}]\n${m.docText}` }
           }),
           newMessage: payload.text,
-          image: payload.image,
+          images: payload.images,
           document: outgoingDoc,
           model: model,
           webSearch: webSearch,
@@ -563,7 +589,7 @@ export default function App() {
         setUsage(bumpUsage({ chat: 1, image: producedImage ? 1 : 0 }))
         // Cache plain text answers so identical prompts return instantly next time.
         // Never cache web-search answers — they're time-sensitive.
-        if (!producedImage && !payload.image && !webSearch && streamedText.trim()) {
+        if (!producedImage && !(payload.images && payload.images.length) && !webSearch && streamedText.trim()) {
           setCached(cacheKey(model, history, payload.text), streamedText)
         }
       }
@@ -586,17 +612,22 @@ export default function App() {
 
   const stopGeneration = () => abortRef.current?.abort()
 
-  // Reconstruct a send payload (text + image + document) from a stored user message,
+  // Data-URL preview -> { data, mediaType }. Legacy messages stored a single `image`;
+  // newer ones store an `images` array. previewsOf() unifies both.
+  const dataUrlToImage = (p) => {
+    const [meta, b64] = p.split(',')
+    const mediaType = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg'
+    return { data: b64, mediaType }
+  }
+  const previewsOf = (m) =>
+    (m.images && m.images.length ? m.images : (m.image ? [m.image] : []))
+      .filter((p) => typeof p === 'string' && p.startsWith('data:'))
+
+  // Reconstruct a send payload (text + images + document) from a stored user message,
   // used by regenerate and edit.
   const payloadFromUserMessage = (m) => {
-    let image = null
-    if (m.image && m.image.startsWith('data:')) {
-      const [meta, b64] = m.image.split(',')
-      const mediaType = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg'
-      image = { data: b64, mediaType }
-    }
     const document = m.docText ? { name: m.docName, text: m.docText } : null
-    return { text: m.content || '', image, document }
+    return { text: m.content || '', images: previewsOf(m).map(dataUrlToImage), document }
   }
 
   // Regenerate: drop the latest assistant reply and re-send the last user turn.
@@ -622,11 +653,10 @@ export default function App() {
     if (idx === -1) return
     const m = messages[idx]
     setInput(m.content || '')
-    if (m.image && m.image.startsWith('data:')) {
-      setImagePreview(m.image)
-      const [meta, b64] = m.image.split(',')
-      const mediaType = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg'
-      setImage({ data: b64, mediaType })
+    const previews = previewsOf(m)
+    if (previews.length) {
+      setImagePreviews(previews)
+      setImages(previews.map(dataUrlToImage))
     }
     if (m.docText) setDoc({ name: m.docName, text: m.docText, chars: m.docText.length, truncated: false })
     setMessages(() => messages.slice(0, idx))
@@ -664,14 +694,14 @@ export default function App() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (loading) return // dedupe: never run two requests at once
-    if (!input.trim() && !image && !doc) return
+    if (!input.trim() && !images.length && !doc) return
 
     const text = input
     const userMessage = {
       id: Date.now(),
       role: 'user',
       content: text,
-      image: imagePreview,
+      images: imagePreviews.length ? imagePreviews : undefined,
       // Keep the document text on the message so follow-up turns retain context,
       // but display only the filename chip (docText is hidden from the bubble).
       docName: doc ? doc.name : undefined,
@@ -680,12 +710,12 @@ export default function App() {
 
     // Snapshot the context (before adding this turn) and the new payload.
     const history = messages
-    const payload = { text, image: image, document: doc ? { name: doc.name, text: doc.text } : null }
+    const payload = { text, images, document: doc ? { name: doc.name, text: doc.text } : null }
 
     setMessages((prev) => [...prev, userMessage])
     setInput('')
-    setImage(null)
-    setImagePreview(null)
+    setImages([])
+    setImagePreviews([])
     setDoc(null)
     setSuggestions([])
 
@@ -696,7 +726,7 @@ export default function App() {
     }
 
     // Cache hit: serve an identical text-only, non-image, non-doc prompt instantly.
-    if (!image && !doc && !webSearch && !looksLikeImageRequest(text)) {
+    if (!images.length && !doc && !webSearch && !looksLikeImageRequest(text)) {
       const cached = getCached(cacheKey(model, history, text))
       if (cached) {
         setMessages((prev) => [
@@ -958,11 +988,26 @@ export default function App() {
                         : 'bg-[var(--assistant-bubble)] text-[var(--assistant-text)]'
                     }`}
                   >
-                    {msg.image && (
+                    {/* Uploaded photo(s) — array on new messages, single `image` on legacy ones. */}
+                    {(msg.images && msg.images.length ? msg.images : (msg.role === 'user' && msg.image ? [msg.image] : [])).length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {(msg.images && msg.images.length ? msg.images : [msg.image]).map((src, i) => (
+                          <img
+                            key={i}
+                            src={src}
+                            alt="uploaded"
+                            className="max-w-[8rem] max-h-32 rounded"
+                            onError={(e) => { e.currentTarget.style.display = 'none' }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* AI-generated image (assistant only) — with a load-failure note. */}
+                    {msg.role === 'assistant' && msg.image && (
                       <>
                         <img
                           src={msg.image}
-                          alt={msg.role === 'assistant' ? 'generated image' : 'uploaded'}
+                          alt="generated image"
                           className="max-w-xs rounded mb-2"
                           onError={(e) => {
                             e.currentTarget.style.display = 'none'
@@ -1127,18 +1172,20 @@ export default function App() {
           className="bg-[var(--surface)] border-[var(--border)] border-t px-4 pt-4"
           style={{ paddingBottom: BOTTOM_INSET }}
         >
-          {imagePreview && (
-            <div className="mb-3 flex items-center justify-between">
-              <img src={imagePreview} alt="preview" className="h-16 rounded-lg" />
-              <button
-                onClick={() => {
-                  setImage(null)
-                  setImagePreview(null)
-                }}
-                className="text-sm px-2 py-1 rounded bg-[var(--surface-2)] text-red-500"
-              >
-                Remove
-              </button>
+          {imagePreviews.length > 0 && (
+            <div className="mb-3 flex items-center gap-2 flex-wrap">
+              {imagePreviews.map((src, i) => (
+                <div key={i} className="relative">
+                  <img src={src} alt="preview" className="h-16 w-16 object-cover rounded-lg" />
+                  <button
+                    onClick={() => removeImage(i)}
+                    className="absolute -top-1.5 -right-1.5 rounded-full p-0.5 bg-[var(--surface)] border border-[var(--border)] text-red-500 shadow"
+                    aria-label="Remove image"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           {(doc || docLoading) && (
@@ -1182,6 +1229,7 @@ export default function App() {
               ref={fileInputRef}
               onChange={handleImageUpload}
               accept="image/*"
+              multiple
               className="hidden"
             />
             <button
@@ -1228,7 +1276,7 @@ export default function App() {
               onChange={(e) => setInput(e.target.value)}
               placeholder={
                 listening ? 'Listening…'
-                : imagePreview ? 'Ask about the photo, or say "show this in full summer bloom"…'
+                : imagePreviews.length ? 'Ask about the photo(s), or say "show this in full summer bloom"…'
                 : 'Type a message...'
               }
               className="flex-1 min-w-0 px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
@@ -1246,9 +1294,9 @@ export default function App() {
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim() && !image && !doc}
+                disabled={!input.trim() && !images.length && !doc}
                 className={`p-2 rounded-lg shrink-0 ${
-                  !input.trim() && !image && !doc
+                  !input.trim() && !images.length && !doc
                     ? 'bg-[var(--surface-2)] text-[var(--muted)] opacity-60'
                     : 'bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]'
                 }`}

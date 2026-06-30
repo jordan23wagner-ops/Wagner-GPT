@@ -135,9 +135,11 @@ function chatBodyHtml(title, messages) {
       const who = m.role === 'user' ? 'You' : 'Assistant'
       const color = m.role === 'user' ? '#2563eb' : '#047857'
       const content = m.role === 'assistant' ? mdToHtml(m.content) : `<p>${escapeHtml(m.content).replace(/\n/g, '<br/>')}</p>`
-      const img = m.image
-        ? `<div><img src="${m.image}" style="max-width:480px;border-radius:8px;margin:6px 0"/></div>`
-        : ''
+      // Support the new images[] array and the legacy single image.
+      const srcs = (m.images && m.images.length) ? m.images : (m.image ? [m.image] : [])
+      const img = srcs
+        .map((s) => `<div><img src="${s}" style="max-width:480px;border-radius:8px;margin:6px 0"/></div>`)
+        .join('')
       return `<div style="margin:0 0 16px;page-break-inside:avoid"><div style="font-weight:600;color:${color};margin-bottom:4px">${who}</div>${content}${img}</div>`
     })
     .join('')

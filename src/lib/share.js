@@ -16,11 +16,15 @@ function slug() {
 // reader actually needs — role, content, the doc's name, and any hosted image URL.
 function slimMessages(messages) {
   return (messages || [])
-    .filter((m) => m && (m.content || m.image || m.docName))
+    .filter((m) => m && (m.content || m.image || (m.images && m.images.length) || m.docName))
     .map((m) => {
       const out = { role: m.role, content: m.content || '' }
-      if (m.image && !String(m.image).startsWith('data:')) out.image = m.image
-      else if (m.image) out.imageOmitted = true // signal a picture was here
+      // Uploaded photos are data: URLs — never published; just signal one was here.
+      if ((m.images && m.images.length) || (m.image && String(m.image).startsWith('data:'))) {
+        out.imageOmitted = true
+      } else if (m.image) {
+        out.image = m.image // hosted (non-data) URL is safe to keep
+      }
       if (m.docName) out.docName = m.docName
       return out
     })

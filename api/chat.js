@@ -32,7 +32,11 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { messages, newMessage, image, model, webSearch, document, style, memory, customInstructions, aboutYou } = req.body
+  const { messages, newMessage, image, images, model, webSearch, document, style, memory, customInstructions, aboutYou } = req.body
+
+  // Normalize uploads to a list: prefer the new `images` array, fall back to the legacy
+  // single `image`. Each entry is { data: base64, mediaType }.
+  const imageList = Array.isArray(images) && images.length ? images : (image ? [image] : [])
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
@@ -68,7 +72,7 @@ export default async function handler(req, res) {
   //  - Image requests / photo uploads ALWAYS route to Gemma, even under a manual
   //    non-Gemma selection, so "draw me X" and "what's in this photo?" just work.
   const wantsImage = isImageRequest(newMessage)
-  const hasVisionInput = !!image
+  const hasVisionInput = imageList.length > 0
   let effectiveModel = model
   if (model === 'auto') {
     if (wantsImage || hasVisionInput) effectiveModel = 'gemma'
@@ -101,7 +105,7 @@ export default async function handler(req, res) {
       // we just generate from the user's raw words).
       let genPrompt = newMessage
       if (OLLAMA_CLOUD_KEY) {
-        try { genPrompt = await describeForEdit(image.data, newMessage, OLLAMA_CLOUD_KEY) }
+        try { genPrompt = await describeForEdit(imageList.map((i) => i.data), newMessage, OLLAMA_CLOUD_KEY) }
         catch (e) { console.error('vision prompt failed:', e.message) }
       }
       let b64 = null
@@ -136,10 +140,13 @@ export default async function handler(req, res) {
   const history = (messages || []).map(m => ({ role: m.role, content: m.content }))
   const userTurn = {
     role: 'user',
-    content: image
+    content: imageList.length
       ? [
           { type: 'text', text: newMessage },
-          { type: 'image_url', image_url: { url: `data:${image.mediaType || 'image/jpeg'};base64,${image.data}` } }
+          ...imageList.map((img) => ({
+            type: 'image_url',
+            image_url: { url: `data:${img.mediaType || 'image/jpeg'};base64,${img.data}` },
+          })),
         ]
       : newMessage
   }
@@ -529,17 +536,19 @@ async function generateImage(prompt, nimKey) {
 // and have it write a single vivid text-to-image prompt describing the SAME scene with
 // the user's requested change, keeping the layout and subjects recognizable. The result
 // feeds generateImage()/generateImageHF(). Best-effort — caller falls back to raw text.
-async function describeForEdit(imageBase64, instruction, ollamaKey) {
+async function describeForEdit(imageBase64List, instruction, ollamaKey) {
+  const imgs = Array.isArray(imageBase64List) ? imageBase64List : [imageBase64List]
   const messages = [
     {
       role: 'system',
       content:
-        'You write prompts for a text-to-image model. Look at the attached image and the ' +
+        'You write prompts for a text-to-image model. Look at the attached image(s) and the ' +
         'user request, then output ONE vivid prompt (max 80 words) describing the SAME ' +
         'scene transformed as requested — keep the layout, plants, structures, and setting ' +
-        'recognizable. Output only the prompt text, no preamble or quotes.',
+        'recognizable. If several images are given, combine them into one coherent scene. ' +
+        'Output only the prompt text, no preamble or quotes.',
     },
-    { role: 'user', content: instruction || 'Show this scene in a future state.', images: [imageBase64] },
+    { role: 'user', content: instruction || 'Show this scene in a future state.', images: imgs },
   ]
   const response = await fetchWithTimeout('https://ollama.com/api/chat', {
     method: 'POST',
