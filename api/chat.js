@@ -109,28 +109,22 @@ export default async function handler(req, res) {
         catch (e) { console.error('vision prompt failed:', e.message) }
       }
       let b64 = null
-      let nimErr = null
-      let hfErr = null
+      const errs = []
       if (NVIDIA_NIM_KEY) {
         try { b64 = await generateImage(genPrompt, NVIDIA_NIM_KEY) }
-        catch (e) { nimErr = e; console.error('NIM gen failed, trying HF:', e.message) }
+        catch (e) { errs.push(`NIM: ${e.message}`); console.error('NIM gen failed:', e.message) }
       }
-      // Wrap HF too — its free endpoint frequently network-fails ("fetch failed"), and an
-      // unwrapped throw here would mask the real NIM error below.
+      // HF's free endpoint frequently network-fails; wrap so it can't mask other errors.
       if (!b64 && HUGGINGFACE_KEY) {
         try { b64 = await generateImageHF(genPrompt, HUGGINGFACE_KEY) }
-        catch (e) { hfErr = e; console.error('HF gen failed:', e.message) }
+        catch (e) { errs.push(`HF: ${e.message}`); console.error('HF gen failed:', e.message) }
       }
+      // Pollinations: free, no key, no aggressive filter — the reliable last resort.
       if (!b64) {
-        // If NIM tripped its content filter, say so — a Retry (new seed) usually clears it.
-        if (nimErr && /content-filtered/i.test(nimErr.message)) {
-          throw new Error(`the image service flagged this by mistake [${nimErr.message}]. Tap Retry, or reword the request slightly.`)
-        }
-        // Surface the underlying reasons so failures are diagnosable, not just "fetch failed".
-        const detail = [nimErr && `NIM: ${nimErr.message}`, hfErr && `HF: ${hfErr.message}`]
-          .filter(Boolean).join(' · ')
-        throw new Error(detail || 'image generation failed')
+        try { b64 = await generateImagePollinations(genPrompt) }
+        catch (e) { errs.push(`Pollinations: ${e.message}`); console.error('Pollinations gen failed:', e.message) }
       }
+      if (!b64) throw new Error(errs.join(' · ') || 'image generation failed')
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: genPrompt }) + '\n')
       res.write(JSON.stringify({ delta: '\n\n_An AI re-imagining based on your photo — not a pixel-edit of the original._' }) + '\n')
       res.write(JSON.stringify({ done: true, provider: 'nim', model: 'vision-gen' }) + '\n')
@@ -572,6 +566,8 @@ async function describeForEdit(imageBase64List, instruction, ollamaKey) {
         'user request, then output ONE vivid prompt (max 80 words) describing the SAME ' +
         'scene transformed as requested — keep the layout, plants, structures, and setting ' +
         'recognizable. If several images are given, combine them into one coherent scene. ' +
+        'Describe only the garden, plants, and landscape — do NOT mention people, faces, ' +
+        'children, or bodies (that can trip content filters). ' +
         'Output only the prompt text, no preamble or quotes.',
     },
     { role: 'user', content: instruction || 'Show this scene in a future state.', images: imgs },
@@ -619,6 +615,24 @@ async function generateImageHF(prompt, hfKey) {
   return b64
 }
 
+// Pollinations.ai: free, no API key, and NOT behind NVIDIA's aggressive CONTENT_FILTERED
+// gate — our reliable fallback when NIM filters a benign prompt or HF is down. Simple GET
+// returns the image bytes directly.
+async function generateImagePollinations(prompt) {
+  const p = encodeURIComponent(String(prompt).slice(0, 1500))
+  const seed = Math.floor(Math.random() * 1e9)
+  const url = `https://image.pollinations.ai/prompt/${p}?width=1024&height=1024&nologo=true&seed=${seed}`
+  const response = await fetchWithTimeout(url, { method: 'GET', headers: { 'Accept': 'image/jpeg' } }, 45000, 'Pollinations image')
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Pollinations ${response.status} ${body.slice(0, 120)}`)
+  }
+  const buf = await response.arrayBuffer()
+  const b64 = Buffer.from(buf).toString('base64')
+  if (b64.length < MIN_IMAGE_B64) throw new Error('Pollinations returned empty image')
+  return b64
+}
+
 // Execute a generate_image tool call: pull the prompt, try NIM then HF, stream the image.
 // Never throws — on failure it streams a short note so the request still completes.
 async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelta) {
@@ -629,12 +643,8 @@ async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelt
     if (parsed && parsed.prompt) prompt = parsed.prompt
   } catch { /* fall back to the user's raw message */ }
 
-  if (!nimKey && !hfKey) {
-    onDelta('\n\n⚠️ Image generation isn\'t configured (no NIM or HuggingFace key).')
-    return
-  }
-
-  // Try NVIDIA NIM first (faster, higher quality), fall back to HuggingFace.
+  // Try NVIDIA NIM first (higher quality), then HuggingFace, then Pollinations (free,
+  // no key, no aggressive filter — always available as a last resort).
   if (nimKey) {
     try {
       const b64 = await generateImage(prompt, nimKey)
@@ -651,13 +661,18 @@ async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelt
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
       return
     } catch (err) {
-      console.error('HuggingFace FLUX failed:', err.message)
-      onDelta(`\n\n⚠️ Couldn't generate the image: ${err.message}`)
-      return
+      console.error('HuggingFace FLUX failed, trying Pollinations:', err.message)
     }
   }
 
-  onDelta('\n\n⚠️ All image providers failed.')
+  try {
+    const b64 = await generateImagePollinations(prompt)
+    res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt }) + '\n')
+    return
+  } catch (err) {
+    console.error('Pollinations failed:', err.message)
+    onDelta(`\n\n⚠️ Couldn't generate the image: ${err.message}`)
+  }
 }
 
 // NVIDIA NIM: OpenAI-compatible, stream:true -> SSE lines:
