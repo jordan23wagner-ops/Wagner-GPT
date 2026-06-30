@@ -16,6 +16,7 @@ import renderMarkdown from './lib/renderMarkdown'
 import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { THEMES, isDarkTheme } from './lib/themes'
 import { Palette } from 'lucide-react'
+import { enhanceMessages } from './lib/enhanceMessages'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
 
@@ -63,6 +64,7 @@ export default function App() {
   const [copiedId, setCopiedId] = useState(null)     // id of the message just copied
   const [convSearch, setConvSearch] = useState('')   // sidebar conversation filter
   const messagesEndRef = useRef(null)
+  const messagesContainerRef = useRef(null)
   const fileInputRef = useRef(null)
   const docInputRef = useRef(null)
   const recognitionRef = useRef(null)
@@ -97,6 +99,12 @@ export default function App() {
   }
 
   useEffect(() => { scrollToBottom() }, [messages])
+
+  // Apply syntax highlighting + math rendering once a reply finishes streaming.
+  useEffect(() => {
+    if (loading) return
+    enhanceMessages(messagesContainerRef.current)
+  }, [messages, loading])
 
   useEffect(() => {
     localStorage.setItem('theme', theme)
@@ -622,7 +630,7 @@ export default function App() {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[var(--bg)]">
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-[var(--bg)]">
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full text-center text-[var(--muted)]">
               <div>
@@ -650,7 +658,7 @@ export default function App() {
                       </div>
                     )}
                     {msg.role === 'assistant' ? (
-                      <div className="text-sm prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                      <div className="text-sm prose-sm md-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
                     ) : (
                       msg.content && <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     )}

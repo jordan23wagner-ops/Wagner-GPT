@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
     "lucide-react": "^0.358.0",
     "mammoth": "^1.12.0",
     "papaparse": "^5.5.4",

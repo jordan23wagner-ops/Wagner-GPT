@@ -58,13 +58,16 @@ export default function renderMarkdown(text) {
     // Fenced code block ```lang ... ```
     if (/^\s*```/.test(line)) {
       closeList()
+      const lang = line.trim().replace(/^`+/, '').trim().toLowerCase()
+      const langClass = /^[a-z0-9+#-]+$/.test(lang) ? ` language-${lang}` : ''
       const buf = []
       i++
       while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++ }
       i++ // skip closing fence
+      // Dark code theme (like most IDEs/ChatGPT); highlight.js colors the tokens later.
       out.push(
-        `<pre style="overflow-x:auto;background:rgba(128,128,128,.13);padding:10px 12px;border-radius:8px;margin:8px 0;-webkit-overflow-scrolling:touch">` +
-        `<code style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.82em;white-space:pre">${esc(buf.join('\n'))}</code></pre>`
+        `<pre style="overflow-x:auto;background:#0d1117;padding:10px 12px;border-radius:8px;margin:8px 0;-webkit-overflow-scrolling:touch">` +
+        `<code class="hljs${langClass}" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.82em;white-space:pre;color:#c9d1d9;background:transparent">${esc(buf.join('\n'))}</code></pre>`
       )
       continue
     }
