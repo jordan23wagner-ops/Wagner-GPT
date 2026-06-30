@@ -85,22 +85,38 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: `Unknown model: ${model}` })
   }
 
-  // Photo transformation (image-to-image): when the user uploads a photo AND asks to
-  // change/transform it ("show this garden in full summer bloom"), edit the ACTUAL photo
-  // with FLUX.1 Kontext rather than describing it or drawing something unrelated. Done
-  // deterministically (no flaky tool-calling) — call Kontext directly and stream the
-  // edited image back. Requires the NIM key; falls through to normal vision otherwise.
-  if (hasVisionInput && NVIDIA_NIM_KEY && (wantsImage || isEditRequest(newMessage))) {
+  // Photo-informed generation: when a photo is attached AND the user asks to change/show
+  // it ("show this garden in full summer bloom"), read the photo with the vision model to
+  // build a prompt, then generate a fresh image of that requested future state.
+  // NOTE: true pixel-level editing of the exact photo isn't available on the free hosted
+  // tier — NVIDIA's hosted FLUX.1 Kontext only accepts its own demo images — so this is an
+  // AI re-imagining based on the photo, and we label it as such in the reply.
+  const hasGen = NVIDIA_NIM_KEY || HUGGINGFACE_KEY
+  if (hasVisionInput && hasGen && (wantsImage || isEditRequest(newMessage))) {
     res.statusCode = 200
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
     res.setHeader('Cache-Control', 'no-cache, no-transform')
     try {
-      const b64 = await editImage(newMessage, image.data, image.mediaType || 'image/jpeg', NVIDIA_NIM_KEY)
-      res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: newMessage }) + '\n')
-      res.write(JSON.stringify({ done: true, provider: 'nim', model: 'kontext' }) + '\n')
+      // Turn the photo + request into a vivid generation prompt (best-effort; on failure
+      // we just generate from the user's raw words).
+      let genPrompt = newMessage
+      if (OLLAMA_CLOUD_KEY) {
+        try { genPrompt = await describeForEdit(image.data, newMessage, OLLAMA_CLOUD_KEY) }
+        catch (e) { console.error('vision prompt failed:', e.message) }
+      }
+      let b64 = null
+      if (NVIDIA_NIM_KEY) {
+        try { b64 = await generateImage(genPrompt, NVIDIA_NIM_KEY) }
+        catch (e) { console.error('NIM gen failed, trying HF:', e.message) }
+      }
+      if (!b64 && HUGGINGFACE_KEY) b64 = await generateImageHF(genPrompt, HUGGINGFACE_KEY)
+      if (!b64) throw new Error('image generation failed')
+      res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: genPrompt }) + '\n')
+      res.write(JSON.stringify({ delta: '\n\n_An AI re-imagining based on your photo — not a pixel-edit of the original._' }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'nim', model: 'vision-gen' }) + '\n')
     } catch (err) {
-      console.error('Kontext edit failed:', err.message)
-      res.write(JSON.stringify({ error: `Couldn't transform the photo: ${err.message}` }) + '\n')
+      console.error('photo-informed gen failed:', err.message)
+      res.write(JSON.stringify({ error: `Couldn't create the image: ${err.message}` }) + '\n')
     }
     return res.end()
   }
@@ -509,91 +525,35 @@ async function generateImage(prompt, nimKey) {
   return b64
 }
 
-// Image-to-image editing (FLUX.1 Kontext on NVIDIA NIM). The hosted endpoint rejects
-// inline base64 ("Expected: example_id, got: base64") — the photo must first be uploaded
-// to NVIDIA Cloud Functions as an asset, then referenced by id. Flow:
-//   1) reserve an asset id + presigned S3 URL,
-//   2) PUT the raw bytes to that URL,
-//   3) invoke Kontext with header NVCF-INPUT-ASSET-REFERENCES and image "...;asset_id,<id>".
-// Asset is deleted afterwards (best-effort). Non-commercial license — fine for this app.
-const ASSET_DESC = 'wagner-gpt input image'
-
-async function uploadNvcfAsset(base64, mediaType, nimKey) {
-  const create = await fetchWithTimeout('https://api.nvcf.nvidia.com/v2/nvcf/assets', {
+// Vision-guided prompt builder: show the uploaded photo to Gemma (Ollama, non-streaming)
+// and have it write a single vivid text-to-image prompt describing the SAME scene with
+// the user's requested change, keeping the layout and subjects recognizable. The result
+// feeds generateImage()/generateImageHF(). Best-effort — caller falls back to raw text.
+async function describeForEdit(imageBase64, instruction, ollamaKey) {
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You write prompts for a text-to-image model. Look at the attached image and the ' +
+        'user request, then output ONE vivid prompt (max 80 words) describing the SAME ' +
+        'scene transformed as requested — keep the layout, plants, structures, and setting ' +
+        'recognizable. Output only the prompt text, no preamble or quotes.',
+    },
+    { role: 'user', content: instruction || 'Show this scene in a future state.', images: [imageBase64] },
+  ]
+  const response = await fetchWithTimeout('https://ollama.com/api/chat', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${nimKey}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-    body: JSON.stringify({ contentType: mediaType, description: ASSET_DESC }),
-  }, 15000, 'asset reserve')
-  if (!create.ok) {
-    const body = await create.text().catch(() => '')
-    throw new Error(`asset reserve ${create.status}: ${body.slice(0, 120)}`)
+    headers: { 'Authorization': `Bearer ${ollamaKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'gemma4:31b', messages, stream: false }),
+  }, 30000, 'vision prompt')
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`${response.status} ${body.slice(0, 120)}`)
   }
-  const { assetId, uploadUrl } = await create.json()
-  if (!assetId || !uploadUrl) throw new Error('asset reserve returned no id/url')
-
-  // The presigned S3 URL is pre-authorized — send NO Authorization header, and the
-  // Content-Type + description must match what was signed at reserve time.
-  const put = await fetchWithTimeout(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': mediaType,
-      'x-amz-meta-nvcf-asset-description': ASSET_DESC,
-    },
-    body: Buffer.from(base64, 'base64'),
-  }, 25000, 'asset upload')
-  if (!put.ok) {
-    const body = await put.text().catch(() => '')
-    throw new Error(`asset upload ${put.status}: ${body.slice(0, 120)}`)
-  }
-  return assetId
-}
-
-async function deleteNvcfAsset(assetId, nimKey) {
-  try {
-    await fetchWithTimeout(`https://api.nvcf.nvidia.com/v2/nvcf/assets/${assetId}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${nimKey}` },
-    }, 10000, 'asset delete')
-  } catch { /* best-effort cleanup; assets expire on their own anyway */ }
-}
-
-async function editImage(prompt, imageBase64, mediaType, nimKey) {
-  const ct = mediaType || 'image/jpeg'
-  const assetId = await uploadNvcfAsset(imageBase64, ct, nimKey)
-  try {
-    const response = await fetchWithTimeout('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-kontext-dev', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${nimKey}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'NVCF-INPUT-ASSET-REFERENCES': assetId,
-      },
-      body: JSON.stringify({
-        prompt: String(prompt).slice(0, 1500),
-        image: `data:${ct};asset_id,${assetId}`,
-        cfg_scale: 3.5,
-        steps: 30,
-        aspect_ratio: 'match_input_image',
-        seed: Math.floor(Math.random() * 1e9),
-      }),
-    }, 45000, 'NIM photo edit')
-    if (!response.ok) {
-      const body = await response.text().catch(() => '')
-      throw new Error(`${response.status} ${body.slice(0, 150)}`)
-    }
-    const data = await response.json()
-    const b64 = (data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64) || data.image
-    if (!b64) throw new Error('no image returned')
-    if (b64.length < MIN_IMAGE_B64) throw new Error('edited image came back empty')
-    return b64
-  } finally {
-    deleteNvcfAsset(assetId, nimKey)
-  }
+  const data = await response.json()
+  const out = data && data.message && data.message.content
+  if (!out || !out.trim()) throw new Error('empty vision prompt')
+  return out.trim().slice(0, 1500)
 }
 
 // Hugging Face Inference API: FLUX.1-schnell (free, rate-limited, no credit pool).
