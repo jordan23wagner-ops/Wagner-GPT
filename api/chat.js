@@ -109,12 +109,19 @@ export default async function handler(req, res) {
         catch (e) { console.error('vision prompt failed:', e.message) }
       }
       let b64 = null
+      let nimErr = null
       if (NVIDIA_NIM_KEY) {
         try { b64 = await generateImage(genPrompt, NVIDIA_NIM_KEY) }
-        catch (e) { console.error('NIM gen failed, trying HF:', e.message) }
+        catch (e) { nimErr = e; console.error('NIM gen failed, trying HF:', e.message) }
       }
       if (!b64 && HUGGINGFACE_KEY) b64 = await generateImageHF(genPrompt, HUGGINGFACE_KEY)
-      if (!b64) throw new Error('image generation failed')
+      if (!b64) {
+        // If NIM tripped its content filter, say so — a Retry (new seed) usually clears it.
+        if (nimErr && /content-filtered/i.test(nimErr.message)) {
+          throw new Error("the image service flagged this one by mistake (its safety filter). Tap Retry, or reword the request slightly.")
+        }
+        throw new Error('image generation failed')
+      }
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: genPrompt }) + '\n')
       res.write(JSON.stringify({ delta: '\n\n_An AI re-imagining based on your photo — not a pixel-edit of the original._' }) + '\n')
       res.write(JSON.stringify({ done: true, provider: 'nim', model: 'vision-gen' }) + '\n')
@@ -526,8 +533,16 @@ async function generateImage(prompt, nimKey) {
     throw new Error(`${response.status} ${body.slice(0, 150)}`)
   }
   const data = await response.json()
-  const b64 = data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64
+  const art = (data && data.artifacts && data.artifacts[0]) || {}
+  const b64 = art.base64
   if (!b64) throw new Error('no image returned')
+  // NVIDIA's safety filter returns a BLACK image (not an error) when it trips — and it
+  // false-positives. Surface it as a failure so we fall back / let the user retry with a
+  // fresh seed, instead of showing a black square. Field name varies, so check both.
+  const reason = art.finishReason || art.finish_reason
+  if (reason && String(reason).toUpperCase() !== 'SUCCESS') {
+    throw new Error(`content-filtered (${reason})`)
+  }
   if (b64.length < MIN_IMAGE_B64) throw new Error('image came back empty')
   return b64
 }
