@@ -110,17 +110,26 @@ export default async function handler(req, res) {
       }
       let b64 = null
       let nimErr = null
+      let hfErr = null
       if (NVIDIA_NIM_KEY) {
         try { b64 = await generateImage(genPrompt, NVIDIA_NIM_KEY) }
         catch (e) { nimErr = e; console.error('NIM gen failed, trying HF:', e.message) }
       }
-      if (!b64 && HUGGINGFACE_KEY) b64 = await generateImageHF(genPrompt, HUGGINGFACE_KEY)
+      // Wrap HF too — its free endpoint frequently network-fails ("fetch failed"), and an
+      // unwrapped throw here would mask the real NIM error below.
+      if (!b64 && HUGGINGFACE_KEY) {
+        try { b64 = await generateImageHF(genPrompt, HUGGINGFACE_KEY) }
+        catch (e) { hfErr = e; console.error('HF gen failed:', e.message) }
+      }
       if (!b64) {
         // If NIM tripped its content filter, say so — a Retry (new seed) usually clears it.
         if (nimErr && /content-filtered/i.test(nimErr.message)) {
           throw new Error("the image service flagged this one by mistake (its safety filter). Tap Retry, or reword the request slightly.")
         }
-        throw new Error('image generation failed')
+        // Surface the underlying reasons so failures are diagnosable, not just "fetch failed".
+        const detail = [nimErr && `NIM: ${nimErr.message}`, hfErr && `HF: ${hfErr.message}`]
+          .filter(Boolean).join(' · ')
+        throw new Error(detail || 'image generation failed')
       }
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: genPrompt }) + '\n')
       res.write(JSON.stringify({ delta: '\n\n_An AI re-imagining based on your photo — not a pixel-edit of the original._' }) + '\n')
