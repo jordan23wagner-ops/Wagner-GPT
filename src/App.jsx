@@ -932,7 +932,21 @@ export default function App() {
                     }`}
                   >
                     {msg.image && (
-                      <img src={msg.image} alt="uploaded" className="max-w-xs rounded mb-2" />
+                      <>
+                        <img
+                          src={msg.image}
+                          alt={msg.role === 'assistant' ? 'generated image' : 'uploaded'}
+                          className="max-w-xs rounded mb-2"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none'
+                            const note = e.currentTarget.nextElementSibling
+                            if (note) note.style.display = 'block'
+                          }}
+                        />
+                        <p style={{ display: 'none' }} className="text-xs text-[var(--muted)] mb-2">
+                          ⚠️ The image couldn't load. Use Retry below to generate it again.
+                        </p>
+                      </>
                     )}
                     {msg.docName && (
                       <div className="flex items-center gap-1.5 mb-2 text-xs opacity-90">

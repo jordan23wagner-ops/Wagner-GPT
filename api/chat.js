@@ -428,9 +428,30 @@ const IMAGE_TOOL = {
   }
 }
 
+// Run a fetch with a hard deadline so a slow/hanging provider can't consume the whole
+// 60s function budget (which manifested as "times out" / truncated black images). On
+// timeout we abort and throw so the caller falls back to the next provider.
+async function fetchWithTimeout(url, options, ms, label) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`${label} timed out after ${ms / 1000}s`)
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// A real 1024² JPEG is well over this; anything smaller is an empty/black/truncated
+// result, which we reject so the caller can fall back instead of showing a black box.
+const MIN_IMAGE_B64 = 6000
+
 // FLUX.1-dev accepts width/height only from a fixed set; 1024 square is the safe default.
+// 20 steps keeps quality high while shaving latency to stay well inside the function cap.
 async function generateImage(prompt, nimKey) {
-  const response = await fetch('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev', {
+  const response = await fetchWithTimeout('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${nimKey}`,
@@ -441,11 +462,11 @@ async function generateImage(prompt, nimKey) {
       prompt: String(prompt).slice(0, 1500),
       width: 1024,
       height: 1024,
-      steps: 25,
+      steps: 20,
       cfg_scale: 3.5,
       seed: Math.floor(Math.random() * 1e9)
     })
-  })
+  }, 35000, 'NIM image')
   if (!response.ok) {
     const body = await response.text().catch(() => '')
     throw new Error(`${response.status} ${body.slice(0, 150)}`)
@@ -453,13 +474,14 @@ async function generateImage(prompt, nimKey) {
   const data = await response.json()
   const b64 = data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64
   if (!b64) throw new Error('no image returned')
+  if (b64.length < MIN_IMAGE_B64) throw new Error('image came back empty')
   return b64
 }
 
 // Hugging Face Inference API: FLUX.1-schnell (free, rate-limited, no credit pool).
 // Returns raw image bytes; we base64-encode them for the NDJSON stream.
 async function generateImageHF(prompt, hfKey) {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
     {
       method: 'POST',
@@ -469,18 +491,19 @@ async function generateImageHF(prompt, hfKey) {
         'Accept': 'image/jpeg',
       },
       body: JSON.stringify({ inputs: String(prompt).slice(0, 1500) }),
-    }
+    },
+    30000, 'HuggingFace image'
   )
   if (!response.ok) {
     const body = await response.text().catch(() => '')
     throw new Error(`HF ${response.status} ${body.slice(0, 150)}`)
   }
   const buf = await response.arrayBuffer()
-  if (!buf || buf.byteLength < 1000) throw new Error('HF returned empty image')
-  const bytes = new Uint8Array(buf)
-  let binary = ''
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
-  return btoa(binary)
+  // Buffer is faster and safer than a per-byte String.fromCharCode loop (which can choke
+  // on a megabyte-sized image).
+  const b64 = Buffer.from(buf).toString('base64')
+  if (b64.length < MIN_IMAGE_B64) throw new Error('HF returned empty image')
+  return b64
 }
 
 // Execute a generate_image tool call: pull the prompt, try NIM then HF, stream the image.
