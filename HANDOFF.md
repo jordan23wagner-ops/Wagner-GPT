@@ -152,16 +152,37 @@ supabase-schema.sql, supabase-memory-schema.sql, supabase-share-schema.sql
    old code). If verification shows stale/blank output, `Get-Process node | Stop-Process
    -Force` and restart on a clean strict port. Always verify against `vite preview` (the
    built `dist`), not a stray dev server.
-4. **`vite preview` does NOT serve `/api/*`** (those are Vercel functions). Test backend
-   endpoints with `curl` against the **live** deploy after pushing.
+4. **`vite preview` does NOT serve `/api/*`** (those are Vercel functions). This is the key
+   verification gap: any change touching `/api/chat`, `/api/suggest`, etc. can't be exercised
+   end-to-end in local preview. Two ways to close it — use one before shipping backend work:
+   - **Vercel preview deployments (preferred, zero production risk):** push the feature branch
+     (`git push origin feat-…`) → Vercel auto-builds a throwaway preview URL with the real
+     `/api` functions running. Verify the full stack there, THEN fast-forward `main`. This is
+     how backend phases (5 Deep Research, 6 Voice loop) should be verified — never ship `/api`
+     changes to production unverified just because local preview can't reach them.
+   - **`vercel dev` locally:** runs the `api/*.js` functions on localhost so the browser-eval
+     loop works full-stack. Needs keys locally: `vercel link` once, then `vercel env pull`.
+   - For frontend-only work that happens to call `/api`, you can also stub the fetch with
+     canned NDJSON to verify the UI/state machine in plain `vite preview`, then confirm the
+     real call on a preview deploy.
 5. **Deploy:** commit + `git push origin main` → Vercel auto-deploys (~90s). Poll the live
-   bundle hash (`curl -s https://wagner-gpt.vercel.app/ | grep index-…js`) to confirm.
-   For backend-only changes the bundle hash doesn't change — poll the endpoint behavior.
+   bundle hash (`curl -s https://wagner-gpt.vercel.app/ | grep index-…js`) and compare to the
+   entry hash in your local `dist/index.html` to confirm. For backend-only changes the bundle
+   hash doesn't change — poll the endpoint behavior instead.
 6. LF→CRLF git warnings are harmless. End commit messages with the Claude co-author line.
 
 ---
 
 ## Roadmap — REMAINING work
+
+> **STATUS (2026-06-30):** This roadmap section below is STALE — it predates several shipped
+> phases. Source of truth for what's done: git log. As of now, **done & verified & live**:
+> Phase 1 (UX), 2 (Memory), **2b (Document RAG)**, **3 (Pyodide code interpreter)**,
+> **4 (Artifacts/Canvas — sandboxed iframe)**, 7 (Shareable links) **incl. manage/revoke**.
+> **Remaining: Phase 5 (Deep Research), 6 (Voice loop), 8 (Career mode / flagcheck).** All
+> three are `/api`-dependent (5, 6) or need the `flagcheck` repo (8), so verify them via a
+> **Vercel preview deployment** (see "How to develop / verify" step 4) before merging to main.
+> The per-phase notes below are kept for reference but several describe already-shipped work.
 
 Phases 1 (UX pack) and 2 (Memory + Custom Instructions) are **done & verified**. Remaining:
 
