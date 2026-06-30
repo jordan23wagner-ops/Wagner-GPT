@@ -41,6 +41,8 @@ No Docker. No database server. No monthly bills.
 - **Message controls** — stop generation mid-stream, copy any reply, regenerate the last answer, and edit & resend your own messages.
 - **Follow-up suggestions** — tappable suggested next questions after each reply.
 - **Conversation search** — filter the chat sidebar by title or message content.
+- **Memory** — remembers durable facts about you across chats (semantic, via in-browser `all-MiniLM-L6-v2` embeddings + Supabase pgvector). Auto-captures facts, supports "remember that…", and an editable memory list in Settings. Faithful port of the `mcp-memory-server` design (dedup at 0.05 cosine, recency-reranked retrieval).
+- **Custom instructions** — set "About you" and "How should I respond" in Settings; injected into every chat.
 - **Response style** — a selector (Balanced / Quick answer / Info only / Code) injects a system prompt so replies match your preference — no unwanted code or long-winded walls of text.
 - **Themes** — 5 themes via the palette button: Light, Dark, Matte Yellow, Ocean, Rose. Text contrast is tuned per theme. Persisted.
 
@@ -168,7 +170,7 @@ Supabase credentials are embedded in the frontend bundle (publishable anon key �
 1. Push to GitHub: `git push origin main`
 2. Import at [vercel.com/new](https://vercel.com/new)
 3. Add environment variables (see table above)
-4. Run `supabase-schema.sql` in the Supabase SQL Editor to create tables
+4. Run `supabase-schema.sql` (chat/garden sync) and `supabase-memory-schema.sql` (memory + settings) in the Supabase SQL Editor
 5. Live in ~2 minutes. Auto-deploys on every push to `main`.
 
 ## Local Development
