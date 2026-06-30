@@ -21,7 +21,7 @@ A **100% free** AI assistant PWA with chat, document creation, image generation,
 | Frontend | React 18 + Vite + Tailwind CSS | Free |
 | Backend | Vercel serverless functions | Free (Hobby) |
 | Chat AI | Ollama Cloud (primary) + NVIDIA NIM (fallback) | Free tier |
-| Image gen | NVIDIA NIM FLUX.1-dev + HuggingFace FLUX.1-schnell (fallback) | Free tier / free forever |
+| Image gen | NVIDIA NIM FLUX.1-dev → HuggingFace FLUX.1-schnell → Pollinations.ai (fallbacks) | Free tier / free forever |
 | Storage | Browser localStorage (fast) + Supabase Postgres (durable) | Free tier |
 | Hosting | Vercel, auto-deploys on push to `main` | Free (Hobby) |
 
@@ -73,9 +73,11 @@ Every assistant reply has **Word** and **PDF** buttons underneath:
 ## Image Generation
 
 - **Tool-calling** — the chat model decides when to generate an image by calling a `generate_image` tool. No brittle keyword matching.
-- **Two providers** — NVIDIA NIM FLUX.1-dev (faster, higher quality) with HuggingFace FLUX.1-schnell as automatic fallback when NIM credits run out.
+- **Three providers, automatic fallback** — NVIDIA NIM FLUX.1-dev (highest quality) → HuggingFace FLUX.1-schnell → **Pollinations.ai** (free, no API key, not behind an aggressive content filter). The last resort means generation keeps working even when NIM filters a benign prompt or runs out of credits. Each provider call is hard-timed-out so a slow one fails over fast instead of stalling.
 - **Inline** — generated images appear directly in the chat bubble.
-- **Photo transformation (image-to-image)** — upload a photo and ask to change it ("show this garden in full summer bloom", "add roses along the fence"). Your *actual* photo is edited via FLUX.1 Kontext on NVIDIA NIM (`flux.1-kontext-dev`, same `NVIDIA_NIM_KEY`, non-commercial license). Uploads are downscaled in the browser to stay under the inline-image limit and keep it fast. Triggered automatically when an image is attached and the message reads like an edit; plain questions about a photo stay as vision Q&A. Robustness: 45s timeout with empty-result guard.
+- **Photo-informed generation ("re-imagine my photo")** — attach a photo (or several) and ask to change it ("show this garden in full summer bloom"). The vision model studies the photo(s) and writes a prompt, then a fresh image of that requested future state is generated. This is an *AI re-imagining based on the photo, not a pixel-edit of the original* (labelled as such in the reply) — true pixel-level editing isn't available on a free hosted tier (NVIDIA's hosted FLUX.1 Kontext only accepts its own demo images, not user photos). Triggered automatically when an image is attached and the message reads like an edit; plain questions about a photo stay vision Q&A.
+- **Multiple images** — attach up to 4 photos per message (paperclip → multi-select, each removable before sending). Uploads are downscaled in the browser so they stay fast.
+- **Robustness** — empty/black-image guards, and NVIDIA's `CONTENT_FILTERED` safety-filter responses are detected and routed to a fallback rather than shown as a black square.
 
 ## Coding Mode (Phase 8)
 
@@ -117,9 +119,10 @@ Browser (React PWA)
   |   | NDJSON stream              |--1--> Ollama Cloud (free, primary)
   |   | {"delta":"..."}            |--2--> NVIDIA NIM   (fallback)
   |   | {"image":"<b64>"}          |
-  |   | {"done":true}              '-- Image tool call:
+  |   | {"done":true}              '-- Image generation:
   |   '----------------------------     |--1--> NIM FLUX.1-dev
-  |                                     '--2--> HuggingFace FLUX.1-schnell
+  |                                     |--2--> HuggingFace FLUX.1-schnell
+  |                                     '--3--> Pollinations.ai (no key)
   |-- localStorage (fast cache)
   |
   '-- Supabase Postgres (cloud sync)
@@ -202,7 +205,7 @@ Visit `http://localhost:5173`.
 
 **"All available models failed":** API keys expired or revoked. Regenerate at [ollama.com/settings/keys](https://ollama.com/settings/keys) or [build.nvidia.com](https://build.nvidia.com) and update in Vercel. A redeploy is required after changing env vars.
 
-**Image generation fails:** NIM credits depleted. The HuggingFace fallback should catch this automatically. If both fail, request more NIM credits (free) at the [NVIDIA developer forum](https://forums.developer.nvidia.com).
+**Image generation fails / comes back black:** NVIDIA's FLUX safety filter sometimes false-flags benign prompts and returns a `CONTENT_FILTERED` (black) image; NIM credits can also deplete. Both are handled automatically — generation falls back to HuggingFace and then to Pollinations.ai (free, no key), so it should still succeed. If every provider is listed as failed in the error, they're all temporarily down; retry shortly. NIM credits (free) can be topped up at the [NVIDIA developer forum](https://forums.developer.nvidia.com).
 
 **Garden plants not growing:** Close and reopen the tab. Growth is timestamp-based and catches up on reload.
 
