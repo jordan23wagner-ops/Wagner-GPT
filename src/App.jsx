@@ -904,9 +904,9 @@ export default function App() {
             </select>
             <span
               className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : 'text-[var(--muted)]'}`}
-              title={`Today's usage — resets daily. Image soft-limit ${IMAGE_DAILY_SOFT_LIMIT}/day to avoid throttling.`}
+              title={`Conversations in your sidebar · images generated today (soft-limit ${IMAGE_DAILY_SOFT_LIMIT}/day to avoid throttling).`}
             >
-              {usage.chat} chats · {usage.image} imgs{imageLimitHit ? ' ⚠' : ''}
+              {conversations.length} {conversations.length === 1 ? 'chat' : 'chats'} · {usage.image} imgs today{imageLimitHit ? ' ⚠' : ''}
             </span>
           </div>
         </div>
