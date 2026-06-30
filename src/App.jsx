@@ -23,6 +23,9 @@ import {
 } from './lib/memory'
 import { warmEmbedder } from './lib/embed'
 import { RAG_THRESHOLD, docId, buildIndex, retrieveChunks } from './lib/rag'
+import { Share2 } from 'lucide-react'
+import SharedChat from './SharedChat'
+import { createShare, loadShare, shareUrl, shareIdFromUrl } from './lib/share'
 import { Settings, Brain, Trash } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
@@ -87,6 +90,27 @@ export default function App() {
   const docInputRef = useRef(null)
   const recognitionRef = useRef(null)
   const abortRef = useRef(null)                       // AbortController for the live stream
+
+  // Phase 7 — shareable links. If the app is opened with ?s=<id>, we render a read-only
+  // snapshot instead of the live app (see the early return below).
+  const [shareId] = useState(() => shareIdFromUrl())
+  const [sharedChat, setSharedChat] = useState(null)
+  const [shareLoading, setShareLoading] = useState(!!shareId)
+  const [shareNotFound, setShareNotFound] = useState(false)
+  const [shareBusy, setShareBusy] = useState(false)   // creating a share link
+  const [shareCopied, setShareCopied] = useState(false)
+
+  useEffect(() => {
+    if (!shareId) return
+    let alive = true
+    loadShare(shareId).then((data) => {
+      if (!alive) return
+      if (data) setSharedChat(data)
+      else setShareNotFound(true)
+      setShareLoading(false)
+    })
+    return () => { alive = false }
+  }, [shareId])
 
   // Web Speech API — present on Chrome/Edge/Safari (incl. iOS), absent on Firefox.
   const speechSupported = typeof window !== 'undefined' &&
@@ -660,6 +684,24 @@ export default function App() {
     if (window.confirm('Clear this conversation?')) setMessages([])
   }
 
+  // Phase 7 — create a shareable read-only link for the active conversation and copy it.
+  const handleShare = async () => {
+    if (shareBusy || !activeConv || !(activeConv.messages || []).length) return
+    setShareBusy(true)
+    setError(null)
+    try {
+      const id = await createShare(activeConv)
+      const url = shareUrl(id)
+      try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
+      setShareCopied(true)
+      setTimeout(() => setShareCopied((v) => (v ? false : v)), 2500)
+    } catch (err) {
+      setError(err.message || 'Could not create a share link.')
+    } finally {
+      setShareBusy(false)
+    }
+  }
+
   // ---- Conversation management ----
   const startNewChat = () => {
     const c = newConversation([])
@@ -690,6 +732,15 @@ export default function App() {
   }
 
   const imageLimitHit = usage.image >= IMAGE_DAILY_SOFT_LIMIT
+
+  // Phase 7 — read-only shared view takes over the whole app when ?s=<id> is present.
+  if (shareId) {
+    return (
+      <div className={darkMode ? 'dark' : ''}>
+        <SharedChat chat={sharedChat} loading={shareLoading} notFound={shareNotFound} />
+      </div>
+    )
+  }
 
   return (
     <div className={darkMode ? 'dark' : ''}>
@@ -727,6 +778,20 @@ export default function App() {
             ))}
           </div>
           <div className="flex items-center gap-1.5">
+            {tab === 'chat' && messages.length > 0 && (
+              <button
+                onClick={handleShare}
+                disabled={shareBusy}
+                className="flex items-center gap-1 p-1.5 sm:px-2.5 sm:py-2 rounded-lg bg-[var(--surface-2)] text-[var(--text)] disabled:opacity-50"
+                aria-label="Share this chat"
+                title="Create a read-only share link"
+              >
+                {shareBusy ? <Loader2 size={18} className="animate-spin" />
+                  : shareCopied ? <Check size={18} className="text-green-500" />
+                  : <Share2 size={18} />}
+                {shareCopied && <span className="hidden sm:inline text-xs">Link copied</span>}
+              </button>
+            )}
             <button
               onClick={openSettings}
               className="p-1.5 sm:p-2 rounded-lg bg-[var(--surface-2)] text-[var(--text)]"
