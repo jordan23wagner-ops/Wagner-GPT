@@ -95,8 +95,7 @@ export default async function handler(req, res) {
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
     res.setHeader('Cache-Control', 'no-cache, no-transform')
     try {
-      const dataUri = `data:${image.mediaType || 'image/jpeg'};base64,${image.data}`
-      const b64 = await editImage(newMessage, dataUri, NVIDIA_NIM_KEY)
+      const b64 = await editImage(newMessage, image.data, image.mediaType || 'image/jpeg', NVIDIA_NIM_KEY)
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: newMessage }) + '\n')
       res.write(JSON.stringify({ done: true, provider: 'nim', model: 'kontext' }) + '\n')
     } catch (err) {
@@ -510,37 +509,91 @@ async function generateImage(prompt, nimKey) {
   return b64
 }
 
-// Image-to-image editing (FLUX.1 Kontext on NVIDIA NIM). Takes the user's actual photo
-// (as a data URI) + a plain-language instruction and returns the edited photo. Same host
-// and key as text-to-image; `image` carries the input, `aspect_ratio: match_input_image`
-// keeps the framing. Non-commercial license — fine for this personal app.
-async function editImage(prompt, imageDataUri, nimKey) {
-  const response = await fetchWithTimeout('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-kontext-dev', {
+// Image-to-image editing (FLUX.1 Kontext on NVIDIA NIM). The hosted endpoint rejects
+// inline base64 ("Expected: example_id, got: base64") — the photo must first be uploaded
+// to NVIDIA Cloud Functions as an asset, then referenced by id. Flow:
+//   1) reserve an asset id + presigned S3 URL,
+//   2) PUT the raw bytes to that URL,
+//   3) invoke Kontext with header NVCF-INPUT-ASSET-REFERENCES and image "...;asset_id,<id>".
+// Asset is deleted afterwards (best-effort). Non-commercial license — fine for this app.
+const ASSET_DESC = 'wagner-gpt input image'
+
+async function uploadNvcfAsset(base64, mediaType, nimKey) {
+  const create = await fetchWithTimeout('https://api.nvcf.nvidia.com/v2/nvcf/assets', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${nimKey}`,
       'Content-Type': 'application/json',
-      'Accept': 'application/json'
+      'Accept': 'application/json',
     },
-    body: JSON.stringify({
-      prompt: String(prompt).slice(0, 1500),
-      image: imageDataUri,
-      cfg_scale: 3.5,
-      steps: 30,
-      aspect_ratio: 'match_input_image',
-      seed: Math.floor(Math.random() * 1e9)
-    })
-  }, 45000, 'NIM photo edit')
-  if (!response.ok) {
-    const body = await response.text().catch(() => '')
-    // 413/422 here usually means the photo is still too large for inline upload.
-    throw new Error(`${response.status} ${body.slice(0, 150)}`)
+    body: JSON.stringify({ contentType: mediaType, description: ASSET_DESC }),
+  }, 15000, 'asset reserve')
+  if (!create.ok) {
+    const body = await create.text().catch(() => '')
+    throw new Error(`asset reserve ${create.status}: ${body.slice(0, 120)}`)
   }
-  const data = await response.json()
-  const b64 = (data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64) || data.image
-  if (!b64) throw new Error('no image returned')
-  if (b64.length < MIN_IMAGE_B64) throw new Error('edited image came back empty')
-  return b64
+  const { assetId, uploadUrl } = await create.json()
+  if (!assetId || !uploadUrl) throw new Error('asset reserve returned no id/url')
+
+  // The presigned S3 URL is pre-authorized — send NO Authorization header, and the
+  // Content-Type + description must match what was signed at reserve time.
+  const put = await fetchWithTimeout(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': mediaType,
+      'x-amz-meta-nvcf-asset-description': ASSET_DESC,
+    },
+    body: Buffer.from(base64, 'base64'),
+  }, 25000, 'asset upload')
+  if (!put.ok) {
+    const body = await put.text().catch(() => '')
+    throw new Error(`asset upload ${put.status}: ${body.slice(0, 120)}`)
+  }
+  return assetId
+}
+
+async function deleteNvcfAsset(assetId, nimKey) {
+  try {
+    await fetchWithTimeout(`https://api.nvcf.nvidia.com/v2/nvcf/assets/${assetId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${nimKey}` },
+    }, 10000, 'asset delete')
+  } catch { /* best-effort cleanup; assets expire on their own anyway */ }
+}
+
+async function editImage(prompt, imageBase64, mediaType, nimKey) {
+  const ct = mediaType || 'image/jpeg'
+  const assetId = await uploadNvcfAsset(imageBase64, ct, nimKey)
+  try {
+    const response = await fetchWithTimeout('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-kontext-dev', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${nimKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'NVCF-INPUT-ASSET-REFERENCES': assetId,
+      },
+      body: JSON.stringify({
+        prompt: String(prompt).slice(0, 1500),
+        image: `data:${ct};asset_id,${assetId}`,
+        cfg_scale: 3.5,
+        steps: 30,
+        aspect_ratio: 'match_input_image',
+        seed: Math.floor(Math.random() * 1e9),
+      }),
+    }, 45000, 'NIM photo edit')
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(`${response.status} ${body.slice(0, 150)}`)
+    }
+    const data = await response.json()
+    const b64 = (data && data.artifacts && data.artifacts[0] && data.artifacts[0].base64) || data.image
+    if (!b64) throw new Error('no image returned')
+    if (b64.length < MIN_IMAGE_B64) throw new Error('edited image came back empty')
+    return b64
+  } finally {
+    deleteNvcfAsset(assetId, nimKey)
+  }
 }
 
 // Hugging Face Inference API: FLUX.1-schnell (free, rate-limited, no credit pool).
