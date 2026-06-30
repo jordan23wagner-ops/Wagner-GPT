@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react'
 import {
   Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2,
-  Menu, Plus, X, FileText, Printer,
+  Menu, Plus, X, FileText, Printer, Code2,
 } from 'lucide-react'
 import Garden from './Garden'
+import CodeTab from './Code'
 import {
   loadConversations, saveConversations, loadActiveId, saveActiveId,
   newConversation, titleFromMessages,
@@ -788,6 +789,7 @@ export default function App() {
             {[
               { id: 'chat', label: 'Chat', Icon: MessageSquare },
               { id: 'garden', label: 'Garden', Icon: Flower2 },
+              { id: 'code', label: 'Code', Icon: Code2 },
             ].map(({ id, label, Icon }) => (
               <button
                 key={id}
@@ -869,6 +871,8 @@ export default function App() {
         </div>
 
         {tab === 'garden' && <Garden darkMode={darkMode} />}
+
+        {tab === 'code' && <CodeTab />}
 
         {tab === 'chat' && (
         <>
