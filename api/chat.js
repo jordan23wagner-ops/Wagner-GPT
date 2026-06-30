@@ -17,6 +17,17 @@
 // reflects this.
 
 export default async function handler(req, res) {
+  // CORS: allow the Job-Assistant browser extension (and any client) to call this free
+  // chat backend cross-origin. The endpoint is already unauthenticated and public to the
+  // PWA, so reflecting the origin doesn't widen exposure — it just lets a
+  // chrome-extension:// origin through the preflight. No credentials are used.
+  const origin = req.headers.origin
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin)
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  if (req.method === 'OPTIONS') return res.status(204).end()
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
