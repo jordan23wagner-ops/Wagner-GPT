@@ -21,7 +21,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { messages, newMessage, image, model, webSearch, document, style } = req.body
+  const { messages, newMessage, image, model, webSearch, document, style, memory, customInstructions, aboutYou } = req.body
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
@@ -96,8 +96,22 @@ export default async function handler(req, res) {
         ]
       : newMessage
   }
-  // Prepend any context system messages (style guidance, attached document, web search).
+  // Prepend any context system messages: persona + memory first (highest priority),
+  // then style guidance, attached document, and web search.
   const systemMsgs = []
+
+  // Custom instructions / "about you" — always applied when set.
+  const personaBits = []
+  if (aboutYou && String(aboutYou).trim()) personaBits.push(`About the user: ${String(aboutYou).trim()}`)
+  if (customInstructions && String(customInstructions).trim()) personaBits.push(`How the user wants you to respond: ${String(customInstructions).trim()}`)
+  if (personaBits.length) systemMsgs.push({ role: 'system', content: personaBits.join('\n\n') })
+
+  // Relevant long-term memories retrieved client-side for this query.
+  if (Array.isArray(memory) && memory.length) {
+    const lines = memory.map((m) => `- ${m}`).join('\n')
+    systemMsgs.push({ role: 'system', content: `Relevant things you remember about the user:\n${lines}` })
+  }
+
   const styleMsg = STYLE_PROMPTS[style]
   if (styleMsg) systemMsgs.push({ role: 'system', content: styleMsg })
   if (document && document.text) {

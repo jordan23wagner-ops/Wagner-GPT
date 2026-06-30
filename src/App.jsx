@@ -17,6 +17,12 @@ import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { THEMES, isDarkTheme } from './lib/themes'
 import { Palette } from 'lucide-react'
 import { enhanceMessages } from './lib/enhanceMessages'
+import {
+  storeMemory, retrieveMemories, listMemories, deleteMemory,
+  loadSettings, saveSettings, memoryAvailable,
+} from './lib/memory'
+import { warmEmbedder } from './lib/embed'
+import { Settings, Brain, Trash } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
 
@@ -65,6 +71,15 @@ export default function App() {
   const [convSearch, setConvSearch] = useState('')   // sidebar conversation filter
   const [suggestions, setSuggestions] = useState([]) // follow-up question chips
   const suggestedForRef = useRef(null)               // last reply id we fetched for
+  // Memory + personalization
+  const [aboutYou, setAboutYou] = useState(() => localStorage.getItem('aboutYou') || '')
+  const [customInstructions, setCustomInstructions] = useState(() => localStorage.getItem('customInstructions') || '')
+  const [memoryEnabled, setMemoryEnabled] = useState(() => localStorage.getItem('memoryEnabled') !== 'false')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [memories, setMemories] = useState([])
+  const [newMemory, setNewMemory] = useState('')
+  const retrievedMemoryRef = useRef([])              // memories retrieved for the in-flight turn
+  const extractedForRef = useRef(null)               // last reply id we extracted memory from
   const messagesEndRef = useRef(null)
   const messagesContainerRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -118,6 +133,32 @@ export default function App() {
     fetchSuggestions(messages)
   }, [loading, messages]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // After a reply completes, auto-extract durable user facts into memory (once per reply).
+  useEffect(() => {
+    if (!memoryEnabled || !memoryAvailable || loading) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || !last.content || last.content.length < 12) return
+    if (extractedForRef.current === last.id) return
+    extractedForRef.current = last.id
+    autoExtractMemory(messages)
+  }, [loading, messages, memoryEnabled]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const autoExtractMemory = async (convMessages) => {
+    try {
+      const recent = convMessages.slice(-4).map((m) => ({ role: m.role, content: m.content || '' }))
+      const res = await fetch('/api/memory-extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: recent }),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      if (Array.isArray(data.facts)) {
+        for (const f of data.facts) await storeMemory(f, { source: 'auto' })
+      }
+    } catch { /* best-effort */ }
+  }
+
   const fetchSuggestions = async (convMessages) => {
     try {
       const recent = convMessages.slice(-6).map((m) => ({ role: m.role, content: m.content || '' }))
@@ -159,6 +200,20 @@ export default function App() {
   useEffect(() => { saveActiveId(activeId) }, [activeId])
   useEffect(() => { localStorage.setItem('model', model) }, [model])
   useEffect(() => { localStorage.setItem('style', style) }, [style])
+  useEffect(() => { localStorage.setItem('aboutYou', aboutYou) }, [aboutYou])
+  useEffect(() => { localStorage.setItem('customInstructions', customInstructions) }, [customInstructions])
+  useEffect(() => { localStorage.setItem('memoryEnabled', memoryEnabled) }, [memoryEnabled])
+
+  // Load personalization settings from Supabase on mount (cloud overrides local).
+  useEffect(() => {
+    if (!memoryAvailable) return
+    loadSettings().then((s) => {
+      if (!s) return
+      if (s.about_you != null) setAboutYou(s.about_you)
+      if (s.custom_instructions != null) setCustomInstructions(s.custom_instructions)
+      if (s.memory_enabled != null) setMemoryEnabled(s.memory_enabled)
+    })
+  }, [])
   useEffect(() => { localStorage.setItem('webSearch', webSearch) }, [webSearch])
 
   // Voice input via the Web Speech API. Live interim transcript fills the input;
@@ -267,6 +322,16 @@ export default function App() {
     setError(null)
     setLoading(true)
 
+    // Retrieve relevant long-term memories for this turn (best-effort, time-boxed so the
+    // first message stays responsive while the embedding model downloads on first use).
+    let memForTurn = []
+    if (memoryEnabled && memoryAvailable && payload.text) {
+      const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), ms))])
+      const mems = await withTimeout(retrieveMemories(payload.text, 5), 2500)
+      if (Array.isArray(mems)) memForTurn = mems.map((m) => m.text)
+    }
+    retrievedMemoryRef.current = memForTurn
+
     // Create a placeholder assistant message we'll fill in as tokens stream in.
     const assistantId = Date.now() + 1
     let appended = false        // have we added the placeholder to the list yet?
@@ -327,6 +392,9 @@ export default function App() {
           model: model,
           webSearch: webSearch,
           style: style,
+          memory: memForTurn,
+          customInstructions: customInstructions,
+          aboutYou: aboutYou,
         }),
       })
 
@@ -465,6 +533,27 @@ export default function App() {
     setMessages(() => messages.slice(0, idx))
   }
 
+  // ---- Settings / memory management ----
+  const openSettings = () => {
+    setSettingsOpen(true)
+    warmEmbedder() // start the embedding model download in the background
+    if (memoryAvailable) listMemories().then(setMemories)
+  }
+  const persistSettings = () => {
+    saveSettings({ about_you: aboutYou, custom_instructions: customInstructions, memory_enabled: memoryEnabled })
+  }
+  const removeMemory = async (id) => {
+    await deleteMemory(id)
+    setMemories((ms) => ms.filter((m) => m.id !== id))
+  }
+  const addManualMemory = async () => {
+    const t = newMemory.trim()
+    if (!t) return
+    setNewMemory('')
+    await storeMemory(t, { source: 'manual' })
+    if (memoryAvailable) listMemories().then(setMemories)
+  }
+
   const copyMessage = (id, text) => {
     if (!navigator.clipboard) return
     navigator.clipboard.writeText(text || '').then(() => {
@@ -500,6 +589,12 @@ export default function App() {
     setImagePreview(null)
     setDoc(null)
     setSuggestions([])
+
+    // Manual memory: "remember (that/this) ..." stores the fact explicitly.
+    if (memoryEnabled && memoryAvailable) {
+      const rem = text.match(/^\s*remember\s+(?:that\s+|this\s*[:,]?\s+|[:,]\s*)?(.+)/i)
+      if (rem && rem[1]) storeMemory(rem[1].trim(), { source: 'manual' })
+    }
 
     // Cache hit: serve an identical text-only, non-image, non-doc prompt instantly.
     if (!image && !doc && !webSearch && !looksLikeImageRequest(text)) {
@@ -591,6 +686,13 @@ export default function App() {
             ))}
           </div>
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={openSettings}
+              className="p-1.5 sm:p-2 rounded-lg bg-[var(--surface-2)] text-[var(--text)]"
+              aria-label="Settings & memory"
+            >
+              <Settings size={18} />
+            </button>
             <div className="relative">
               <button
                 onClick={() => setThemeMenuOpen((o) => !o)}
@@ -1070,6 +1172,108 @@ export default function App() {
                     </button>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Settings & memory panel */}
+        {settingsOpen && (
+          <div className="fixed inset-0 z-30 flex justify-end">
+            <div className="absolute inset-0 bg-black/40" onClick={() => { setSettingsOpen(false); persistSettings() }} />
+            <div
+              className="relative w-80 max-w-[88%] h-full flex flex-col shadow-xl bg-[var(--surface)] text-[var(--text)]"
+              style={{ paddingTop: TOP_INSET }}
+            >
+              <div className="flex items-center justify-between px-4 pb-3 border-b border-[var(--border)]">
+                <span className="font-semibold flex items-center gap-1.5"><Settings size={16} /> Settings</span>
+                <button
+                  onClick={() => { setSettingsOpen(false); persistSettings() }}
+                  className="p-1.5 rounded-lg text-[var(--muted)] hover:bg-[var(--surface-2)]"
+                  aria-label="Close settings"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-[var(--muted)]">About you</label>
+                  <textarea
+                    value={aboutYou}
+                    onChange={(e) => setAboutYou(e.target.value)}
+                    onBlur={persistSettings}
+                    rows={3}
+                    placeholder="e.g. My name is Alicia. I'm a teacher who loves gardening."
+                    className="w-full mt-1 px-3 py-2 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)] resize-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-[var(--muted)]">How should I respond?</label>
+                  <textarea
+                    value={customInstructions}
+                    onChange={(e) => setCustomInstructions(e.target.value)}
+                    onBlur={persistSettings}
+                    rows={3}
+                    placeholder="e.g. Keep answers warm and concise. Avoid jargon."
+                    className="w-full mt-1 px-3 py-2 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)] resize-none"
+                  />
+                </div>
+
+                <div className="border-t border-[var(--border)] pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium flex items-center gap-1.5"><Brain size={15} /> Memory</span>
+                    <button
+                      onClick={() => { setMemoryEnabled((v) => { const nv = !v; saveSettings({ about_you: aboutYou, custom_instructions: customInstructions, memory_enabled: nv }); return nv }) }}
+                      className={`w-11 h-6 rounded-full relative transition-colors ${memoryEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--surface-2)]'}`}
+                      aria-label="Toggle memory"
+                    >
+                      <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${memoryEnabled ? 'left-[1.375rem]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                  <p className="text-xs text-[var(--muted)] mt-1">
+                    {memoryAvailable
+                      ? 'I remember useful facts across chats. Say "remember that…" or add one below.'
+                      : 'Memory needs the Supabase migration (supabase-memory-schema.sql) to be run.'}
+                  </p>
+
+                  {memoryAvailable && (
+                    <>
+                      <div className="flex gap-2 mt-3">
+                        <input
+                          type="text"
+                          value={newMemory}
+                          onChange={(e) => setNewMemory(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') addManualMemory() }}
+                          placeholder="Add a memory…"
+                          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
+                        />
+                        <button
+                          onClick={addManualMemory}
+                          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]"
+                        >
+                          Add
+                        </button>
+                      </div>
+                      <div className="mt-3 space-y-1.5">
+                        {memories.length === 0 ? (
+                          <p className="text-xs text-[var(--muted)] italic">No memories yet.</p>
+                        ) : memories.map((m) => (
+                          <div key={m.id} className="flex items-start gap-2 text-sm bg-[var(--surface-2)] rounded-lg px-3 py-2">
+                            <span className="flex-1">{m.text}</span>
+                            <button
+                              onClick={() => removeMemory(m.id)}
+                              className="text-[var(--muted)] hover:text-red-500 shrink-0"
+                              aria-label="Delete memory"
+                            >
+                              <Trash size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
