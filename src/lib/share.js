@@ -49,6 +49,23 @@ export async function loadShare(id) {
   return data
 }
 
+// List existing shares (newest first) for the manage/revoke UI. Skips `messages` so the
+// list stays light. Returns [] on any error (e.g. the share table migration not run).
+export async function listShares() {
+  const { data, error } = await supabase
+    .from('shared_chats').select('id, title, created_at').order('created_at', { ascending: false })
+  if (error || !data) return []
+  return data
+}
+
+// Permanently revoke a share by id. Returns true on success. After this the ?s=<id> link
+// 404s in the read-only viewer (loadShare returns null).
+export async function deleteShare(id) {
+  if (!id) return false
+  const { error } = await supabase.from('shared_chats').delete().eq('id', id)
+  return !error
+}
+
 // Build the absolute link for a slug, preserving the current origin + path.
 export function shareUrl(id) {
   return `${window.location.origin}${window.location.pathname}?s=${id}`

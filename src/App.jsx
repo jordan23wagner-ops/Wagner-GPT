@@ -27,7 +27,7 @@ import { warmEmbedder } from './lib/embed'
 import { RAG_THRESHOLD, docId, buildIndex, retrieveChunks } from './lib/rag'
 import { Share2 } from 'lucide-react'
 import SharedChat from './SharedChat'
-import { createShare, loadShare, shareUrl, shareIdFromUrl } from './lib/share'
+import { createShare, loadShare, shareUrl, shareIdFromUrl, listShares, deleteShare } from './lib/share'
 import { Settings, Brain, Trash } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
@@ -101,6 +101,7 @@ export default function App() {
   const [shareNotFound, setShareNotFound] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)   // creating a share link
   const [shareCopied, setShareCopied] = useState(false)
+  const [shares, setShares] = useState(null)          // manage/revoke list (null = not loaded)
 
   useEffect(() => {
     if (!shareId) return
@@ -705,6 +706,25 @@ export default function App() {
     } finally {
       setShareBusy(false)
     }
+    refreshShares()
+  }
+
+  // Load the list of existing shares for the manage/revoke UI (called when Settings opens
+  // and after creating/revoking a share).
+  const refreshShares = async () => {
+    setShares(await listShares())
+  }
+  useEffect(() => { if (settingsOpen) refreshShares() }, [settingsOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Revoke a share: delete it and drop it from the list (optimistic, reverts on failure).
+  const revokeShare = async (id) => {
+    setShares((prev) => (prev || []).filter((s) => s.id !== id))
+    const ok = await deleteShare(id)
+    if (!ok) { setError('Could not revoke that link.'); refreshShares() }
+  }
+
+  const copyShareUrl = async (id) => {
+    try { await navigator.clipboard.writeText(shareUrl(id)) } catch { /* clipboard blocked */ }
   }
 
   // ---- Conversation management ----
@@ -1384,6 +1404,38 @@ export default function App() {
                       </div>
                     </>
                   )}
+                </div>
+
+                <div className="border-t border-[var(--border)] pt-3">
+                  <span className="text-sm font-medium flex items-center gap-1.5"><Share2 size={15} /> Shared links</span>
+                  <p className="text-xs text-[var(--muted)] mt-1">Read-only snapshots you've shared. Revoke a link to make it stop working.</p>
+                  <div className="mt-3 space-y-1.5">
+                    {shares === null ? (
+                      <p className="text-xs text-[var(--muted)] italic">Loading…</p>
+                    ) : shares.length === 0 ? (
+                      <p className="text-xs text-[var(--muted)] italic">No shared links yet.</p>
+                    ) : shares.map((s) => (
+                      <div key={s.id} className="flex items-center gap-2 text-sm bg-[var(--surface-2)] rounded-lg px-3 py-2">
+                        <span className="flex-1 min-w-0 truncate" title={s.title}>{s.title || 'Shared chat'}</span>
+                        <button
+                          onClick={() => copyShareUrl(s.id)}
+                          className="text-[var(--muted)] hover:text-[var(--accent)] shrink-0"
+                          aria-label="Copy link"
+                          title="Copy link"
+                        >
+                          <Copy size={14} />
+                        </button>
+                        <button
+                          onClick={() => revokeShare(s.id)}
+                          className="text-[var(--muted)] hover:text-red-500 shrink-0"
+                          aria-label="Revoke link"
+                          title="Revoke link"
+                        >
+                          <Trash size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
