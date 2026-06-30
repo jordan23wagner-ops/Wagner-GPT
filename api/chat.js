@@ -118,8 +118,10 @@ export default async function handler(req, res) {
     systemMsgs.push({
       role: 'system',
       content:
-        `The user attached a document named "${document.name}". Use its contents to ` +
-        `answer, summarize, or rewrite as asked. Document contents:\n\n${document.text}`,
+        `The user attached a document named "${document.name}". The text below may be the ` +
+        `full document or the excerpts most relevant to the question. Use it to answer, ` +
+        `summarize, or rewrite as asked, and say so if it looks incomplete for the ask. ` +
+        `Document contents:\n\n${document.text}`,
     })
   }
   if (searchData) systemMsgs.push(buildSearchSystem(newMessage, searchData))

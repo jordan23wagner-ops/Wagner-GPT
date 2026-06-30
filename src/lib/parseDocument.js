@@ -4,7 +4,10 @@
 // Supported: PDF (.pdf), Word (.docx), CSV (.csv), plain text / markdown (.txt/.md and
 // any text/* file). Output is plain text, capped so it never blows the model's context.
 
-export const MAX_CHARS = 15000
+// Large docs are no longer dumped wholesale into context — Phase 2b chunks + embeds them
+// and retrieves only relevant pieces (see lib/rag.js). So this cap is just a sane ceiling
+// to keep browser memory bounded; the model never sees this many chars at once.
+export const MAX_CHARS = 100000
 
 const EXT = (name) => (name.split('.').pop() || '').toLowerCase()
 

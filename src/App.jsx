@@ -22,6 +22,7 @@ import {
   loadSettings, saveSettings, memoryAvailable,
 } from './lib/memory'
 import { warmEmbedder } from './lib/embed'
+import { RAG_THRESHOLD, docId, buildIndex, retrieveChunks } from './lib/rag'
 import { Settings, Brain, Trash } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
 import { syncConversationsDown, syncConversationUp, syncDeleteConversation } from './lib/sync'
@@ -272,6 +273,12 @@ export default function App() {
     try {
       const parsed = await parseDocument(file)
       setDoc(parsed)
+      // Phase 2b RAG: large docs get chunked + embedded so we can retrieve only the
+      // relevant parts later. Warm the index now (best-effort) so the first question
+      // doesn't wait on it.
+      if (parsed.text.length > RAG_THRESHOLD) {
+        buildIndex(docId(parsed.name, parsed.text), parsed.text).catch(() => {})
+      }
     } catch (err) {
       setError(err.message || 'Could not read that document.')
       setDoc(null)
@@ -332,6 +339,35 @@ export default function App() {
     }
     retrievedMemoryRef.current = memForTurn
 
+    // Phase 2b — Document RAG. Identify the document in play this turn (freshly attached,
+    // else the most recent one in history) and, if it's large, retrieve only the chunks
+    // relevant to the question instead of sending the whole thing. Time-boxed: if the
+    // embedding index isn't ready, degrade to the document's head so the reply stays
+    // snappy. Small docs keep the simple full-text path below.
+    const lastDoc = [...history].reverse().find((m) => m.docText)
+    const activeDocText = payload.document?.text || lastDoc?.docText
+    const activeDocName = payload.document?.name || lastDoc?.docName
+    const ragActive = activeDocText && activeDocText.length > RAG_THRESHOLD
+    let outgoingDoc = payload.document
+    if (ragActive) {
+      const id = docId(activeDocName, activeDocText)
+      const query = payload.text || activeDocName || ''
+      try {
+        const chunks = await Promise.race([
+          retrieveChunks(id, activeDocText, query, 4),
+          new Promise((r) => setTimeout(() => r(null), 6000)),
+        ])
+        outgoingDoc = {
+          name: activeDocName,
+          text: (chunks && chunks.length)
+            ? chunks.join('\n\n---\n\n')
+            : activeDocText.slice(0, RAG_THRESHOLD), // index not ready yet
+        }
+      } catch (_) {
+        outgoingDoc = { name: activeDocName, text: activeDocText.slice(0, RAG_THRESHOLD) }
+      }
+    }
+
     // Create a placeholder assistant message we'll fill in as tokens stream in.
     const assistantId = Date.now() + 1
     let appended = false        // have we added the placeholder to the list yet?
@@ -382,13 +418,18 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           // Re-attach any document text from prior turns so follow-ups keep context.
-          messages: history.map((m) => ({
-            role: m.role,
-            content: m.docText ? `${m.content}\n\n[Attached document: ${m.docName}]\n${m.docText}` : m.content,
-          })),
+          // Large (RAG) docs are NOT re-dumped here — that would defeat retrieval; their
+          // relevant excerpts ride along in `document` below instead.
+          messages: history.map((m) => {
+            if (!m.docText) return { role: m.role, content: m.content }
+            if (m.docText.length > RAG_THRESHOLD) {
+              return { role: m.role, content: `${m.content}\n\n[Attached document: ${m.docName}]` }
+            }
+            return { role: m.role, content: `${m.content}\n\n[Attached document: ${m.docName}]\n${m.docText}` }
+          }),
           newMessage: payload.text,
           image: payload.image,
-          document: payload.document,
+          document: outgoingDoc,
           model: model,
           webSearch: webSearch,
           style: style,
