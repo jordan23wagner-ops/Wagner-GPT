@@ -124,7 +124,7 @@ export default async function handler(req, res) {
       if (!b64) {
         // If NIM tripped its content filter, say so — a Retry (new seed) usually clears it.
         if (nimErr && /content-filtered/i.test(nimErr.message)) {
-          throw new Error("the image service flagged this one by mistake (its safety filter). Tap Retry, or reword the request slightly.")
+          throw new Error(`the image service flagged this by mistake [${nimErr.message}]. Tap Retry, or reword the request slightly.`)
         }
         // Surface the underlying reasons so failures are diagnosable, not just "fetch failed".
         const detail = [nimErr && `NIM: ${nimErr.message}`, hfErr && `HF: ${hfErr.message}`]
@@ -545,12 +545,14 @@ async function generateImage(prompt, nimKey) {
   const art = (data && data.artifacts && data.artifacts[0]) || {}
   const b64 = art.base64
   if (!b64) throw new Error('no image returned')
-  // NVIDIA's safety filter returns a BLACK image (not an error) when it trips — and it
-  // false-positives. Surface it as a failure so we fall back / let the user retry with a
-  // fresh seed, instead of showing a black square. Field name varies, so check both.
-  const reason = art.finishReason || art.finish_reason
-  if (reason && String(reason).toUpperCase() !== 'SUCCESS') {
-    throw new Error(`content-filtered (${reason})`)
+  // Only reject on an EXPLICIT content-filter result (NVIDIA returns a black image with a
+  // CONTENT_FILTERED reason when its safety filter trips, and it false-positives). Other
+  // non-success reason values vary by deployment and may still carry a valid image, so we
+  // do NOT reject them — the size guard below still catches truly-empty results. We carry
+  // the raw reason in the error so it's visible if it really is a filter.
+  const reason = String(art.finishReason || art.finish_reason || '').toUpperCase()
+  if (reason.includes('FILTER')) {
+    throw new Error(`content-filtered (${reason || 'unknown'})`)
   }
   if (b64.length < MIN_IMAGE_B64) throw new Error('image came back empty')
   return b64
