@@ -1,5 +1,7 @@
 // Wagner-GPT chat backend (streaming)
-// Strategy: try Ollama Cloud first (free), fall back to NVIDIA NIM (dev credits) on failure.
+// Strategy: try Ollama Cloud first (free), then Cerebras and Groq (both host the same
+// gpt-oss-120b model on separate free-tier quota pools — no quality drop, just different
+// infra), falling back to NVIDIA NIM (dev credits, weaker model) last.
 // Image generation: NVIDIA NIM FLUX.1-dev primary, Hugging Face FLUX.1-schnell fallback.
 // Each provider has a different streaming format; we normalize both into a single
 // newline-delimited JSON (NDJSON) stream to the client:
@@ -42,6 +44,10 @@ export default async function handler(req, res) {
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
   const HUGGINGFACE_KEY = process.env.HUGGINGFACE_KEY
   const TAVILY_KEY = process.env.TAVILY_KEY || process.env.TAVILY_API_KEY || process.env.TAVILY
+  // Both optional — absent means those fallback tiers are just skipped, same as
+  // NVIDIA_NIM_KEY/HUGGINGFACE_KEY already behave when unset.
+  const CEREBRAS_KEY = process.env.CEREBRAS_KEY
+  const GROQ_KEY = process.env.GROQ_KEY
 
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
@@ -59,8 +65,13 @@ export default async function handler(req, res) {
     // Smarter free Ollama Cloud models (no vision). gpt-oss is a fast MoE with strong
     // reasoning + reliable tool-calling; qwen3-coder is tuned for code. llama-3.3 is the
     // text-only NIM backstop for both.
-    gptoss:   { ollama: 'gpt-oss:120b',            nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] },
-    qwen:     { ollama: 'qwen3-coder:480b',        nim: 'meta/llama-3.3-70b-instruct',   order: ['ollama', 'nim'] }
+    // Cerebras and Groq both host gpt-oss-120b for free (different accounts, GPU-time
+    // billed vs request/token-rate billed — a genuinely separate quota pool from Ollama's),
+    // so they slot in ahead of NIM for BOTH routes: exact model match for gptoss (no
+    // quality drop), and — same as NIM already does today for qwen — a different-but-
+    // still-capable generalist standing in for the code-tuned model when Ollama's out.
+    gptoss:   { ollama: 'gpt-oss:120b', cerebras: 'gpt-oss-120b', groq: 'openai/gpt-oss-120b', nim: 'meta/llama-3.3-70b-instruct', order: ['ollama', 'cerebras', 'groq', 'nim'] },
+    qwen:     { ollama: 'qwen3-coder:480b', cerebras: 'gpt-oss-120b', groq: 'openai/gpt-oss-120b', nim: 'meta/llama-3.3-70b-instruct', order: ['ollama', 'cerebras', 'groq', 'nim'] }
     // Evaluated glm-5 and deepseek-v3.1:671b — neither tag resolves on the free tier
     // (both fall back to NIM) and DeepSeek is slow. gpt-oss:120b stays the smart pick.
   }
@@ -229,28 +240,42 @@ export default async function handler(req, res) {
         res.write(JSON.stringify({ error: `Stream interrupted (Ollama): ${err.message}` }) + '\n')
         return res.end()
       }
-      // else: fall through to NIM
+      // else: fall through to the text-only fallbacks below
     }
   }
 
-  // 2) Fall back to NVIDIA NIM (dev credits).
-  if (NVIDIA_NIM_KEY && !state.wroteAny) {
+  // 2) Plain-text fallbacks, in priority order: Cerebras and Groq both host the SAME
+  // gpt-oss-120b model Ollama serves (no quality drop for the gptoss route; qwen's code-
+  // tuned model has no equivalent so it degrades the same way it already does to NIM
+  // today), on completely separate quota pools — only NIM (weaker model) is the last
+  // resort. None of these support tools (image generation), same as NIM's existing
+  // behavior. `model` is undefined for a route with no match on that provider (m3/gemma
+  // have none), so those are skipped automatically.
+  const textFallbacks = [
+    { name: 'cerebras', key: CEREBRAS_KEY, model: ids.cerebras, url: 'https://api.cerebras.ai/v1/chat/completions' },
+    { name: 'groq', key: GROQ_KEY, model: ids.groq, url: 'https://api.groq.com/openai/v1/chat/completions' },
+    { name: 'nim', key: NVIDIA_NIM_KEY, model: ids.nim, url: 'https://integrate.api.nvidia.com/v1/chat/completions' },
+  ]
+
+  for (const fb of textFallbacks) {
+    if (!fb.key || !fb.model || state.wroteAny) continue
     try {
-      await streamNim(fullMessages, ids.nim, NVIDIA_NIM_KEY, writeDelta)
+      await streamOpenAICompatible(fb.url, fullMessages, fb.model, fb.key, writeDelta, fb.name)
       if (searchData) writeDelta(sourcesMarkdown(searchData))
-      res.write(JSON.stringify({ done: true, provider: 'nim', model: effectiveModel }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: fb.name, model: effectiveModel }) + '\n')
       return res.end()
     } catch (err) {
-      console.error('NIM failed:', err.message)
-      errors.push(`NIM: ${err.message}`)
+      console.error(`${fb.name} failed:`, err.message)
+      errors.push(`${fb.name}: ${err.message}`)
       if (state.wroteAny) {
-        res.write(JSON.stringify({ error: `Stream interrupted (NIM): ${err.message}` }) + '\n')
+        res.write(JSON.stringify({ error: `Stream interrupted (${fb.name}): ${err.message}` }) + '\n')
         return res.end()
       }
+      // else: fall through to the next provider in the list
     }
   }
 
-  // Both providers failed before emitting anything.
+  // Every available provider failed before emitting anything.
   const msg = 'All available models failed. ' + (errors[errors.length - 1] || 'Please try again shortly.')
   res.write(JSON.stringify({ error: msg }) + '\n')
   return res.end()
@@ -675,11 +700,27 @@ async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelt
   }
 }
 
-// NVIDIA NIM: OpenAI-compatible, stream:true -> SSE lines:
+// Groq and Cerebras both return real-time remaining-quota headers on every response
+// (different header names each) — unlike Ollama, which exposes no quota API at all.
+// Logging them gives ground-truth headroom visibility in Vercel's function logs, cheaper
+// than building a persisted tracking table for two providers whose limits already
+// self-enforce via the normal 429-and-fall-through path anyway.
+function logRateLimitHeaders(label, response) {
+  const h = response.headers
+  const reqRemaining = h.get('x-ratelimit-remaining-requests') || h.get('x-ratelimit-remaining-requests-day')
+  const tokRemaining = h.get('x-ratelimit-remaining-tokens') || h.get('x-ratelimit-remaining-tokens-minute')
+  if (reqRemaining != null || tokRemaining != null) {
+    console.log(`[quota] ${label}: requests remaining=${reqRemaining ?? '?'} tokens remaining=${tokRemaining ?? '?'}`)
+  }
+}
+
+// Generic OpenAI-compatible chat-completions streamer (SSE `data: {...}` lines). NIM,
+// Cerebras, and Groq all speak this exact wire format — only the base URL, model catalog,
+// and key differ — so one function serves all three text-only fallback tiers.
 //   data: { "choices": [{ "delta": { "content": "..." } }] }
 //   data: [DONE]
 // Text-only -- strip images.
-async function streamNim(messages, model, apiKey, onDelta) {
+async function streamOpenAICompatible(baseUrl, messages, model, apiKey, onDelta, label) {
   const textMessages = messages.map(m => ({
     role: m.role,
     content: Array.isArray(m.content)
@@ -687,7 +728,7 @@ async function streamNim(messages, model, apiKey, onDelta) {
       : m.content
   }))
 
-  const response = await openWithRetry('https://integrate.api.nvidia.com/v1/chat/completions', {
+  const response = await openWithRetry(baseUrl, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -695,6 +736,7 @@ async function streamNim(messages, model, apiKey, onDelta) {
     },
     body: JSON.stringify({ model, messages: textMessages, temperature: 0.7, max_tokens: 2048, stream: true })
   })
+  logRateLimitHeaders(label, response)
 
   let got = false
   for await (const line of iterLines(response)) {
