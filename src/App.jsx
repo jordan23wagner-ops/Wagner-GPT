@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react'
 import {
   Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2,
-  Menu, Plus, X, FileText, Printer, Code2,
+  Menu, Plus, X, FileText, Printer, Code2, Droplets,
 } from 'lucide-react'
 import Garden from './Garden'
 import CodeTab from './Code'
+import Attic from './Attic'
 import {
   loadConversations, saveConversations, loadActiveId, saveActiveId,
   newConversation, titleFromMessages,
@@ -846,6 +847,7 @@ export default function App() {
             {[
               { id: 'chat', label: 'Chat', Icon: MessageSquare },
               { id: 'garden', label: 'Garden', Icon: Flower2 },
+              { id: 'attic', label: 'Attic', Icon: Droplets },
               { id: 'code', label: 'Code', Icon: Code2 },
             ].map(({ id, label, Icon }) => (
               <button
@@ -928,6 +930,8 @@ export default function App() {
         </div>
 
         {tab === 'garden' && <Garden darkMode={darkMode} />}
+
+        {tab === 'attic' && <Attic />}
 
         {tab === 'code' && <CodeTab />}
 
