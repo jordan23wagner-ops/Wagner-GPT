@@ -22,11 +22,11 @@ export const getTree = (owner, repo, branch, account) => githubCall('tree', { ow
 export const getFile = (owner, repo, path, branch, account) => githubCall('file', { owner, repo, path, branch, account })
 export const commitFile = (args) => githubCall('commit', args)
 
-export async function locateFile(files, instruction, projectContext) {
+export async function locateFile(files, instruction, projectContext, image) {
   const res = await fetch('/api/code-locate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files, instruction, projectContext }),
+    body: JSON.stringify({ files, instruction, projectContext, image }),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
@@ -37,11 +37,11 @@ export async function locateFile(files, instruction, projectContext) {
   return data.path
 }
 
-export async function editFile({ path, content, instruction }) {
+export async function editFile({ path, content, instruction, image }) {
   const res = await fetch('/api/code-edit', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, content, instruction }),
+    body: JSON.stringify({ path, content, instruction, image }),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {

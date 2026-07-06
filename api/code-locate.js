@@ -4,12 +4,13 @@
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const OLLAMA_KEY = process.env.OLLAMA_CLOUD_KEY
-  const NIM_KEY = process.env.NVIDIA_NIM_KEY
+  const OLLAMA_KEY  = process.env.OLLAMA_CLOUD_KEY
+  const NIM_KEY     = process.env.NVIDIA_NIM_KEY
+  const GEMINI_KEY  = process.env.GEMINI_KEY
 
   if (!OLLAMA_KEY && !NIM_KEY) return res.status(500).json({ error: 'No model keys configured.' })
 
-  const { files, instruction, projectContext } = req.body || {}
+  const { files, instruction, projectContext, image } = req.body || {}
   if (!Array.isArray(files) || !instruction) {
     return res.status(400).json({ error: 'Missing files or instruction.' })
   }
@@ -20,6 +21,14 @@ export default async function handler(req, res) {
     .filter((f) => /\.(js|jsx|ts|tsx|html|css|scss|py|json|md|txt|vue|svelte|rb|go|rs|java|c|cpp|h|cs|php|yaml|yml|toml)$/.test(f.path))
     .map((f) => f.path)
     .slice(0, 300)
+
+  // If a screenshot was attached, use Gemini vision to generate a visual description
+  // and prepend it to the instruction so the text model has UI context.
+  let enrichedInstruction = instruction
+  if (image && image.data && GEMINI_KEY) {
+    const desc = await describeScreenshot(image, instruction, GEMINI_KEY)
+    if (desc) enrichedInstruction = `${instruction}\n\nScreenshot shows: ${desc}`
+  }
 
   const contextBlock = projectContext
     ? `Project context:\n${projectContext}\n\n`
@@ -37,7 +46,7 @@ export default async function handler(req, res) {
       role: 'user',
       content:
         `${contextBlock}Repository files:\n${relevant.join('\n')}\n\n` +
-        `Change request: ${instruction}\n\n` +
+        `Change request: ${enrichedInstruction}\n\n` +
         `Which single file should be edited? Reply with only the file path.`,
     },
   ]
@@ -71,6 +80,33 @@ export default async function handler(req, res) {
     return res.status(200).json({ path })
   } catch (err) {
     return res.status(502).json({ error: err.message || 'Failed to locate file.' })
+  }
+}
+
+// Use Gemini vision to describe what's visible in the screenshot, focused on the task.
+// Returns a short description string, or null on failure (caller falls back to text-only).
+async function describeScreenshot(image, instruction, apiKey) {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: image.mimeType || 'image/jpeg', data: image.data } },
+              { text: `This is a screenshot of a web app. In 2-3 sentences, describe the UI elements visible that are most relevant to this task: "${instruction}". Focus on component names, button text, layout, and any error messages or visual issues shown.` },
+            ],
+          }],
+        }),
+      }
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || null
+  } catch {
+    return null
   }
 }
 

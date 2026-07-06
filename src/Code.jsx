@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
-  Loader2, Wand2, GitCommit, X, FolderGit2, FileCode, ArrowLeft,
+  Loader2, Wand2, GitCommit, X, FolderGit2, FileCode, ArrowLeft, Paperclip,
 } from 'lucide-react'
 import {
   listRepos, getTree, getFile, locateFile, editFile, commitFile,
@@ -27,6 +27,7 @@ export default function Code() {
   const [projectContext, setProjectContext] = useState(null)
 
   const [instruction, setInstruction] = useState('')
+  const [screenshot, setScreenshot] = useState(null)    // { data, mimeType, preview }
   const [locatedPath, setLocatedPath] = useState(null)  // path the model picked
   const [file, setFile] = useState(null)                // { path, content, sha, branch }
   const [proposal, setProposal] = useState(null)
@@ -34,6 +35,7 @@ export default function Code() {
 
   const [step, setStep] = useState(null)   // null | 'locating' | 'reading' | 'editing'
   const [status, setStatus] = useState(null)
+  const screenshotInputRef = useRef(null)
 
   const acct = account === 'jordon' ? undefined : account
 
@@ -46,7 +48,7 @@ export default function Code() {
 
   function resetEdit() {
     setLocatedPath(null); setFile(null); setProposal(null)
-    setInstruction(''); setStatus(null); setStep(null)
+    setInstruction(''); setScreenshot(null); setStatus(null); setStep(null)
   }
 
   const openRepo = async (fullName) => {
@@ -72,7 +74,7 @@ export default function Code() {
     try {
       // 1. Ask the model which file to edit
       setStep('locating')
-      const path = await locateFile(tree.files, instruction.trim(), projectContext)
+      const path = await locateFile(tree.files, instruction.trim(), projectContext, screenshot)
       setLocatedPath(path)
 
       // 2. Fetch that file from GitHub
@@ -82,7 +84,7 @@ export default function Code() {
 
       // 3. Ask the model to rewrite it
       setStep('editing')
-      const updated = await editFile({ path: f.path, content: f.content, instruction: instruction.trim() })
+      const updated = await editFile({ path: f.path, content: f.content, instruction: instruction.trim(), image: screenshot })
 
       if (updated === f.content) {
         setStatus({ type: 'error', text: 'The model returned no changes. Try rephrasing.' })
@@ -202,6 +204,51 @@ export default function Code() {
                   placeholder={`e.g. "Change the dashboard title to 'My Finances'"\ne.g. "Add a dark mode toggle to the navbar"\ne.g. "Fix the button on the login page so it says 'Sign In'"`}
                   className="w-full px-3 py-2 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)] resize-none disabled:opacity-50"
                 />
+
+                {/* Screenshot attachment */}
+                <input
+                  type="file"
+                  accept="image/*"
+                  ref={screenshotInputRef}
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ''
+                    if (!file) return
+                    const reader = new FileReader()
+                    reader.onload = (ev) => {
+                      const dataUrl = ev.target.result
+                      setScreenshot({
+                        data: dataUrl.split(',')[1],
+                        mimeType: file.type || 'image/jpeg',
+                        preview: dataUrl,
+                      })
+                    }
+                    reader.readAsDataURL(file)
+                  }}
+                />
+                {screenshot ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    <img src={screenshot.preview} alt="screenshot" className="h-12 w-20 object-cover rounded border border-[var(--border)]" />
+                    <span className="text-xs text-[var(--muted)]">Screenshot attached</span>
+                    <button
+                      type="button"
+                      onClick={() => setScreenshot(null)}
+                      className="ml-auto text-xs text-red-500 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => screenshotInputRef.current?.click()}
+                    disabled={busy}
+                    className="mt-2 flex items-center gap-1.5 text-xs text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-50"
+                  >
+                    <Paperclip size={13} /> Attach screenshot for context
+                  </button>
+                )}
 
                 {/* Progress indicator */}
                 {busy && (
