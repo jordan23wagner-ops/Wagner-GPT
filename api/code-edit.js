@@ -8,28 +8,19 @@
 // The system prompt forces "return only the full file in one fenced block" so we can
 // extract it deterministically; we still defensively strip stray prose/fences.
 
-import crypto from 'crypto'
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const SECRET = process.env.CODING_MODE_PASSWORD
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
 
-  if (!SECRET) {
-    return res.status(503).json({ error: 'Coding Mode is not configured (CODING_MODE_PASSWORD unset).' })
-  }
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No model API keys configured.' })
   }
 
-  const { password, path, content, instruction } = req.body || {}
-  if (!passwordOk(password, SECRET)) {
-    return res.status(401).json({ error: 'Wrong Coding Mode password.' })
-  }
+  const { path, content, instruction } = req.body || {}
   if (typeof content !== 'string' || !instruction) {
     return res.status(400).json({ error: 'Missing file content or instruction.' })
   }
@@ -73,14 +64,6 @@ const SYSTEM_PROMPT =
   'style, indentation, and unrelated code exactly. Do not add explanations or comments ' +
   'about what you changed. Respond with the COMPLETE updated file inside a single fenced ' +
   'code block (```), and nothing else before or after it.'
-
-function passwordOk(provided, expected) {
-  if (typeof provided !== 'string' || !provided) return false
-  const a = Buffer.from(provided)
-  const b = Buffer.from(expected)
-  if (a.length !== b.length) { crypto.timingSafeEqual(b, b); return false }
-  return crypto.timingSafeEqual(a, b)
-}
 
 // Pull the file out of the model's reply. Prefer the first fenced block; if the model
 // ignored the fence instruction, fall back to the whole trimmed reply.

@@ -13,7 +13,7 @@ import {
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
 import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
-import { Download, Globe, Mic, FileUp, Volume2, Square, Loader2, Copy, Check, RefreshCw, Pencil, Search } from 'lucide-react'
+import { Download, Globe, Mic, MicOff, FileUp, Volume2, Square, Loader2, Copy, Check, RefreshCw, Pencil, Search, BookOpen } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
 import { parseDocument, isSupportedDocument } from './lib/parseDocument'
 import { THEMES, isDarkTheme } from './lib/themes'
@@ -92,9 +92,21 @@ export default function App() {
   const messagesEndRef = useRef(null)
   const messagesContainerRef = useRef(null)
   const fileInputRef = useRef(null)
-  const docInputRef = useRef(null)
   const recognitionRef = useRef(null)
   const abortRef = useRef(null)                       // AbortController for the live stream
+
+  // Phase 5 — Deep Research
+  const [deepResearch, setDeepResearch] = useState(false)
+  const [researchSteps, setResearchSteps] = useState([])
+
+  // Phase 6 — Voice Conversation Loop (Groq Whisper STT + browser TTS)
+  const [voiceMode, setVoiceMode] = useState(false)
+  const [voiceState, setVoiceState] = useState('idle') // 'idle'|'recording'|'transcribing'|'speaking'
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef  = useRef([])
+  const streamRef       = useRef(null)
+  const voiceModeRef    = useRef(false)  // stable ref used inside async callbacks
+  const messagesRef     = useRef([])     // always-current messages for async voice callbacks
 
   // Phase 7 — shareable links. If the app is opened with ?s=<id>, we render a read-only
   // snapshot instead of the live app (see the early return below).
@@ -125,6 +137,7 @@ export default function App() {
   // Keep the active id reachable inside async stream closures without stale capture.
   const activeIdRef = useRef(activeId)
   activeIdRef.current = activeId
+  messagesRef.current = messages  // voice callbacks read this to get the latest message list
 
   const activeConv = conversations.find((c) => c.id === activeId) || conversations[0]
   const messages = activeConv ? activeConv.messages : []
@@ -292,31 +305,176 @@ export default function App() {
     window.speechSynthesis.speak(u)
   }
 
-  // Document upload: parse client-side to text and attach it to the next message.
-  const handleDocUpload = async (e) => {
-    const file = e.target.files[0]
-    e.target.value = '' // allow re-selecting the same file
-    if (!file) return
-    if (!isSupportedDocument(file)) {
-      setError('Unsupported file. Try PDF, Word (.docx), CSV, or a text file.')
-      return
+  // ── Phase 6: Voice Conversation Loop ─────────────────────────────────────────
+
+  // Speak a reply in voice mode — auto-restarts the listening loop when done.
+  const voiceSpeak = (id, text) => {
+    if (!ttsSupported) return
+    window.speechSynthesis.cancel()
+    const clean = String(text || '')
+      .replace(/[#*`_>]/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .slice(0, 4000)
+    const u = new SpeechSynthesisUtterance(clean)
+    const loop = () => {
+      setSpeakingId(null)
+      setVoiceState('idle')
+      if (voiceModeRef.current) startVoiceLoop()
     }
-    setDocLoading(true)
-    setError(null)
+    u.onend   = loop
+    u.onerror = loop
+    setSpeakingId(id)
+    setVoiceState('speaking')
+    window.speechSynthesis.speak(u)
+  }
+
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload  = () => resolve(reader.result.split(',')[1])
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+
+  // Submit transcribed voice text directly to the model (bypasses the form).
+  const submitVoiceText = async (text) => {
+    if (!voiceModeRef.current) return
+    setVoiceState('idle')  // 'AI is thinking…' shown in overlay
+    setSuggestions([])
+    const userMessage = { id: Date.now(), role: 'user', content: text }
+    const history = messagesRef.current  // latest messages via ref (avoids stale closure)
+    setMessages((prev) => [...prev, userMessage])
+    await sendToModel(history, { text, images: [], document: null })
+  }
+
+  const startVoiceLoop = async () => {
+    if (!voiceModeRef.current) return
+    setVoiceState('recording')
     try {
-      const parsed = await parseDocument(file)
-      setDoc(parsed)
-      // Phase 2b RAG: large docs get chunked + embedded so we can retrieve only the
-      // relevant parts later. Warm the index now (best-effort) so the first question
-      // doesn't wait on it.
-      if (parsed.text.length > RAG_THRESHOLD) {
-        buildIndex(docId(parsed.name, parsed.text), parsed.text).catch(() => {})
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+      const recorder = new MediaRecorder(stream, { mimeType })
+      mediaRecorderRef.current = recorder
+      audioChunksRef.current   = []
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data) }
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop())
+        streamRef.current = null
+        if (!voiceModeRef.current) return
+        setVoiceState('transcribing')
+        try {
+          const blob   = new Blob(audioChunksRef.current, { type: mimeType })
+          const base64 = await blobToBase64(blob)
+          const res    = await fetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audio: base64, mimeType }),
+          })
+          const data = await res.json()
+          const text = (data.text || '').trim()
+          if (text && voiceModeRef.current) {
+            submitVoiceText(text)
+          } else if (voiceModeRef.current) {
+            startVoiceLoop()  // nothing understood — listen again
+          }
+        } catch {
+          if (voiceModeRef.current) startVoiceLoop()
+        }
       }
-    } catch (err) {
-      setError(err.message || 'Could not read that document.')
-      setDoc(null)
-    } finally {
-      setDocLoading(false)
+      recorder.start()
+    } catch {
+      // Microphone denied or unsupported — exit voice mode gracefully
+      voiceModeRef.current = false
+      setVoiceMode(false)
+      setVoiceState('idle')
+    }
+  }
+
+  const exitVoiceMode = () => {
+    voiceModeRef.current = false
+    setVoiceMode(false)
+    setVoiceState('idle')
+    try { mediaRecorderRef.current?.stop() } catch { /* may already be stopped */ }
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+    window.speechSynthesis?.cancel()
+    setSpeakingId(null)
+  }
+
+  const enterVoiceMode = () => {
+    voiceModeRef.current = true
+    setVoiceMode(true)
+    startVoiceLoop()
+  }
+
+  // Auto-speak the latest assistant reply when a voice-mode response finishes loading.
+  useEffect(() => {
+    if (!voiceMode || loading) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || !last.content) return
+    voiceSpeak(last.id, last.content)
+  }, [loading]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── End Phase 6 ───────────────────────────────────────────────────────────
+
+  // Combined attachment handler — routes images to the vision pipeline, documents to RAG.
+  const handleAttachment = async (e) => {
+    const files = Array.from(e.target.files || [])
+    e.target.value = ''
+    if (!files.length) return
+
+    const imageFiles = files.filter((f) => f.type.startsWith('image/'))
+    const docFiles   = files.filter((f) => !f.type.startsWith('image/'))
+
+    // Images → vision array (up to MAX_IMAGES)
+    if (imageFiles.length) {
+      const slots = Math.max(0, MAX_IMAGES - images.length)
+      if (slots === 0) {
+        setError(`You can attach up to ${MAX_IMAGES} images.`)
+      } else {
+        const picked = imageFiles.slice(0, slots)
+        const added = []
+        for (const file of picked) {
+          try {
+            const { dataUrl, data, mediaType } = await downscaleImage(file)
+            added.push({ dataUrl, img: { data, mediaType } })
+          } catch {
+            try {
+              const dataUrl = await readAsDataURL(file)
+              added.push({ dataUrl, img: { data: dataUrl.split(',')[1], mediaType: file.type } })
+            } catch { /* skip unreadable */ }
+          }
+        }
+        if (added.length) {
+          setImagePreviews((prev) => [...prev, ...added.map((a) => a.dataUrl)])
+          setImages((prev) => [...prev, ...added.map((a) => a.img)])
+        }
+      }
+    }
+
+    // First document → text/RAG context
+    if (docFiles.length) {
+      const file = docFiles[0]
+      if (!isSupportedDocument(file)) {
+        setError('Unsupported file. Try PDF, Word (.docx), CSV, or a text file.')
+        return
+      }
+      setDocLoading(true)
+      setError(null)
+      try {
+        const parsed = await parseDocument(file)
+        setDoc(parsed)
+        if (parsed.text.length > RAG_THRESHOLD) {
+          buildIndex(docId(parsed.name, parsed.text), parsed.text).catch(() => {})
+        }
+      } catch (err) {
+        setError(err.message || 'Could not read that document.')
+        setDoc(null)
+      } finally {
+        setDocLoading(false)
+      }
     }
   }
 
@@ -372,35 +530,6 @@ export default function App() {
       reader.readAsDataURL(file)
     })
 
-  // Accept several images at once, up to MAX_IMAGES total. Each is downscaled (falling
-  // back to the raw file), then appended to the existing selection.
-  const handleImageUpload = async (e) => {
-    const files = Array.from(e.target.files || [])
-    e.target.value = '' // allow re-selecting the same file(s)
-    if (!files.length) return
-    const slots = Math.max(0, MAX_IMAGES - images.length)
-    if (slots === 0) {
-      setError(`You can attach up to ${MAX_IMAGES} images.`)
-      return
-    }
-    const picked = files.slice(0, slots)
-    const added = []
-    for (const file of picked) {
-      try {
-        const { dataUrl, data, mediaType } = await downscaleImage(file)
-        added.push({ dataUrl, img: { data, mediaType } })
-      } catch {
-        try {
-          const dataUrl = await readAsDataURL(file)
-          added.push({ dataUrl, img: { data: dataUrl.split(',')[1], mediaType: file.type } })
-        } catch { /* skip unreadable file */ }
-      }
-    }
-    if (added.length) {
-      setImagePreviews((prev) => [...prev, ...added.map((a) => a.dataUrl)])
-      setImages((prev) => [...prev, ...added.map((a) => a.img)])
-    }
-  }
 
   // Remove one selected image (by index) before sending.
   const removeImage = (idx) => {
@@ -692,6 +821,78 @@ export default function App() {
     }).catch(() => {})
   }
 
+  // Phase 5 — Deep Research handler. Calls /api/deep-research and streams NDJSON
+  // with step progress and delta tokens into a new assistant message.
+  const handleDeepResearch = async (text, history) => {
+    setResearchSteps([])
+    setLoading(true)
+    setError(null)
+    const assistantId = Date.now() + 1
+    let appended = false
+    const ensureAssistant = () => {
+      if (appended) return
+      appended = true
+      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+    }
+    try {
+      const response = await fetch('/api/deep-research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: text, memory: [], customInstructions, aboutYou }),
+      })
+      if (!response.ok || !response.body) {
+        const data = await response.json().catch(() => ({}))
+        setError(data.error || 'Deep research failed.')
+        return
+      }
+      const reader  = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const handleLine = (line) => {
+        const trimmed = line.trim()
+        if (!trimmed) return
+        let evt
+        try { evt = JSON.parse(trimmed) } catch { return }
+        if (evt.step) {
+          setResearchSteps((prev) => [...prev, evt.step])
+        } else if (evt.delta) {
+          ensureAssistant()
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantId ? { ...m, content: m.content + evt.delta } : m)
+          )
+        } else if (evt.done) {
+          if (evt.sources && evt.sources.length) {
+            const list = evt.sources.map((s) => `- [${s.title || s.url}](${s.url})`).join('\n')
+            ensureAssistant()
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, content: m.content + `\n\n**Sources:**\n${list}` } : m
+              )
+            )
+          }
+        } else if (evt.error) {
+          setError(evt.error)
+        }
+      }
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let idx
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          handleLine(buffer.slice(0, idx))
+          buffer = buffer.slice(idx + 1)
+        }
+      }
+      if (buffer.length) handleLine(buffer)
+    } catch (err) {
+      if (err.name !== 'AbortError') setError('Deep research failed — check your connection.')
+    } finally {
+      setLoading(false)
+      setResearchSteps([])
+    }
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (loading) return // dedupe: never run two requests at once
@@ -727,7 +928,7 @@ export default function App() {
     }
 
     // Cache hit: serve an identical text-only, non-image, non-doc prompt instantly.
-    if (!images.length && !doc && !webSearch && !looksLikeImageRequest(text)) {
+    if (!images.length && !doc && !webSearch && !deepResearch && !looksLikeImageRequest(text)) {
       const cached = getCached(cacheKey(model, history, text))
       if (cached) {
         setMessages((prev) => [
@@ -736,6 +937,11 @@ export default function App() {
         ])
         return
       }
+    }
+
+    if (deepResearch) {
+      await handleDeepResearch(text, history)
+      return
     }
 
     await sendToModel(history, payload)
@@ -962,6 +1168,7 @@ export default function App() {
               <option value="quick">Quick answer</option>
               <option value="info">Info only (no code)</option>
               <option value="code">Code suggestions</option>
+              <option value="teach">Teaching</option>
             </select>
             <span
               className={`ml-auto text-xs ${imageLimitHit ? 'text-red-500 font-medium' : 'text-[var(--muted)]'}`}
@@ -1212,11 +1419,11 @@ export default function App() {
               )}
             </div>
           )}
-          {/* Web search toggle */}
-          <div className="mb-2 flex items-center gap-2">
+          {/* Tool toggles: Web Search · Deep Research · Voice Mode */}
+          <div className="mb-2 flex items-center gap-2 flex-wrap">
             <button
               type="button"
-              onClick={() => setWebSearch((v) => !v)}
+              onClick={() => { setWebSearch((v) => !v); setDeepResearch(false) }}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
                 webSearch
                   ? 'bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)]'
@@ -1226,39 +1433,55 @@ export default function App() {
             >
               <Globe size={13} /> Web search {webSearch ? 'on' : 'off'}
             </button>
+            <button
+              type="button"
+              onClick={() => { setDeepResearch((v) => !v); setWebSearch(false) }}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                deepResearch
+                  ? 'bg-purple-500 text-white border-purple-500'
+                  : 'bg-[var(--surface-2)] text-[var(--muted)] border-[var(--border)]'
+              }`}
+              title="Deep research: multi-query search + full-page reading + synthesized report"
+            >
+              <BookOpen size={13} /> Deep research {deepResearch ? 'on' : 'off'}
+            </button>
+            <button
+              type="button"
+              onClick={enterVoiceMode}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors bg-[var(--surface-2)] text-[var(--muted)] border-[var(--border)] hover:opacity-80"
+              title="Hands-free voice conversation loop (Groq Whisper)"
+            >
+              <Mic size={13} /> Voice mode
+            </button>
           </div>
+          {/* Research step progress — visible while deep research is running */}
+          {loading && researchSteps.length > 0 && (
+            <div className="mb-2 flex flex-col gap-0.5">
+              {researchSteps.map((s, i) => (
+                <p key={i} className={`text-xs flex items-center gap-1 ${i === researchSteps.length - 1 ? 'text-[var(--accent)]' : 'text-[var(--muted)] line-through'}`}>
+                  <Search size={10} className="shrink-0" /> {s}
+                </p>
+              ))}
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="flex gap-1.5">
             <input
               type="file"
               ref={fileInputRef}
-              onChange={handleImageUpload}
-              accept="image/*"
+              onChange={handleAttachment}
+              accept="image/*,.pdf,.docx,.csv,.txt,.md,.markdown,.json,.log,text/*"
               multiple
               className="hidden"
             />
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`p-2 rounded-lg shrink-0 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80`}
-              aria-label="Upload image"
-            >
-              <Paperclip size={20} />
-            </button>
-            <input
-              type="file"
-              ref={docInputRef}
-              onChange={handleDocUpload}
-              accept=".pdf,.docx,.csv,.txt,.md,.markdown,.json,.log,text/*"
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => docInputRef.current?.click()}
               disabled={docLoading}
-              className={`p-2 rounded-lg shrink-0 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50`}
-              aria-label="Upload document"
+              title="Attach photos (for vision) or documents — PDF, Word, CSV, text"
+              className="p-2 rounded-lg shrink-0 bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50"
+              aria-label="Attach file"
             >
-              {docLoading ? <Loader2 size={20} className="animate-spin" /> : <FileUp size={20} />}
+              {docLoading ? <Loader2 size={20} className="animate-spin" /> : <Paperclip size={20} />}
             </button>
             {speechSupported && (
               <button
@@ -1312,6 +1535,65 @@ export default function App() {
           </form>
         </div>
         </>
+        )}
+
+        {/* Phase 6 — Voice Mode Overlay */}
+        {voiceMode && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+            <div className="flex flex-col items-center gap-5 p-8 rounded-2xl shadow-2xl bg-[var(--surface)] min-w-[220px]">
+              {/* State label */}
+              <p className="text-sm font-medium text-[var(--muted)]">
+                {voiceState === 'recording'    && 'Listening…'}
+                {voiceState === 'transcribing' && 'Understanding you…'}
+                {voiceState === 'speaking'     && 'Speaking…'}
+                {voiceState === 'idle'         && (loading ? 'AI is thinking…' : 'Ready')}
+              </p>
+
+              {/* Big mic / action button */}
+              <button
+                onClick={() => {
+                  if (voiceState === 'recording') {
+                    mediaRecorderRef.current?.stop()
+                  } else if (voiceState === 'speaking') {
+                    window.speechSynthesis?.cancel()
+                    setSpeakingId(null)
+                    setVoiceState('idle')
+                    startVoiceLoop()
+                  }
+                }}
+                disabled={voiceState === 'transcribing' || (voiceState === 'idle' && loading)}
+                className={`w-24 h-24 rounded-full flex items-center justify-center text-white transition-colors shadow-lg ${
+                  voiceState === 'recording'
+                    ? 'bg-red-500 animate-pulse'
+                    : voiceState === 'speaking'
+                    ? 'bg-[var(--accent)]'
+                    : 'bg-[var(--surface-2)] text-[var(--muted)]'
+                } disabled:opacity-40`}
+                aria-label={voiceState === 'recording' ? 'Stop and send' : 'Interrupt'}
+              >
+                {voiceState === 'recording'
+                  ? <Square size={36} fill="currentColor" />
+                  : voiceState === 'speaking'
+                  ? <MicOff size={36} />
+                  : <Mic size={36} />}
+              </button>
+
+              <p className="text-xs text-[var(--muted)] text-center max-w-[180px]">
+                {voiceState === 'recording'
+                  ? 'Tap the square to send'
+                  : voiceState === 'speaking'
+                  ? 'Tap to interrupt'
+                  : null}
+              </p>
+
+              <button
+                onClick={exitVoiceMode}
+                className="mt-1 text-xs text-[var(--muted)] hover:text-red-500 underline"
+              >
+                Exit voice mode
+              </button>
+            </div>
+          </div>
         )}
 
         {/* Chat history sidebar */}

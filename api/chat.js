@@ -48,6 +48,8 @@ export default async function handler(req, res) {
   // NVIDIA_NIM_KEY/HUGGINGFACE_KEY already behave when unset.
   const CEREBRAS_KEY = process.env.CEREBRAS_KEY
   const GROQ_KEY = process.env.GROQ_KEY
+  const GEMINI_KEY = process.env.GEMINI_KEY
+  const BRAVE_KEY = process.env.BRAVE_KEY
 
   if (!OLLAMA_CLOUD_KEY && !NVIDIA_NIM_KEY) {
     return res.status(500).json({ error: 'No API keys configured (need OLLAMA_CLOUD_KEY and/or NVIDIA_NIM_KEY).' })
@@ -115,7 +117,16 @@ export default async function handler(req, res) {
       // Turn the photo + request into a vivid generation prompt (best-effort; on failure
       // we just generate from the user's raw words).
       let genPrompt = newMessage
-      if (OLLAMA_CLOUD_KEY) {
+      if (GEMINI_KEY) {
+        try { genPrompt = await describeWithGemini(imageList.map((i) => i.data), newMessage, GEMINI_KEY) }
+        catch (e) {
+          console.error('Gemini vision prompt failed, trying Ollama:', e.message)
+          if (OLLAMA_CLOUD_KEY) {
+            try { genPrompt = await describeForEdit(imageList.map((i) => i.data), newMessage, OLLAMA_CLOUD_KEY) }
+            catch (e2) { console.error('Ollama vision prompt failed:', e2.message) }
+          }
+        }
+      } else if (OLLAMA_CLOUD_KEY) {
         try { genPrompt = await describeForEdit(imageList.map((i) => i.data), newMessage, OLLAMA_CLOUD_KEY) }
         catch (e) { console.error('vision prompt failed:', e.message) }
       }
@@ -149,11 +160,17 @@ export default async function handler(req, res) {
   // Optional web search (Tavily): run BEFORE the model so we can inject current
   // results as context. Skipped for image requests (no point searching "draw a cat").
   let searchData = null
-  if (webSearch && TAVILY_KEY && newMessage && !wantsImage) {
+  if (webSearch && newMessage && !wantsImage && (BRAVE_KEY || TAVILY_KEY)) {
     try {
-      searchData = await runWebSearch(newMessage, TAVILY_KEY)
+      searchData = BRAVE_KEY
+        ? await runBraveSearch(newMessage, BRAVE_KEY)
+        : await runWebSearch(newMessage, TAVILY_KEY)
     } catch (err) {
-      console.error('Web search failed:', err.message)
+      console.error('Primary search failed, trying fallback:', err.message)
+      if (BRAVE_KEY && TAVILY_KEY) {
+        try { searchData = await runWebSearch(newMessage, TAVILY_KEY) }
+        catch (err2) { console.error('Fallback search also failed:', err2.message) }
+      }
     }
   }
 
@@ -253,14 +270,19 @@ export default async function handler(req, res) {
   // have none), so those are skipped automatically.
   const textFallbacks = [
     { name: 'cerebras', key: CEREBRAS_KEY, model: ids.cerebras, url: 'https://api.cerebras.ai/v1/chat/completions' },
-    { name: 'groq', key: GROQ_KEY, model: ids.groq, url: 'https://api.groq.com/openai/v1/chat/completions' },
-    { name: 'nim', key: NVIDIA_NIM_KEY, model: ids.nim, url: 'https://integrate.api.nvidia.com/v1/chat/completions' },
+    { name: 'groq',     key: GROQ_KEY,     model: ids.groq,     url: 'https://api.groq.com/openai/v1/chat/completions' },
+    { name: 'gemini',   key: GEMINI_KEY,   model: 'gemini-2.0-flash', gemini: true },
+    { name: 'nim',      key: NVIDIA_NIM_KEY, model: ids.nim,    url: 'https://integrate.api.nvidia.com/v1/chat/completions' },
   ]
 
   for (const fb of textFallbacks) {
     if (!fb.key || !fb.model || state.wroteAny) continue
     try {
-      await streamOpenAICompatible(fb.url, fullMessages, fb.model, fb.key, writeDelta, fb.name)
+      if (fb.gemini) {
+        await streamGemini(fullMessages, fb.key, writeDelta)
+      } else {
+        await streamOpenAICompatible(fb.url, fullMessages, fb.model, fb.key, writeDelta, fb.name)
+      }
       if (searchData) writeDelta(sourcesMarkdown(searchData))
       res.write(JSON.stringify({ done: true, provider: fb.name, model: effectiveModel }) + '\n')
       return res.end()
@@ -290,7 +312,7 @@ export default async function handler(req, res) {
 
 // Does this read like an image-generation request?
 const IMAGE_INTENT_RE =
-  /\b(draw|paint|sketch|render|generate|create|make|design|show me)\b[^.?!]*\b(image|picture|photo|pic|art|drawing|painting|illustration|logo|wallpaper|portrait|scene|landscape|icon|avatar)\b|\b(draw|paint|sketch)\s+(me\s+)?(a|an|the|some)\b/i
+  /\b(draw|paint|sketch|render|generate|create|make|design|show (me|her|him|them|us))\b[^.?!]*\b(image|picture|photo|pic|art|drawing|painting|illustration|logo|wallpaper|portrait|headshot|scene|landscape|icon|avatar)\b|\b(draw|paint|sketch)\s+(me\s+)?(a|an|the|some)\b/i
 
 function isImageRequest(text) {
   return typeof text === 'string' && IMAGE_INTENT_RE.test(text)
@@ -301,7 +323,7 @@ function isImageRequest(text) {
 // a false positive is editing instead of describing. Intentionally excludes pure
 // questions ("what's in this?", "describe this") which should stay as vision Q&A.
 const EDIT_INTENT_RE =
-  /\b(edit|change|turn|transform|convert|add|remove|replace|repaint|restyle|redesign|recolou?r|enhance|improve|make (it|this|the|them)|show (it|this|the|me)|what (would|will) (it|this|the)|in (summer|winter|spring|autumn|fall)|fully grown|matured?|next (year|season|month)|years? (from now|later)|in (full )?bloom|blooming|grown( up)?|future)\b/i
+  /\b(edit|change|turn|transform|convert|add|remove|replace|repaint|restyle|redesign|recolou?r|enhance|improve|professional|portrait|headshot|make (it|this|the|them|her|him|them|us)|show (it|this|the|me|her|him|them|us)|what (would|will) (it|this|the)|in (summer|winter|spring|autumn|fall)|fully grown|matured?|next (year|season|month)|years? (from now|later)|in (full )?bloom|blooming|grown( up)?|future)\b/i
 
 function isEditRequest(text) {
   return typeof text === 'string' && EDIT_INTENT_RE.test(text)
@@ -324,6 +346,7 @@ const STYLE_PROMPTS = {
   quick: 'Answer as briefly as possible — at most 2-3 sentences. Skip preamble and do not include code unless the user explicitly asks for it.',
   info: 'Explain clearly in prose. Do NOT include code blocks or code examples unless the user explicitly requests code. Focus on concepts and information.',
   code: 'When relevant, include practical, well-formatted code examples with short explanations.',
+  teach: 'You are a patient, encouraging teacher. Explain the WHY behind every answer, not just the what. Use simple language and real-world analogies. For code, show it step by step with comments explaining what each part does and why. Never make the learner feel bad for not knowing something — celebrate curiosity.',
 }
 
 // ---- Web search (Tavily) ----
@@ -578,24 +601,24 @@ async function generateImage(prompt, nimKey) {
 }
 
 // Vision-guided prompt builder: show the uploaded photo to Gemma (Ollama, non-streaming)
-// and have it write a single vivid text-to-image prompt describing the SAME scene with
-// the user's requested change, keeping the layout and subjects recognizable. The result
-// feeds generateImage()/generateImageHF(). Best-effort — caller falls back to raw text.
+// and have it write a single vivid text-to-image prompt describing the subject with the
+// requested style or transformation applied. The result feeds generateImage()/generateImageHF().
+// Best-effort — caller falls back to raw text on any failure.
 async function describeForEdit(imageBase64List, instruction, ollamaKey) {
   const imgs = Array.isArray(imageBase64List) ? imageBase64List : [imageBase64List]
   const messages = [
     {
       role: 'system',
       content:
-        'You write prompts for a text-to-image model. Look at the attached image(s) and the ' +
-        'user request, then output ONE vivid prompt (max 80 words) describing the SAME ' +
-        'scene transformed as requested — keep the layout, plants, structures, and setting ' +
-        'recognizable. If several images are given, combine them into one coherent scene. ' +
-        'Describe only the garden, plants, and landscape — do NOT mention people, faces, ' +
-        'children, or bodies (that can trip content filters). ' +
-        'Output only the prompt text, no preamble or quotes.',
+        'You write prompts for a text-to-image model. Look at the attached photo(s) and the ' +
+        'user request, then output ONE vivid, detailed prompt (max 100 words) that: ' +
+        '(1) describes the main subject(s) — for people: approximate age group, clothing, hair color and style, expression, and pose; for scenes: key elements, colors, and composition; ' +
+        '(2) describes the setting, lighting, and atmosphere; ' +
+        '(3) applies the requested style or transformation. ' +
+        'Keep the description tasteful and appropriate for all audiences. Do not reference names. ' +
+        'Output only the prompt text — no preamble, no quotes, no explanation.',
     },
-    { role: 'user', content: instruction || 'Show this scene in a future state.', images: imgs },
+    { role: 'user', content: instruction || 'Apply the requested style to this photo.', images: imgs },
   ]
   const response = await fetchWithTimeout('https://ollama.com/api/chat', {
     method: 'POST',
@@ -750,4 +773,99 @@ async function streamOpenAICompatible(baseUrl, messages, model, apiKey, onDelta,
     if (piece) { got = true; onDelta(piece) }
   }
   if (!got) throw new Error('empty response')
+}
+
+// Brave Search: 2000 free searches/month — primary provider when key is set.
+// Returns the same shape as runWebSearch so downstream code is unchanged.
+async function runBraveSearch(query, key) {
+  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(String(query).slice(0, 400))}&count=5`
+  const response = await fetch(url, {
+    headers: { 'X-Subscription-Token': key, 'Accept': 'application/json' },
+  })
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Brave ${response.status} ${body.slice(0, 120)}`)
+  }
+  const data = await response.json()
+  const raw = Array.isArray(data.web?.results) ? data.web.results.slice(0, 5) : []
+  if (!raw.length) throw new Error('no results')
+  const results = raw.map((r) => ({ title: r.title || '', url: r.url || '', content: r.description || '' }))
+  return { answer: '', results }
+}
+
+// Gemini 2.0 Flash vision: given base64 image(s) + instruction, returns a vivid
+// text-to-image prompt. Used in place of Ollama/Gemma when GEMINI_KEY is set —
+// Gemini Flash has stronger scene and portrait understanding.
+async function describeWithGemini(imageBase64List, instruction, apiKey) {
+  const imgs = Array.isArray(imageBase64List) ? imageBase64List : [imageBase64List]
+  const systemText =
+    'You write prompts for a text-to-image model. Look at the attached photo(s) and the ' +
+    'user request, then output ONE vivid, detailed prompt (max 100 words) that: ' +
+    '(1) describes the main subject(s) — for people: approximate age group, clothing, hair color and style, expression, and pose; for scenes: key elements, colors, and composition; ' +
+    '(2) describes the setting, lighting, and atmosphere; ' +
+    '(3) applies the requested style or transformation. ' +
+    'Keep the description tasteful and appropriate for all audiences. Do not reference names. ' +
+    'Output only the prompt text — no preamble, no quotes, no explanation.'
+  const parts = [
+    { text: systemText + '\n\nRequest: ' + (instruction || 'Apply the requested style to this photo.') },
+    ...imgs.map((img) => ({ inlineData: { mimeType: 'image/jpeg', data: img } })),
+  ]
+  const response = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts }] }) },
+    30000, 'Gemini vision'
+  )
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Gemini ${response.status}: ${body.slice(0, 150)}`)
+  }
+  const data = await response.json()
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!text?.trim()) throw new Error('Gemini returned empty vision prompt')
+  return text.trim().slice(0, 1500)
+}
+
+// Gemini 2.0 Flash streaming chat. Different wire format from OpenAI-compatible
+// providers: SSE events carry candidates[0].content.parts[0].text. System messages
+// go into systemInstruction; assistant role maps to 'model'.
+async function streamGemini(messages, apiKey, onDelta) {
+  const systemParts = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => ({ text: Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : (m.content || '') }))
+    .filter((p) => p.text)
+
+  const contents = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : (m.content || '') }],
+    }))
+    .filter((m) => m.parts[0].text)
+
+  if (!contents.length) throw new Error('no messages for Gemini')
+
+  const body = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 2048 } }
+  if (systemParts.length) body.systemInstruction = { parts: systemParts }
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=${apiKey}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  )
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => '')
+    throw new Error(`Gemini ${response.status}: ${errBody.slice(0, 150)}`)
+  }
+
+  let got = false
+  for await (const line of iterLines(response)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) continue
+    const payload = trimmed.slice(5).trim()
+    if (!payload || payload === '[DONE]') continue
+    let obj
+    try { obj = JSON.parse(payload) } catch { continue }
+    const piece = obj?.candidates?.[0]?.content?.parts?.[0]?.text
+    if (piece) { got = true; onDelta(piece) }
+  }
+  if (!got) throw new Error('Gemini returned empty response')
 }

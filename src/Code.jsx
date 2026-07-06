@@ -1,104 +1,91 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
-  Lock, Loader2, Search, FileCode, ArrowLeft, Wand2, GitCommit, X, FolderGit2,
+  Loader2, Wand2, GitCommit, X, FolderGit2, FileCode, ArrowLeft,
 } from 'lucide-react'
 import {
-  hasPassword, clearPassword, unlock, getTree, getFile, editFile, commitFile,
+  listRepos, getTree, getFile, locateFile, editFile, commitFile,
 } from './lib/coder'
 import { diffLines, diffStats } from './lib/linediff'
 
-// Phase 8 — Coding Mode. A free, browser-based fallback coding assistant that edits the
-// user's GitHub repos directly (no local PC, no Claude). Single-file edits: pick a repo,
-// open a file, describe a change, review the diff, commit. All writes are password-gated
-// server-side; we only ever hold the password in sessionStorage.
+const ACCOUNTS = [
+  { id: 'jordon', label: 'Jordon' },
+  { id: 'alicia', label: 'Alicia' },
+]
+
+// Step labels shown in the spinner while generating
+const STEP_LABELS = {
+  locating: 'Finding the right file…',
+  reading:  'Reading the file…',
+  editing:  'Writing the change…',
+}
+
 export default function Code() {
-  // Auth
-  const [pw, setPw] = useState('')
-  const [unlocked, setUnlocked] = useState(false)
-  const [unlocking, setUnlocking] = useState(false)
-
-  // Repo / file navigation
+  const [account, setAccount] = useState('jordon')
   const [repos, setRepos] = useState([])
-  const [repo, setRepo] = useState(null)          // { owner, repo, default_branch, ... }
-  const [tree, setTree] = useState(null)          // { branch, truncated, files }
-  const [fileFilter, setFileFilter] = useState('')
-  const [file, setFile] = useState(null)          // { path, content, sha, branch }
+  const [repo, setRepo] = useState(null)
+  const [tree, setTree] = useState(null)
+  const [projectContext, setProjectContext] = useState(null)
 
-  // Editing
   const [instruction, setInstruction] = useState('')
-  const [proposal, setProposal] = useState(null)  // new file text awaiting confirmation
+  const [locatedPath, setLocatedPath] = useState(null)  // path the model picked
+  const [file, setFile] = useState(null)                // { path, content, sha, branch }
+  const [proposal, setProposal] = useState(null)
   const [commitMsg, setCommitMsg] = useState('')
 
-  const [busy, setBusy] = useState(false)         // generic in-flight (load/generate/commit)
-  const [status, setStatus] = useState(null)      // { type: 'error' | 'ok', text }
-  const fileScrollRef = useRef(null)
+  const [step, setStep] = useState(null)   // null | 'locating' | 'reading' | 'editing'
+  const [status, setStatus] = useState(null)
 
-  // Auto-unlock if a password is already cached for this tab session.
+  const acct = account === 'jordon' ? undefined : account
+
   useEffect(() => {
-    if (!hasPassword()) return
-    setUnlocking(true)
-    unlock('')
-      .then((r) => { setRepos(r); setUnlocked(true) })
-      .catch(() => clearPassword())
-      .finally(() => setUnlocking(false))
-  }, [])
+    setRepo(null); setTree(null); setProjectContext(null); resetEdit()
+    listRepos(acct)
+      .then(setRepos)
+      .catch((err) => setStatus({ type: 'error', text: err.message }))
+  }, [account])
 
-  const handleUnlock = async () => {
-    if (!pw.trim() || unlocking) return
-    setUnlocking(true)
-    setStatus(null)
-    try {
-      const r = await unlock(pw.trim())
-      setRepos(r)
-      setUnlocked(true)
-      setPw('')
-    } catch (err) {
-      setStatus({ type: 'error', text: err.message })
-    } finally {
-      setUnlocking(false)
-    }
-  }
-
-  const handleLock = () => {
-    clearPassword()
-    setUnlocked(false)
-    setRepos([]); setRepo(null); setTree(null); setFile(null); setProposal(null)
+  function resetEdit() {
+    setLocatedPath(null); setFile(null); setProposal(null)
+    setInstruction(''); setStatus(null); setStep(null)
   }
 
   const openRepo = async (fullName) => {
     const r = repos.find((x) => x.full_name === fullName)
     if (!r) return
-    setRepo(r); setTree(null); setFile(null); setProposal(null); setFileFilter('')
-    setStatus(null); setBusy(true)
+    setRepo(r); resetEdit(); setProjectContext(null); setStep('reading')
     try {
-      setTree(await getTree(r.owner, r.repo, r.default_branch))
+      const t = await getTree(r.owner, r.repo, r.default_branch, acct)
+      setTree(t)
+      // Best-effort: grab package.json + README to give the model project context.
+      fetchProjectContext(r, t.branch, acct).then(setProjectContext)
     } catch (err) {
       setStatus({ type: 'error', text: err.message })
     } finally {
-      setBusy(false)
-    }
-  }
-
-  const openFile = async (path) => {
-    if (!repo) return
-    setBusy(true); setStatus(null); setProposal(null); setInstruction('')
-    try {
-      const f = await getFile(repo.owner, repo.repo, path, tree.branch)
-      setFile(f)
-    } catch (err) {
-      setStatus({ type: 'error', text: err.message })
-    } finally {
-      setBusy(false)
+      setStep(null)
     }
   }
 
   const generate = async () => {
-    if (!file || !instruction.trim() || busy) return
-    setBusy(true); setStatus(null); setProposal(null)
+    if (!tree || !instruction.trim() || step) return
+    setStatus(null); setProposal(null); setLocatedPath(null); setFile(null)
+
     try {
-      const updated = await editFile({ path: file.path, content: file.content, instruction: instruction.trim() })
-      if (updated === file.content) {
-        setStatus({ type: 'error', text: 'The model returned no changes. Try rephrasing the instruction.' })
+      // 1. Ask the model which file to edit
+      setStep('locating')
+      const path = await locateFile(tree.files, instruction.trim(), projectContext)
+      setLocatedPath(path)
+
+      // 2. Fetch that file from GitHub
+      setStep('reading')
+      const f = await getFile(repo.owner, repo.repo, path, tree.branch, acct)
+      setFile(f)
+
+      // 3. Ask the model to rewrite it
+      setStep('editing')
+      const updated = await editFile({ path: f.path, content: f.content, instruction: instruction.trim() })
+
+      if (updated === f.content) {
+        setStatus({ type: 'error', text: 'The model returned no changes. Try rephrasing.' })
       } else {
         setProposal(updated)
         setCommitMsg(instruction.trim().slice(0, 72))
@@ -106,80 +93,61 @@ export default function Code() {
     } catch (err) {
       setStatus({ type: 'error', text: err.message })
     } finally {
-      setBusy(false)
+      setStep(null)
     }
   }
 
   const confirmCommit = async () => {
-    if (proposal == null || !commitMsg.trim() || busy) return
-    setBusy(true); setStatus(null)
+    if (proposal == null || !commitMsg.trim() || step) return
+    setStep('editing'); setStatus(null)
     try {
       const result = await commitFile({
         owner: repo.owner, repo: repo.repo, path: file.path,
         content: proposal, message: commitMsg.trim(), sha: file.sha, branch: file.branch,
+        account: acct,
       })
-      // Roll the editor forward to the committed version.
       setFile({ ...file, content: proposal, sha: result.sha || file.sha })
-      setProposal(null); setInstruction('')
-      setStatus({ type: 'ok', text: 'Committed — Vercel will redeploy in about a minute.', url: result.commitUrl })
+      setProposal(null); setInstruction(''); setLocatedPath(null)
+      setStatus({ type: 'ok', text: 'Committed — Vercel will redeploy in ~1 minute.', url: result.commitUrl })
     } catch (err) {
-      // 409 = the file changed under us (stale sha). Refetch so the user can retry.
       if (err.status === 409) {
-        setStatus({ type: 'error', text: 'This file changed on GitHub. Reloading the latest version — please redo the change.' })
-        openFile(file.path)
+        setStatus({ type: 'error', text: 'File changed on GitHub while you were editing. Please try again.' })
+        resetEdit()
       } else {
         setStatus({ type: 'error', text: err.message })
       }
     } finally {
-      setBusy(false)
+      setStep(null)
     }
   }
 
-  // ---- Render ----
-
-  if (!unlocked) {
-    return (
-      <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center bg-[var(--bg)]">
-        <div className="w-full max-w-sm text-center">
-          <Lock size={32} className="mx-auto mb-3 text-[var(--accent)]" />
-          <h2 className="text-lg font-semibold text-[var(--text)]">Coding Mode</h2>
-          <p className="text-sm text-[var(--muted)] mt-1 mb-4">
-            Edit your GitHub repos right here. Enter the Coding Mode password to unlock.
-          </p>
-          <input
-            type="password"
-            value={pw}
-            onChange={(e) => setPw(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleUnlock() }}
-            placeholder="Password"
-            className="w-full px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
-            autoFocus
-          />
-          <button
-            onClick={handleUnlock}
-            disabled={unlocking || !pw.trim()}
-            className="w-full mt-3 flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
-          >
-            {unlocking ? <Loader2 size={16} className="animate-spin" /> : <Lock size={16} />}
-            Unlock
-          </button>
-          {status?.type === 'error' && (
-            <p className="text-sm text-red-500 mt-3">{status.text}</p>
-          )}
-        </div>
-      </div>
-    )
-  }
+  const busy = !!step
 
   return (
     <div className="flex-1 overflow-y-auto bg-[var(--bg)]">
       {/* Toolbar */}
       <div className="sticky top-0 z-10 bg-[var(--surface)] border-b border-[var(--border)] px-4 py-2 flex items-center gap-2 flex-wrap">
         <FolderGit2 size={16} className="text-[var(--accent)]" />
+        <div className="flex rounded-lg overflow-hidden border border-[var(--border)] text-xs shrink-0">
+          {ACCOUNTS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setAccount(id)}
+              className={`px-3 py-1 font-medium transition-colors ${
+                account === id
+                  ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                  : 'bg-[var(--input-bg)] text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <select
           value={repo?.full_name || ''}
           onChange={(e) => openRepo(e.target.value)}
-          className="px-3 py-1 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] max-w-[60%]"
+          disabled={busy}
+          className="px-3 py-1 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] max-w-[50%] disabled:opacity-50"
         >
           <option value="" disabled>Choose a repo…</option>
           {repos.map((r) => (
@@ -188,13 +156,6 @@ export default function Code() {
             </option>
           ))}
         </select>
-        <button
-          onClick={handleLock}
-          className="ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded-lg bg-[var(--surface-2)] text-[var(--muted)] hover:opacity-80"
-          title="Lock Coding Mode"
-        >
-          <Lock size={13} /> Lock
-        </button>
       </div>
 
       {status && (
@@ -213,110 +174,92 @@ export default function Code() {
       )}
 
       <div className="p-4">
-        {/* No repo chosen yet */}
         {!repo && (
           <p className="text-sm text-[var(--muted)] text-center py-10">
-            Pick a repository above to browse its files.
+            Pick a repository above to get started.
           </p>
         )}
 
-        {/* Repo chosen, no file open: file browser */}
-        {repo && !file && (
+        {repo && !proposal && (
           <>
-            {busy && !tree && (
+            {/* Loading repo tree */}
+            {step === 'reading' && !tree && (
               <p className="flex items-center justify-center gap-2 text-sm text-[var(--muted)] py-10">
-                <Loader2 size={16} className="animate-spin" /> Loading files…
+                <Loader2 size={16} className="animate-spin" /> Loading repo…
               </p>
             )}
+
             {tree && (
               <>
-                <div className="relative mb-3">
-                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
-                  <input
-                    type="text"
-                    value={fileFilter}
-                    onChange={(e) => setFileFilter(e.target.value)}
-                    placeholder="Filter files…"
-                    className="w-full pl-8 pr-2 py-1.5 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
-                  />
-                </div>
-                {tree.truncated && (
-                  <p className="text-xs text-[var(--muted)] mb-2">⚠️ This repo is large; the file list is partial.</p>
-                )}
-                <div className="space-y-0.5">
-                  {tree.files
-                    .filter((f) => f.path.toLowerCase().includes(fileFilter.trim().toLowerCase()))
-                    .slice(0, 400)
-                    .map((f) => (
-                      <button
-                        key={f.path}
-                        onClick={() => openFile(f.path)}
-                        className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-lg text-sm text-[var(--text)] hover:bg-[var(--surface-2)]"
-                      >
-                        <FileCode size={14} className="shrink-0 text-[var(--muted)]" />
-                        <span className="truncate">{f.path}</span>
-                      </button>
-                    ))}
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {/* File open: editor + instruction (or diff confirm) */}
-        {repo && file && (
-          <>
-            <button
-              onClick={() => { setFile(null); setProposal(null) }}
-              className="flex items-center gap-1 text-sm text-[var(--accent)] mb-3"
-            >
-              <ArrowLeft size={15} /> Back to files
-            </button>
-            <div className="flex items-center gap-2 mb-2">
-              <FileCode size={15} className="text-[var(--accent)]" />
-              <span className="text-sm font-medium text-[var(--text)] truncate">{file.path}</span>
-              <span className="text-xs text-[var(--muted)]">· {file.branch}</span>
-            </div>
-
-            {/* Confirm view: show the diff */}
-            {proposal != null ? (
-              <DiffView
-                oldText={file.content}
-                newText={proposal}
-                commitMsg={commitMsg}
-                setCommitMsg={setCommitMsg}
-                onCancel={() => setProposal(null)}
-                onConfirm={confirmCommit}
-                busy={busy}
-              />
-            ) : (
-              <>
-                <pre
-                  ref={fileScrollRef}
-                  className="max-h-64 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-xs text-[var(--text)] whitespace-pre"
-                >
-                  {file.content}
-                </pre>
-                <label className="block text-xs font-semibold text-[var(--muted)] mt-4 mb-1">
-                  Describe the change
+                <label className="block text-xs font-semibold text-[var(--muted)] mb-1">
+                  What do you want to change?
                 </label>
                 <textarea
                   value={instruction}
                   onChange={(e) => setInstruction(e.target.value)}
-                  rows={3}
-                  placeholder="e.g. Change the header text to 'Welcome back', and make the button blue."
-                  className="w-full px-3 py-2 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)] resize-none"
+                  rows={4}
+                  disabled={busy}
+                  placeholder={`e.g. "Change the dashboard title to 'My Finances'"\ne.g. "Add a dark mode toggle to the navbar"\ne.g. "Fix the button on the login page so it says 'Sign In'"`}
+                  className="w-full px-3 py-2 rounded-lg text-sm border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)] resize-none disabled:opacity-50"
                 />
+
+                {/* Progress indicator */}
+                {busy && (
+                  <div className="mt-3 flex items-center gap-2 text-sm text-[var(--muted)]">
+                    <Loader2 size={15} className="animate-spin shrink-0" />
+                    <span>{STEP_LABELS[step]}</span>
+                    {locatedPath && (
+                      <span className="flex items-center gap-1 ml-1 text-xs font-mono text-[var(--text)] bg-[var(--surface-2)] px-2 py-0.5 rounded">
+                        <FileCode size={11} /> {locatedPath}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {!busy && locatedPath && (
+                  <div className="mt-2 flex items-center gap-1 text-xs text-[var(--muted)]">
+                    <FileCode size={12} />
+                    <span>Last edited: <span className="font-mono text-[var(--text)]">{locatedPath}</span></span>
+                    <button onClick={resetEdit} className="ml-auto text-xs text-[var(--accent)] hover:underline">Reset</button>
+                  </div>
+                )}
+
                 <button
                   onClick={generate}
                   disabled={busy || !instruction.trim()}
                   className="w-full mt-3 flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
                 >
                   {busy ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
-                  {busy ? 'Writing the change…' : 'Generate change'}
+                  {busy ? STEP_LABELS[step] : 'Generate change'}
                 </button>
               </>
             )}
+          </>
+        )}
+
+        {/* Diff review */}
+        {repo && proposal && file && (
+          <>
+            <button
+              onClick={() => { setProposal(null) }}
+              className="flex items-center gap-1 text-sm text-[var(--accent)] mb-3"
+            >
+              <ArrowLeft size={15} /> Back
+            </button>
+            <div className="flex items-center gap-2 mb-3">
+              <FileCode size={15} className="text-[var(--accent)]" />
+              <span className="text-sm font-medium text-[var(--text)] truncate font-mono">{file.path}</span>
+              <span className="text-xs text-[var(--muted)]">· {file.branch}</span>
+            </div>
+            <DiffView
+              oldText={file.content}
+              newText={proposal}
+              commitMsg={commitMsg}
+              setCommitMsg={setCommitMsg}
+              onCancel={() => setProposal(null)}
+              onConfirm={confirmCommit}
+              busy={busy}
+            />
           </>
         )}
       </div>
@@ -324,7 +267,24 @@ export default function Code() {
   )
 }
 
-// Before/after diff with a commit message box and confirm/cancel.
+// Fetch package.json and/or README to give the model project context.
+// Silently ignores missing files — not every repo has both.
+async function fetchProjectContext(repo, branch, acct) {
+  const candidates = ['package.json', 'README.md', 'README.rst', 'requirements.txt', 'Cargo.toml']
+  const parts = []
+  for (const path of candidates) {
+    try {
+      const f = await getFile(repo.owner, repo.repo, path, branch, acct)
+      const text = path === 'README.md' || path === 'README.rst'
+        ? f.content.slice(0, 600)   // READMEs can be huge — just the top
+        : f.content.slice(0, 2000)
+      parts.push(`--- ${path} ---\n${text}`)
+      if (parts.length >= 2) break  // two files is enough context
+    } catch { /* file doesn't exist, skip */ }
+  }
+  return parts.length ? parts.join('\n\n') : null
+}
+
 function DiffView({ oldText, newText, commitMsg, setCommitMsg, onCancel, onConfirm, busy }) {
   const rows = diffLines(oldText, newText)
   const { add, del } = diffStats(rows)

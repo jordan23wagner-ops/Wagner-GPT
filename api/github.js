@@ -1,24 +1,16 @@
-// Wagner-GPT — Coding Mode GitHub proxy (Phase 8)
+// Wagner-GPT — Coding Mode GitHub proxy
 //
-// A password-gated serverless doorway that lets the PWA read and commit to the user's
-// GitHub repos WITHOUT ever exposing the GitHub token to the browser. The token lives
-// only in the Vercel env var GITHUB_TOKEN; every call is checked against a shared secret
-// in CODING_MODE_PASSWORD before anything touches GitHub.
+// Serverless endpoint that lets the PWA read and commit to GitHub repos.
+// Supports two accounts: GITHUB_TOKEN (Jordon) and GITHUB_TOKEN_ALICIA (Alicia).
+// Pass { account: 'alicia' } in the request body to use Alicia's token.
+// Same-origin only (no permissive CORS).
 //
-// SECURITY: this endpoint can write to the user's repos, so it is fail-closed. If
-// CODING_MODE_PASSWORD or GITHUB_TOKEN is unset, every request is rejected. We do NOT
-// emit permissive CORS headers — the PWA calls this same-origin, and not reflecting
-// arbitrary origins keeps a stray cross-site page from poking it. The password is
-// compared in constant time.
-//
-// Actions (POST body { action, password, ...args }):
+// Actions (POST body { action, account?, ...args }):
 //   repos                                 -> [{ full_name, owner, repo, default_branch, private }]
 //   tree   { owner, repo, branch? }       -> { branch, truncated, files: [{ path, size }] }
 //   file   { owner, repo, path, branch? } -> { path, content, sha, branch }
 //   commit { owner, repo, path, content,  -> { committed: true, sha, commitUrl }
 //            message, sha?, branch? }
-
-import crypto from 'crypto'
 
 const GH = 'https://api.github.com'
 
@@ -27,20 +19,17 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const TOKEN = process.env.GITHUB_TOKEN
-  const SECRET = process.env.CODING_MODE_PASSWORD
+  const { action, account } = req.body || {}
 
-  // Fail closed: refuse to do anything until both secrets are configured in Vercel.
-  if (!TOKEN || !SECRET) {
+  const TOKEN = account === 'alicia'
+    ? process.env.GITHUB_TOKEN_ALICIA
+    : process.env.GITHUB_TOKEN
+
+  if (!TOKEN) {
+    const who = account === 'alicia' ? 'GITHUB_TOKEN_ALICIA' : 'GITHUB_TOKEN'
     return res.status(503).json({
-      error: 'Coding Mode is not configured. Set GITHUB_TOKEN and CODING_MODE_PASSWORD in Vercel.',
+      error: `Coding Mode is not configured. Set ${who} in Vercel.`,
     })
-  }
-
-  const { action, password } = req.body || {}
-
-  if (!passwordOk(password, SECRET)) {
-    return res.status(401).json({ error: 'Wrong Coding Mode password.' })
   }
 
   try {
@@ -54,19 +43,6 @@ export default async function handler(req, res) {
   } catch (err) {
     return res.status(err.status || 502).json({ error: err.message || 'GitHub request failed.' })
   }
-}
-
-// Constant-time password check that doesn't leak length via early return.
-function passwordOk(provided, expected) {
-  if (typeof provided !== 'string' || !provided) return false
-  const a = Buffer.from(provided)
-  const b = Buffer.from(expected)
-  if (a.length !== b.length) {
-    // Still burn a comparison against a same-length buffer to avoid timing signal.
-    crypto.timingSafeEqual(b, b)
-    return false
-  }
-  return crypto.timingSafeEqual(a, b)
 }
 
 // ---- GitHub REST helpers ----
@@ -93,7 +69,6 @@ async function gh(token, path, options = {}) {
   return response.json()
 }
 
-// The user's own repos, most-recently-pushed first.
 async function listRepos(token) {
   const data = await gh(token, '/user/repos?per_page=100&sort=pushed&affiliation=owner')
   return data.map((r) => ({
@@ -110,7 +85,6 @@ async function defaultBranch(token, owner, repo) {
   return data.default_branch
 }
 
-// Recursive file listing of a branch. Filters to blobs (files), drops directories.
 async function getTree(token, { owner, repo, branch }) {
   requireFields({ owner, repo })
   const ref = branch || (await defaultBranch(token, owner, repo))
@@ -121,7 +95,6 @@ async function getTree(token, { owner, repo, branch }) {
   return { branch: ref, truncated: !!data.truncated, files }
 }
 
-// Read a single file's text contents + its blob sha (needed to commit an update).
 async function getFile(token, { owner, repo, path, branch }) {
   requireFields({ owner, repo, path })
   const ref = branch || (await defaultBranch(token, owner, repo))
@@ -147,8 +120,6 @@ async function getFile(token, { owner, repo, path, branch }) {
   }
 }
 
-// Create or update a file in one commit. `sha` must be the file's current blob sha when
-// updating an existing file; omit it to create a new file.
 async function commitFile(token, { owner, repo, path, content, message, sha, branch }) {
   requireFields({ owner, repo, path, content, message })
   const ref = branch || (await defaultBranch(token, owner, repo))
@@ -169,7 +140,6 @@ async function commitFile(token, { owner, repo, path, content, message, sha, bra
   }
 }
 
-// Encode each path segment but keep the slashes between folders.
 function encodePath(path) {
   return String(path).split('/').map(encodeURIComponent).join('/')
 }
