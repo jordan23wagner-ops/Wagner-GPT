@@ -4,17 +4,6 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-06 — `api/jobs.js`: Adzuna jobs proxy (for the Job-Assistant extension)
-
-Added **`api/jobs.js`** — a proxy for the **Adzuna** free jobs API, so the Job-Assistant extension's
-new Job Search feature gets real listings without shipping an API key. Same reflect-origin CORS as
-`chat.js`; Vercel auto-detects it (no `vercel.json` change). `POST {action:'search', what, where,
-salaryMin, salaryMax, category, remote, fullTime, page, country}` → normalized `{results, count}`;
-`POST {action:'categories', country}` → `{categories:[{tag,label}]}`.
-**Required env vars (set in the Vercel project, then redeploy):** `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`
-(free from developer.adzuna.com). Without them the endpoint returns a clear "not configured" 500.
-Adzuna free tier is $0 — consistent with the no-paid-dependency rule.
-
 - **Repo:** https://github.com/jordan23wagner-ops/Wagner-GPT
 - **Live:** https://wagner-gpt.vercel.app (auto-deploys on push to `main`)
 - **Local:** `C:\Users\Jordon\Wagner-GPT\wife-gpt`
