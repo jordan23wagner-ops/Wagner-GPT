@@ -137,10 +137,10 @@ export default function App() {
   // Keep the active id reachable inside async stream closures without stale capture.
   const activeIdRef = useRef(activeId)
   activeIdRef.current = activeId
-  messagesRef.current = messages  // voice callbacks read this to get the latest message list
 
   const activeConv = conversations.find((c) => c.id === activeId) || conversations[0]
   const messages = activeConv ? activeConv.messages : []
+  messagesRef.current = messages  // voice callbacks read this to get the latest message list
 
   // setMessages shim: updates the active conversation's messages (and auto-titles it),
   // so the streaming code below stays unchanged from the single-history version.
