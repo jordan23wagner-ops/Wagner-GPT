@@ -409,14 +409,15 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         : memory
       const rows = jobs.map((j) => ({ job: j, state: 'pending', score: null, tailoredText: '', resumeId: null, decision: null }))
       setProgress(rows.map((r) => ({ ...r })))
-      for (let i = 0; i < jobs.length; i++) {
+      // Process the batch in parallel — 5 jobs tailor + score at once, not one-by-one.
+      await Promise.all(jobs.map(async (job, i) => {
         if (cancelled) return
-        const job = jobs[i]
         const set = (patch) => setProgress((p) => p.map((r, k) => (k === i ? { ...r, ...patch } : r)))
         set({ state: 'tailoring' })
         let tailoredText = ''
         try { tailoredText = await quickTailor(job, { activeText: base, otherTexts: others, memory: mem }) }
-        catch { set({ state: 'error', decision: 'skipped' }); continue }
+        catch { set({ state: 'error', decision: 'skipped' }); return }
+        if (cancelled) return
         set({ state: 'scoring', tailoredText })
         let score = 60
         try { score = (await matchScore(tailoredText, job)).score } catch { /* keep default */ }
@@ -425,7 +426,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         // Auto-skip weak fits only for deep rewrite (per the chosen behavior).
         const decision = (mode === 'deep' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
         set({ state: 'done', score, resumeId, decision })
-      }
+      }))
       if (!cancelled) setPhase('review')
     })()
     return () => { cancelled = true }
