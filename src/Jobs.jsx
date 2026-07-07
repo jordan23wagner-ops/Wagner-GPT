@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
+  Folder, FolderOpen, ChevronRight, ChevronDown,
 } from 'lucide-react'
 import { fileToStored } from './lib/resumeParse'
 import { parseDocument } from './lib/parseDocument'
@@ -640,6 +641,7 @@ function ResumesView({ resumes, setResumes }) {
   const [pasteText, setPasteText] = useState('')
   const [pasteName, setPasteName] = useState('')
   const [viewing, setViewing] = useState(null)
+  const [folderOpen, setFolderOpen] = useState(false)
   const fileRef = useRef(null)
 
   const addResume = (name, text, file) => {
@@ -701,27 +703,58 @@ function ResumesView({ resumes, setResumes }) {
         </div>
       )}
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
-      {resumes.length === 0 ? (
-        <div className="text-center text-[var(--muted)] py-10 text-sm">No résumés yet. Upload or paste one — it powers the fit ranking and tailoring.</div>
-      ) : (
-        <div className="space-y-2">
-          {resumes.map((r) => (
-            <div key={r.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 flex items-center gap-3">
-              <button onClick={() => setActive(r.id)} title={r.isActive ? 'Active résumé' : 'Set active'}>
-                {r.isActive ? <Star size={18} className="text-[var(--accent)] fill-[var(--accent)]" /> : <StarOff size={18} className="text-[var(--muted)]" />}
-              </button>
-              <div className="min-w-0 flex-1">
-                <div className="font-medium text-sm truncate">{r.name}</div>
-                <div className="text-xs text-[var(--muted)]">{r.tailoredForJob ? 'tailored' : (r.file ? 'file + text' : 'text')} · {(r.text || '').length.toLocaleString()} chars{r.isActive ? ' · active' : ''}</div>
+      {(() => {
+        const base = resumes.filter((r) => !r.tailoredForJob)
+        const tailored = resumes.filter((r) => r.tailoredForJob)
+        if (!resumes.length) {
+          return <div className="text-center text-[var(--muted)] py-10 text-sm">No résumés yet. Upload or paste one — it powers the fit ranking and tailoring.</div>
+        }
+        const row = (r, compact) => (
+          <div key={r.id} className={`rounded-xl border bg-[var(--surface)] p-3 flex items-center gap-3 ${r.isActive ? 'border-[var(--accent)]' : 'border-[var(--border)]'}`}>
+            <button onClick={() => setActive(r.id)} title={r.isActive ? 'Active résumé' : 'Set active'}>
+              {r.isActive ? <Star size={18} className="text-[var(--accent)] fill-[var(--accent)]" /> : <StarOff size={18} className="text-[var(--muted)]" />}
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="font-medium text-sm truncate">{r.name}</div>
+              <div className="text-xs text-[var(--muted)]">
+                {compact && r.tailoredForJob
+                  ? `${r.tailoredForJob.title || 'role'}${r.tailoredForJob.company ? ' · ' + r.tailoredForJob.company : ''}`
+                  : (r.file ? 'file + text' : 'text')} · {(r.text || '').length.toLocaleString()} chars{r.isActive ? ' · active' : ''}
               </div>
-              <button onClick={() => setViewing(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="View"><FileText size={16} /></button>
-              <button onClick={() => download(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Download .txt"><Upload size={16} className="rotate-180" /></button>
-              <button onClick={() => rename(r.id)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Rename"><Pencil size={16} /></button>
-              <button onClick={() => del(r.id)} className="text-red-500 hover:opacity-80" title="Delete"><Trash2 size={16} /></button>
             </div>
-          ))}
-        </div>
-      )}
+            <button onClick={() => setViewing(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="View"><FileText size={16} /></button>
+            <button onClick={() => download(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Download .txt"><Upload size={16} className="rotate-180" /></button>
+            <button onClick={() => rename(r.id)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Rename"><Pencil size={16} /></button>
+            <button onClick={() => del(r.id)} className="text-red-500 hover:opacity-80" title="Delete"><Trash2 size={16} /></button>
+          </div>
+        )
+        return (
+          <div className="space-y-2">
+            {base.length === 0 && <div className="text-xs text-[var(--muted)] px-1">No base résumés — upload or paste one above.</div>}
+            {base.map((r) => row(r, false))}
+
+            {tailored.length > 0 && (
+              <div className="rounded-xl border border-[var(--border)] overflow-hidden">
+                <button onClick={() => setFolderOpen((o) => !o)}
+                  className="w-full flex items-center gap-2 px-3 py-2 bg-[var(--surface-2)] text-sm font-medium">
+                  {folderOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                  {folderOpen ? <FolderOpen size={15} className="text-[var(--accent)]" /> : <Folder size={15} className="text-[var(--accent)]" />}
+                  Tailored résumés
+                  <span className="text-[var(--muted)] font-normal">({tailored.length})</span>
+                  {tailored.some((r) => r.isActive) && <span className="ml-auto text-[11px] text-[var(--accent)]">★ active inside</span>}
+                </button>
+                {folderOpen && (
+                  <div className="p-2 space-y-2 bg-[var(--bg)]">
+                    {tailored.map((r) => row(r, true))}
+                    <button onClick={() => { if (window.confirm(`Delete all ${tailored.length} tailored résumés? (Base résumés are kept.)`)) setResumes((prev) => prev.filter((r) => !r.tailoredForJob)) }}
+                      className="text-xs text-red-500 hover:opacity-80 px-1 pt-1">Clear all tailored</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })()}
       {viewing && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setViewing(null)}>
           <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
