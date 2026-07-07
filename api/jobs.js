@@ -118,13 +118,50 @@ function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-// Follow an Adzuna redirect link to the real employer posting, so "Apply"/"View" skip Adzuna's
-// landing page (and its email-capture pop-up). Best-effort: HEAD then GET follow; if it never
-// leaves an adzuna host, keep the original URL. Returns the final employer URL or the input.
+// Resolve an Adzuna link to the REAL employer posting so "Apply"/"View" skip Adzuna's interface
+// (and its email-capture pop-up). Adzuna's API often returns a /details/{id} LANDING page (HTTP 200,
+// no redirect) where the employer link sits behind the "Apply for this job" button — following
+// redirects alone stays on adzuna. So: (1) try Adzuna's /land/ad/{id} endpoint, which 302-redirects
+// to the employer; (2) fall back to following the given URL; (3) scrape an outbound apply link from
+// the landing-page HTML. Returns the employer URL, or the original if none can be found.
 function offAdzuna(url) { try { return !/(^|\.)adzuna\.[a-z.]+$/i.test(new URL(url).hostname); } catch (e) { return false; } }
+async function followUrl(url, ms) {
+  try { return await fetch(url, { method: 'GET', redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(ms) }); } catch (e) { return null; }
+}
+function scrapeApplyLink(html, base) {
+  if (!html) return null;
+  const pats = [
+    /href=["']([^"']*\/land\/ad\/[^"']+)["']/i,                       // Adzuna land-redirect link
+    /"(?:apply_url|applyUrl|redirectUrl|externalUrl)"\s*:\s*"([^"]+)"/i, // JSON apply url
+    /href=["'](https?:\/\/(?![a-z0-9-]*\.?adzuna\.)[^"']+)["'][^>]{0,80}>\s*apply/i, // "…>Apply" anchor
+  ];
+  for (const p of pats) {
+    const m = html.match(p);
+    if (m && m[1]) { try { return new URL(m[1].replace(/&amp;/g, '&'), base).href; } catch (e) { return m[1]; } }
+  }
+  return null;
+}
 async function resolveFinalUrl(u) {
-  try { const r = await fetch(u, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(5000) }); if (r && r.url && offAdzuna(r.url)) return r.url; } catch (e) {}
-  try { const r = await fetch(u, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(6000) }); if (r && r.url && offAdzuna(r.url)) return r.url; } catch (e) {}
+  let host = 'https://www.adzuna.com';
+  try { host = new URL(u).origin; } catch (e) {}
+  const idm = u.match(/\/(?:details|land\/ad)\/(\d+)/);
+  // 1) The /land/ad/{id} endpoint redirects straight to the employer.
+  if (idm) {
+    const r = await followUrl(host + '/land/ad/' + idm[1], 6000);
+    if (r && r.url && offAdzuna(r.url)) return r.url;
+  }
+  // 2) Follow the given URL; if it lands off-adzuna we're done, else scrape the landing HTML.
+  const r = await followUrl(u, 7000);
+  if (r) {
+    const finalUrl = r.url || u;
+    if (offAdzuna(finalUrl)) return finalUrl;
+    let html = ''; try { html = await r.text(); } catch (e) {}
+    const link = scrapeApplyLink(html, finalUrl);
+    if (link) {
+      if (/\/land\/ad\//.test(link)) { const r2 = await followUrl(link, 6000); if (r2 && r2.url && offAdzuna(r2.url)) return r2.url; }
+      else if (offAdzuna(link)) return link;
+    }
+  }
   return u
 }
 
