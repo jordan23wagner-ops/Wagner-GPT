@@ -195,6 +195,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [remote, setRemote] = useState(false)
   const [fullTime, setFullTime] = useState(true)
   const [aiFit, setAiFit] = useState(true)
+  const [directOnly, setDirectOnly] = useState(false)
   const [categories, setCategories] = useState([])
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -281,7 +282,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     setTimeout(() => setApplyingId((c) => (c === job.id ? null : c)), 1200)
   }
 
-  const shown = sortResults(results, sortBy)
+  const shown = sortResults(directOnly ? results.filter((j) => j.direct !== false) : results, sortBy)
   const selectedJobs = shown.filter((j) => selected[j.id])
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
   const selectTop = (n) => { const s = {}; shown.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
@@ -326,6 +327,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           <label className="flex items-center gap-1.5 text-sm cursor-pointer"><input type="checkbox" checked={remote} onChange={(e) => setRemote(e.target.checked)} /> Remote only</label>
           <label className="flex items-center gap-1.5 text-sm cursor-pointer"><input type="checkbox" checked={fullTime} onChange={(e) => setFullTime(e.target.checked)} /> Full-time</label>
           <label className="flex items-center gap-1.5 text-sm cursor-pointer"><input type="checkbox" checked={aiFit} onChange={(e) => setAiFit(e.target.checked)} /> Rank by résumé fit (AI)</label>
+          <label className="flex items-center gap-1.5 text-sm cursor-pointer" title="Hide 'via Adzuna' jobs — show only jobs that open directly on the employer/ATS"><input type="checkbox" checked={directOnly} onChange={(e) => setDirectOnly(e.target.checked)} /> Direct apply only</label>
           <button onClick={doSearch} disabled={busy}
             className="ml-auto flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] font-semibold px-4 py-2 rounded-lg text-sm disabled:opacity-50 hover:bg-[var(--accent-hover)]">
             {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search jobs
