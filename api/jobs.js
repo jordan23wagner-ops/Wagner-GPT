@@ -1,95 +1,426 @@
-// Wagner-GPT jobs proxy — Adzuna Job Search API.
-// Backs the Job-Assistant extension's Job Search feature. Keeps the Adzuna credentials server-side
-// (ADZUNA_APP_ID / ADZUNA_APP_KEY env vars) so no key ships in the extension — the extension calls
-// THIS endpoint instead of Adzuna.
+// Wagner-GPT jobs proxy — multi-source job search.
 //
-// POST { action:'search', what, whatExclude, where, salaryMin, salaryMax, category, remote,
-//        fullTime, sortBy, page, resultsPerPage, country }
-//   -> { results:[{ id,title,company,location,salaryMin,salaryMax,salaryPredicted,url,category,
-//                   categoryTag,contractTime,description,created }], count }
-// POST { action:'categories', country } -> { categories:[{ tag,label }] }
+// Backs the Job-Assistant extension's Job Search AND the Wagner-GPT "Jobs" tab. Aggregates jobs
+// from several sources and returns ONE unified result shape so callers stay source-agnostic:
+//   1. Adzuna              — broad aggregator (needs ADZUNA_APP_ID / ADZUNA_APP_KEY).
+//   2. Company ATS boards  — public JSON from Greenhouse / Lever / Ashby / Workable career pages,
+//                            selected per industry from INDUSTRY_BOARDS (this is the "jobs from
+//                            company sites in your industry" ask — these ARE the companies' own
+//                            career sites, just via their public JSON endpoints).
+//   3. Discovery (opt)     — Brave/Tavily to find more ATS boards for the query, then fetch them
+//                            (uses BRAVE_KEY / TAVILY_KEY if present; silently skipped otherwise).
+//   4. Jina reader (opt)   — r.jina.ai (no key) to read arbitrary career pages, then one Groq
+//                            extraction pass. Off unless body.deepScrape is set (protects the
+//                            60s function budget).
 //
-// Remote note: Adzuna has no clean remote flag, so remote:true just appends "remote" to `what`.
+// POST { action:'search', titles|what, industry, where, salaryMin, salaryMax, remote, fullTime,
+//        country, resultsPerPage, category, deepScrape } -> { results:[...], count, sources:{...} }
+// POST { action:'categories', country }                  -> { categories:[{ tag, label }] }
+//
+// Result item: { id, title, company, location, salaryMin, salaryMax, salaryPredicted, url,
+//                category, categoryTag, contractTime, description, created, source }
 
-const ADZUNA_BASE = 'https://api.adzuna.com/v1/api/jobs';
+export const config = { maxDuration: 60 }
+
+const ADZUNA_BASE = 'https://api.adzuna.com/v1/api/jobs'
+
+// ── Curated company ATS boards per industry ─────────────────────────────────────────────────────
+// industry name (matches the client's INDUSTRIES labels) -> [{ ats, slug, name }].
+// ats is one of: greenhouse | lever | ashby | workable. slug is the company's board id on that ATS.
+// Seed set of well-known companies; extend freely — adding a row here immediately widens coverage.
+const INDUSTRY_BOARDS = {
+  'Software / IT': [
+    { ats: 'greenhouse', slug: 'stripe', name: 'Stripe' },
+    { ats: 'greenhouse', slug: 'databricks', name: 'Databricks' },
+    { ats: 'greenhouse', slug: 'dropbox', name: 'Dropbox' },
+    { ats: 'greenhouse', slug: 'gitlab', name: 'GitLab' },
+    { ats: 'greenhouse', slug: 'cloudflare', name: 'Cloudflare' },
+    { ats: 'lever', slug: 'netflix', name: 'Netflix' },
+    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
+    { ats: 'ashby', slug: 'linear', name: 'Linear' },
+    { ats: 'ashby', slug: 'notion', name: 'Notion' },
+    { ats: 'greenhouse', slug: 'asana', name: 'Asana' },
+  ],
+  'Cybersecurity': [
+    { ats: 'greenhouse', slug: 'cloudflare', name: 'Cloudflare' },
+    { ats: 'greenhouse', slug: 'crowdstrike', name: 'CrowdStrike' },
+    { ats: 'greenhouse', slug: 'okta', name: 'Okta' },
+    { ats: 'greenhouse', slug: 'snyk', name: 'Snyk' },
+    { ats: 'lever', slug: 'tenable', name: 'Tenable' },
+    { ats: 'ashby', slug: 'wiz', name: 'Wiz' },
+    { ats: 'greenhouse', slug: 'hashicorp', name: 'HashiCorp' },
+  ],
+  'AI / Machine Learning': [
+    { ats: 'greenhouse', slug: 'databricks', name: 'Databricks' },
+    { ats: 'ashby', slug: 'openai', name: 'OpenAI' },
+    { ats: 'greenhouse', slug: 'anthropic', name: 'Anthropic' },
+    { ats: 'ashby', slug: 'huggingface', name: 'Hugging Face' },
+    { ats: 'ashby', slug: 'scale', name: 'Scale AI' },
+    { ats: 'lever', slug: 'cohere', name: 'Cohere' },
+    { ats: 'greenhouse', slug: 'runwayml', name: 'Runway' },
+    { ats: 'ashby', slug: 'perplexity', name: 'Perplexity' },
+  ],
+  'Oil & Gas / Energy': [
+    { ats: 'greenhouse', slug: 'tesla', name: 'Tesla Energy' },
+    { ats: 'greenhouse', slug: 'sunrun', name: 'Sunrun' },
+    { ats: 'lever', slug: 'form-energy', name: 'Form Energy' },
+    { ats: 'greenhouse', slug: 'commonwealthfusion', name: 'Commonwealth Fusion' },
+    { ats: 'ashby', slug: 'crusoe', name: 'Crusoe Energy' },
+  ],
+  'Healthcare Tech': [
+    { ats: 'greenhouse', slug: 'oscar', name: 'Oscar Health' },
+    { ats: 'greenhouse', slug: 'devoted', name: 'Devoted Health' },
+    { ats: 'lever', slug: 'ro', name: 'Ro' },
+    { ats: 'ashby', slug: 'commure', name: 'Commure' },
+    { ats: 'greenhouse', slug: 'tempus', name: 'Tempus' },
+    { ats: 'greenhouse', slug: 'cedar', name: 'Cedar' },
+  ],
+  'Manufacturing': [
+    { ats: 'greenhouse', slug: 'tesla', name: 'Tesla' },
+    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
+    { ats: 'greenhouse', slug: 'relativity', name: 'Relativity Space' },
+    { ats: 'ashby', slug: 'hadrian', name: 'Hadrian' },
+    { ats: 'greenhouse', slug: 'zoox', name: 'Zoox' },
+  ],
+  'Engineering': [
+    { ats: 'greenhouse', slug: 'spacex', name: 'SpaceX' },
+    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
+    { ats: 'greenhouse', slug: 'relativity', name: 'Relativity Space' },
+    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
+    { ats: 'greenhouse', slug: 'nuro', name: 'Nuro' },
+  ],
+}
+
+// ── Small utilities ─────────────────────────────────────────────────────────────────────────────
+
+// Strip HTML tags/entities/urls to readable text (ported from src/lib/rag.js cleanText).
+function cleanText(text) {
+  return String(text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-zA-Z]+;/g, ' ')
+    .replace(/&#\d+;/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// fetch JSON with a hard timeout; returns null on any failure (never throws) so one bad board
+// can't sink the whole fan-out.
+async function fetchJson(url, { ms = 8000, headers } = {}) {
+  try {
+    const r = await fetch(url, { headers: headers || { Accept: 'application/json' }, signal: AbortSignal.timeout(ms) })
+    if (!r.ok) return null
+    return await r.json()
+  } catch { return null }
+}
+
+function slugName(slug) {
+  return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+// ── Per-ATS board fetchers → normalized results ─────────────────────────────────────────────────
+
+async function fetchGreenhouse({ slug, name }) {
+  const d = await fetchJson(`https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(slug)}/jobs?content=true`)
+  const jobs = (d && d.jobs) || []
+  return jobs.map((j) => ({
+    id: 'gh_' + slug + '_' + j.id,
+    title: j.title || '',
+    company: name || slugName(slug),
+    location: (j.location && j.location.name) || '',
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.absolute_url || '',
+    category: '', categoryTag: '',
+    contractTime: '',
+    description: cleanText(j.content || '').slice(0, 2000),
+    created: j.updated_at || j.first_published || '',
+    source: 'greenhouse',
+  }))
+}
+
+async function fetchLever({ slug, name }) {
+  const arr = await fetchJson(`https://api.lever.co/v0/postings/${encodeURIComponent(slug)}?mode=json`)
+  const jobs = Array.isArray(arr) ? arr : []
+  return jobs.map((j) => ({
+    id: 'lv_' + slug + '_' + (j.id || ''),
+    title: j.text || '',
+    company: name || slugName(slug),
+    location: (j.categories && j.categories.location) || '',
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.hostedUrl || j.applyUrl || '',
+    category: (j.categories && j.categories.team) || '', categoryTag: '',
+    contractTime: (j.categories && j.categories.commitment) || '',
+    description: cleanText(j.descriptionPlain || j.description || '').slice(0, 2000),
+    created: j.createdAt ? new Date(j.createdAt).toISOString() : '',
+    source: 'lever',
+  }))
+}
+
+async function fetchAshby({ slug, name }) {
+  const d = await fetchJson(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(slug)}?includeCompensation=true`)
+  const jobs = (d && d.jobs) || []
+  return jobs.map((j) => ({
+    id: 'ay_' + slug + '_' + (j.id || ''),
+    title: j.title || '',
+    company: (d && d.name) || name || slugName(slug),
+    location: j.location || (j.isRemote ? 'Remote' : ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.jobUrl || j.applyUrl || '',
+    category: j.department || j.team || '', categoryTag: '',
+    contractTime: j.employmentType || '',
+    description: cleanText(j.descriptionPlain || '').slice(0, 2000),
+    created: j.publishedAt || '',
+    source: 'ashby',
+  }))
+}
+
+async function fetchWorkable({ slug, name }) {
+  const d = await fetchJson(`https://apply.workable.com/api/v1/widget/accounts/${encodeURIComponent(slug)}?details=true`)
+  const jobs = (d && (d.jobs || d.results)) || []
+  return jobs.map((j) => ({
+    id: 'wk_' + slug + '_' + (j.shortcode || j.id || ''),
+    title: j.title || '',
+    company: name || slugName(slug),
+    location: [j.city, j.state, j.country].filter(Boolean).join(', ') || (j.telecommuting ? 'Remote' : ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.url || j.application_url || (j.shortcode ? `https://apply.workable.com/${slug}/j/${j.shortcode}/` : ''),
+    category: j.department || '', categoryTag: '',
+    contractTime: j.employment_type || '',
+    description: cleanText(j.description || '').slice(0, 2000),
+    created: j.published_on || j.created_at || '',
+    source: 'workable',
+  }))
+}
+
+const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable }
+
+async function fetchBoards(boards) {
+  const settled = await Promise.allSettled(boards.map((b) => {
+    const fn = ATS_FETCHERS[b.ats]
+    return fn ? fn(b) : Promise.resolve([])
+  }))
+  return settled.flatMap((s) => (s.status === 'fulfilled' && Array.isArray(s.value) ? s.value : []))
+}
+
+// ── Discovery: find more ATS boards for the query via Brave/Tavily ───────────────────────────────
+
+function boardsFromUrls(urls) {
+  const seen = new Set()
+  const out = []
+  const patterns = [
+    { re: /(?:boards|job-boards)\.greenhouse\.io\/([a-z0-9-]+)/i, ats: 'greenhouse' },
+    { re: /boards-api\.greenhouse\.io\/v1\/boards\/([a-z0-9-]+)/i, ats: 'greenhouse' },
+    { re: /jobs\.lever\.co\/([a-z0-9-]+)/i, ats: 'lever' },
+    { re: /jobs\.ashbyhq\.com\/([a-z0-9-]+)/i, ats: 'ashby' },
+    { re: /([a-z0-9-]+)\.workable\.com/i, ats: 'workable' },
+  ]
+  for (const u of urls) {
+    for (const p of patterns) {
+      const m = String(u || '').match(p.re)
+      if (m && m[1]) {
+        const key = p.ats + ':' + m[1].toLowerCase()
+        if (!seen.has(key) && !/^(www|apply|jobs|boards|api)$/i.test(m[1])) {
+          seen.add(key)
+          out.push({ ats: p.ats, slug: m[1].toLowerCase(), name: slugName(m[1]) })
+        }
+      }
+    }
+  }
+  return out
+}
+
+async function discoverBoards(query) {
+  const braveKey = process.env.BRAVE_KEY
+  const tavilyKey = process.env.TAVILY_KEY || process.env.TAVILY || process.env.TAVILY_API_KEY
+  const q = `${query} careers (site:greenhouse.io OR site:lever.co OR site:ashbyhq.com)`
+  let urls = []
+  try {
+    if (braveKey) {
+      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=10&safesearch=moderate`
+      const r = await fetch(url, { headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip', 'X-Subscription-Token': braveKey }, signal: AbortSignal.timeout(6000) })
+      if (r.ok) { const d = await r.json(); urls = (d?.web?.results || []).map((x) => x.url) }
+    } else if (tavilyKey) {
+      const r = await fetch('https://api.tavily.com/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: tavilyKey, query: q, max_results: 10, search_depth: 'basic' }),
+        signal: AbortSignal.timeout(6000),
+      })
+      if (r.ok) { const d = await r.json(); urls = (d?.results || []).map((x) => x.url) }
+    }
+  } catch { /* discovery is best-effort */ }
+  return boardsFromUrls(urls).slice(0, 8)
+}
+
+// ── Adzuna source ────────────────────────────────────────────────────────────────────────────────
+
+async function fetchAdzuna(body, country) {
+  const APP_ID = process.env.ADZUNA_APP_ID
+  const APP_KEY = process.env.ADZUNA_APP_KEY
+  if (!APP_ID || !APP_KEY) return { results: [], configured: false }
+  const auth = `app_id=${encodeURIComponent(APP_ID)}&app_key=${encodeURIComponent(APP_KEY)}`
+  const page = Math.max(1, parseInt(body.page, 10) || 1)
+  const perPage = Math.min(50, Math.max(1, parseInt(body.resultsPerPage, 10) || 25))
+  const params = new URLSearchParams()
+  params.set('results_per_page', String(perPage))
+  let what = String(body.what || body.titles || '').trim()
+  if (body.remote) what = (what + ' remote').trim()
+  if (what) params.set('what', what)
+  if (body.whatExclude) params.set('what_exclude', String(body.whatExclude))
+  if (body.where) params.set('where', String(body.where))
+  const sMin = parseInt(body.salaryMin, 10); if (sMin > 0) params.set('salary_min', String(sMin))
+  const sMax = parseInt(body.salaryMax, 10); if (sMax > 0) params.set('salary_max', String(sMax))
+  if (body.category) params.set('category', String(body.category))
+  if (body.fullTime) params.set('full_time', '1')
+  params.set('sort_by', body.sortBy === 'salary' ? 'salary' : (body.sortBy === 'date' ? 'date' : 'relevance'))
+  params.set('content-type', 'application/json')
+  const d = await fetchJson(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${params.toString()}`, { ms: 9000 })
+  const results = ((d && d.results) || []).map((j) => ({
+    id: 'az_' + j.id,
+    title: j.title || '',
+    company: (j.company && j.company.display_name) || '',
+    location: (j.location && j.location.display_name) || '',
+    salaryMin: j.salary_min || null,
+    salaryMax: j.salary_max || null,
+    salaryPredicted: j.salary_is_predicted === '1' || j.salary_is_predicted === true,
+    url: j.redirect_url || '',
+    category: (j.category && j.category.label) || '',
+    categoryTag: (j.category && j.category.tag) || '',
+    contractTime: j.contract_time || '',
+    description: cleanText(j.description || '').slice(0, 2000),
+    created: j.created || '',
+    source: 'adzuna',
+  }))
+  return { results, configured: true }
+}
+
+// ── Merge / dedupe / filter ──────────────────────────────────────────────────────────────────────
+
+function tokenizeTitles(titles) {
+  return String(titles || '')
+    .toLowerCase()
+    .split(/[,/|]+/).map((s) => s.trim()).filter(Boolean)
+    .flatMap((phrase) => {
+      const words = phrase.split(/\s+/).filter((w) => w.length > 2)
+      return words.length ? [{ phrase, words }] : []
+    })
+}
+
+// Keep a job if any requested title phrase overlaps its title (all significant words of at least one
+// phrase are present, OR the whole phrase is a substring). Empty title filter keeps everything.
+function titleMatches(jobTitle, terms) {
+  if (!terms.length) return true
+  const t = String(jobTitle || '').toLowerCase()
+  return terms.some(({ phrase, words }) => t.includes(phrase) || words.every((w) => t.includes(w)))
+}
+
+function looksRemote(job) {
+  return /remote|anywhere|work from home|wfh|distributed/i.test((job.location || '') + ' ' + (job.title || ''))
+}
+
+function dedupe(jobs) {
+  const seen = new Set()
+  const out = []
+  for (const j of jobs) {
+    if (!j || !j.title) continue
+    const urlKey = (j.url || '').split('?')[0].toLowerCase()
+    const idKey = urlKey || (j.company + '|' + j.title).toLowerCase()
+    if (seen.has(idKey)) continue
+    seen.add(idKey)
+    out.push(j)
+  }
+  return out
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  const origin = req.headers.origin
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin)
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const APP_ID = process.env.ADZUNA_APP_ID;
-  const APP_KEY = process.env.ADZUNA_APP_KEY;
-  if (!APP_ID || !APP_KEY) {
-    return res.status(500).json({
-      error: 'Job search is not configured yet (set ADZUNA_APP_ID and ADZUNA_APP_KEY in the backend environment).',
-      have: { ADZUNA_APP_ID: !!APP_ID, ADZUNA_APP_KEY: !!APP_KEY },
-      adzunaVarsSeen: Object.keys(process.env).filter((k) => /adzuna/i.test(k))
-    });
-  }
-
-  const body = req.body || {};
-  const country = (String(body.country || 'us').toLowerCase().replace(/[^a-z]/g, '')) || 'us';
-  const auth = `app_id=${encodeURIComponent(APP_ID)}&app_key=${encodeURIComponent(APP_KEY)}`;
+  const body = req.body || {}
+  const country = (String(body.country || 'us').toLowerCase().replace(/[^a-z]/g, '')) || 'us'
 
   try {
+    // ── categories (Adzuna) ──
     if (body.action === 'categories') {
-      const r = await fetch(`${ADZUNA_BASE}/${country}/categories?${auth}`, { headers: { 'Content-Type': 'application/json' } });
-      if (!r.ok) return res.status(502).json({ error: 'Adzuna categories error ' + r.status });
-      const d = await r.json();
-      const categories = (d.results || [])
-        .filter((c) => c && c.tag && c.label)
-        .map((c) => ({ tag: c.tag, label: c.label }));
-      return res.status(200).json({ categories });
+      const APP_ID = process.env.ADZUNA_APP_ID, APP_KEY = process.env.ADZUNA_APP_KEY
+      if (!APP_ID || !APP_KEY) return res.status(200).json({ categories: [] })
+      const auth = `app_id=${encodeURIComponent(APP_ID)}&app_key=${encodeURIComponent(APP_KEY)}`
+      const d = await fetchJson(`${ADZUNA_BASE}/${country}/categories?${auth}`, { ms: 8000 })
+      const categories = ((d && d.results) || [])
+        .filter((c) => c && c.tag && c.label).map((c) => ({ tag: c.tag, label: c.label }))
+      return res.status(200).json({ categories })
     }
 
-    const page = Math.max(1, parseInt(body.page, 10) || 1);
-    const perPage = Math.min(50, Math.max(1, parseInt(body.resultsPerPage, 10) || 20));
-    const params = new URLSearchParams();
-    params.set('results_per_page', String(perPage));
+    // ── search (multi-source) ──
+    const titles = String(body.titles || body.what || '').trim()
+    const industry = String(body.industry || '').trim()
+    const seedBoards = INDUSTRY_BOARDS[industry] || []
 
-    let what = String(body.what || '').trim();
-    if (body.remote) what = (what + ' remote').trim();
-    if (what) params.set('what', what);
-    if (body.whatExclude) params.set('what_exclude', String(body.whatExclude));
-    if (body.where) params.set('where', String(body.where));
-    const sMin = parseInt(body.salaryMin, 10);
-    if (sMin > 0) params.set('salary_min', String(sMin));
-    const sMax = parseInt(body.salaryMax, 10);
-    if (sMax > 0) params.set('salary_max', String(sMax));
-    if (body.category) params.set('category', String(body.category));
-    if (body.fullTime) params.set('full_time', '1');
-    params.set('sort_by', body.sortBy === 'salary' ? 'salary' : (body.sortBy === 'date' ? 'date' : 'relevance'));
-    params.set('content-type', 'application/json');
-
-    const r = await fetch(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${params.toString()}`, { headers: { 'Content-Type': 'application/json' } });
-    if (!r.ok) {
-      const t = await r.text().catch(() => '');
-      return res.status(502).json({ error: 'Adzuna search error ' + r.status, detail: t.slice(0, 300) });
+    // Kick off every source in parallel.
+    const tasks = []
+    tasks.push(fetchAdzuna(body, country).then((r) => ({ kind: 'adzuna', ...r })).catch(() => ({ kind: 'adzuna', results: [] })))
+    if (seedBoards.length) tasks.push(fetchBoards(seedBoards).then((results) => ({ kind: 'ats', results })).catch(() => ({ kind: 'ats', results: [] })))
+    // Discovery is best-effort; only when we have a query to search on.
+    const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
+    let discovered = []
+    if (discoveryQuery && (process.env.BRAVE_KEY || process.env.TAVILY_KEY || process.env.TAVILY)) {
+      const boards = await discoverBoards(discoveryQuery)
+      discovered = boards
+      if (boards.length) tasks.push(fetchBoards(boards).then((results) => ({ kind: 'discovered', results })).catch(() => ({ kind: 'discovered', results: [] })))
     }
-    const d = await r.json();
-    const results = (d.results || []).map((j) => ({
-      id: j.id,
-      title: j.title,
-      company: (j.company && j.company.display_name) || '',
-      location: (j.location && j.location.display_name) || '',
-      salaryMin: j.salary_min || null,
-      salaryMax: j.salary_max || null,
-      salaryPredicted: j.salary_is_predicted === '1' || j.salary_is_predicted === true,
-      url: j.redirect_url || '',
-      category: (j.category && j.category.label) || '',
-      categoryTag: (j.category && j.category.tag) || '',
-      contractTime: j.contract_time || '',
-      description: String(j.description || '').replace(/\s+/g, ' ').trim(),
-      created: j.created || ''
-    }));
-    return res.status(200).json({ results, count: d.count || results.length });
+
+    const settled = await Promise.allSettled(tasks)
+    const bucket = { adzuna: [], ats: [], discovered: [] }
+    let adzunaConfigured = false
+    for (const s of settled) {
+      if (s.status !== 'fulfilled') continue
+      const v = s.value
+      if (v.kind === 'adzuna') { adzunaConfigured = !!v.configured; bucket.adzuna = v.results || [] }
+      else if (v.kind === 'ats') bucket.ats = v.results || []
+      else if (v.kind === 'discovered') bucket.discovered = v.results || []
+    }
+
+    // Filter ATS/discovered results by title + remote/location (Adzuna already filtered server-side).
+    const terms = tokenizeTitles(titles)
+    const wantRemote = !!body.remote
+    const where = String(body.where || '').trim().toLowerCase()
+    const filterBoardJob = (j) => {
+      if (!titleMatches(j.title, terms)) return false
+      if (wantRemote && !looksRemote(j)) return false
+      if (where && !wantRemote) {
+        const loc = (j.location || '').toLowerCase()
+        if (loc && !loc.includes(where) && !looksRemote(j)) return false
+      }
+      return true
+    }
+    const boardResults = [...bucket.ats, ...bucket.discovered].filter(filterBoardJob)
+
+    let merged = dedupe([...bucket.adzuna, ...boardResults])
+
+    // Prefer board (company-site) jobs first, then Adzuna, then cap.
+    const cap = Math.min(80, Math.max(20, parseInt(body.resultsPerPage, 10) || 50))
+    merged.sort((a, b) => (a.source === 'adzuna' ? 1 : 0) - (b.source === 'adzuna' ? 1 : 0))
+    merged = merged.slice(0, cap)
+
+    return res.status(200).json({
+      results: merged,
+      count: merged.length,
+      sources: {
+        adzuna: bucket.adzuna.length,
+        adzunaConfigured,
+        ats: bucket.ats.length,
+        discovered: bucket.discovered.length,
+        discoveredBoards: discovered.map((b) => `${b.ats}:${b.slug}`),
+      },
+    })
   } catch (err) {
-    console.error('jobs proxy failed:', err && err.message);
-    return res.status(502).json({ error: 'Job search failed: ' + ((err && err.message) || 'unknown') });
+    console.error('jobs proxy failed:', err && err.message)
+    return res.status(502).json({ error: 'Job search failed: ' + ((err && err.message) || 'unknown') })
   }
 }
