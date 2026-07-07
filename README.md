@@ -109,17 +109,22 @@ A job-search + application workspace, ported from the *Alicia AI* Chrome extensi
 managed here in one web app (the extension stays only for on-page application autofill, which needs
 browser-extension powers a web page can't have). Three sub-tabs:
 
-- **Search** — pulls jobs from **company career sites in your chosen industry**, not just one
-  aggregator. The `/api/jobs` function fans out to:
-  - Company **ATS boards** (Greenhouse / Lever / Ashby / Workable public JSON), selected per industry
-    from the `INDUSTRY_BOARDS` map in `api/jobs.js` — these are the companies' own career pages.
-  - **Adzuna** (broad aggregator) when `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` are set.
-  - Optional **discovery** via Brave/Tavily (`BRAVE_KEY` / `TAVILY_KEY`) to find more boards for the
-    query, and a keyless **Jina reader** fallback for pages without JSON.
-  Results are merged, deduped, filtered by title/location/remote, and **ranked by résumé fit** (AI via
-  `/api/chat`, lexical fallback). **Fortune 500 companies are surfaced first**, then best fit within
-  each group (`src/lib/companyData.js`). Cards flagged **★ Fortune 500** and **⚠ recent layoffs**
-  (curated snapshot in `companyData.js` — extend/prune it; it will go stale).
+- **Search** — pulls jobs from sources that give a **direct employer/ATS apply link** wherever
+  possible (so Apply opens the real posting, not an aggregator page). The `/api/jobs` function fans
+  out to, in preference order:
+  - Company **ATS boards** (Greenhouse / Lever / Ashby / Workable public JSON) from the
+    `INDUSTRY_BOARDS` map — the companies' own career pages (direct).
+  - **JSearch** (Google-for-Jobs, `JSEARCH_KEY`) — breadth with direct links, picking the
+    `apply_options` entry where `is_direct` is true (direct).
+  - **Himalayas** (no key) — remote roles with a direct `applicationLink` (direct).
+  - **Adzuna** (`ADZUNA_APP_ID/KEY`) — broad listings, but its links open Adzuna's own landing page,
+    so it's ranked **last** and labeled **"via Adzuna"** in the UI. (Adzuna does not expose the
+    employer URL — confirmed — so it can't be de-aggregated server-side.)
+  - Optional **discovery** via Brave/Tavily to find more ATS boards for the query.
+  Results are merged, deduped (direct link wins over the same job's Adzuna link), filtered by
+  title/location/remote, and **ranked by résumé fit** with **Fortune 500 first** and **direct-apply
+  before via-Adzuna**. Cards show **✓ direct apply** / **via Adzuna**, **★ Fortune 500**, and
+  **⚠ recent layoffs** badges.
   - **Extend coverage** by adding `{ ats, slug, name }` rows to `INDUSTRY_BOARDS` — no other change.
 - **Résumés** — upload PDF/DOCX/TXT (parsed locally by `src/lib/resumeParse.js`, zero deps) or paste
   text; keep a bank of résumés and mark one **active** (that's what fit-ranking uses).
@@ -217,7 +222,8 @@ wife-gpt/
 | `HUGGINGFACE_KEY` | Recommended | HuggingFace image fallback (free forever, fires when NIM 403s) |
 | `TAVILY_KEY` | Optional | Web search (free 1000/mo at tavily.com) + Jobs board discovery. Without it, those features gracefully no-op. |
 | `BRAVE_KEY` | Optional | Deep research + Jobs board discovery search. |
-| `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | Optional | Jobs tab: Adzuna aggregator source (free tier at developer.adzuna.com). Without them, Jobs search still works from company ATS boards. |
+| `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | Optional | Jobs tab: Adzuna listings (free tier at developer.adzuna.com). Note: Adzuna links open Adzuna's landing page, not the employer — treated as a fallback source. |
+| `JSEARCH_KEY` (or `RAPIDAPI_KEY`) | Optional | Jobs tab: JSearch (Google-for-Jobs, RapidAPI) — the breadth source for **direct** employer/ATS apply links (`apply_options` filtered to `is_direct`). Free tier ~200 req/mo. |
 | `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
 | `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 

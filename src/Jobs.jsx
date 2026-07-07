@@ -341,8 +341,10 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
       {sources && (
         <div className="text-xs text-[var(--muted)] px-1">
-          Sources — company boards: {sources.ats}{sources.discovered ? ` (+${sources.discovered} discovered)` : ''} · aggregator: {sources.adzuna}
-          {!sources.adzunaConfigured && ' (Adzuna key not set — company boards only)'}
+          Sources — <span className="text-green-600">direct apply: {sources.directCount ?? '—'}</span>
+          {' '}· via Adzuna: {sources.adzuna || 0}
+          {typeof sources.jsearch === 'number' && sources.jsearchConfigured ? ` · JSearch: ${sources.jsearch}` : ''}
+          {sources.jsearchConfigured === false ? ' · (add JSEARCH_KEY for more direct links)' : ''}
         </div>
       )}
 
@@ -396,6 +398,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                   {sal && (sal.listed
                     ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
                     : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>)}
+                  {j.direct === false
+                    ? <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: '#7c2d12', color: '#fed7aa' }} title="Apply opens the Adzuna page (may show an email pop-up), then the employer site">via Adzuna</span>
+                    : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title="Apply opens the employer's own posting directly">✓ direct apply</span>}
                   {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
                   {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}

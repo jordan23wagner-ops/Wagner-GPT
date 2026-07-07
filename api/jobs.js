@@ -118,51 +118,65 @@ function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-// Resolve an Adzuna link to the REAL employer posting so "Apply"/"View" skip Adzuna's interface
-// (and its email-capture pop-up). Adzuna's API often returns a /details/{id} LANDING page (HTTP 200,
-// no redirect) where the employer link sits behind the "Apply for this job" button — following
-// redirects alone stays on adzuna. So: (1) try Adzuna's /land/ad/{id} endpoint, which 302-redirects
-// to the employer; (2) fall back to following the given URL; (3) scrape an outbound apply link from
-// the landing-page HTML. Returns the employer URL, or the original if none can be found.
-function offAdzuna(url) { try { return !/(^|\.)adzuna\.[a-z.]+$/i.test(new URL(url).hostname); } catch (e) { return false; } }
-async function followUrl(url, ms) {
-  try { return await fetch(url, { method: 'GET', redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(ms) }); } catch (e) { return null; }
+// ── JSearch (Google for Jobs via RapidAPI) — direct employer/ATS apply links ────────────────────
+// The one broad source that flags DIRECT links: each job's apply_options[] carries is_direct, and
+// job_apply_is_direct on the primary link. We pick the direct option (preferring known ATS/company
+// publishers) so "Apply" lands on the real posting, not an aggregator. Needs a free RapidAPI key.
+const JSEARCH_KEY = process.env.JSEARCH_KEY || process.env.RAPIDAPI_KEY || process.env.JSEARCH || process.env.RAPID_API_KEY
+const DIRECT_PUBLISHER_RE = /greenhouse|lever|ashby|workday|icims|smartrecruiters|taleo|workable|bamboohr|recruitee|jobvite|career|company/i
+function jsearchApplyLink(j) {
+  const opts = Array.isArray(j.apply_options) ? j.apply_options : []
+  const direct = opts.filter((o) => o && o.is_direct && o.apply_link)
+  const preferred = direct.find((o) => DIRECT_PUBLISHER_RE.test(o.publisher || '') || ATS_HOST_RE.test((o.apply_link || '').replace(/^https?:\/\//, '')))
+  if (preferred) return { url: preferred.apply_link, direct: true }
+  if (direct[0]) return { url: direct[0].apply_link, direct: true }
+  if (j.job_apply_link) return { url: j.job_apply_link, direct: !!j.job_apply_is_direct }
+  return { url: opts[0] ? opts[0].apply_link : '', direct: false }
 }
-function scrapeApplyLink(html, base) {
-  if (!html) return null;
-  const pats = [
-    /href=["']([^"']*\/land\/ad\/[^"']+)["']/i,                       // Adzuna land-redirect link
-    /"(?:apply_url|applyUrl|redirectUrl|externalUrl)"\s*:\s*"([^"]+)"/i, // JSON apply url
-    /href=["'](https?:\/\/(?![a-z0-9-]*\.?adzuna\.)[^"']+)["'][^>]{0,80}>\s*apply/i, // "…>Apply" anchor
-  ];
-  for (const p of pats) {
-    const m = html.match(p);
-    if (m && m[1]) { try { return new URL(m[1].replace(/&amp;/g, '&'), base).href; } catch (e) { return m[1]; } }
-  }
-  return null;
-}
-async function resolveFinalUrl(u) {
-  let host = 'https://www.adzuna.com';
-  try { host = new URL(u).origin; } catch (e) {}
-  const idm = u.match(/\/(?:details|land\/ad)\/(\d+)/);
-  // 1) The /land/ad/{id} endpoint redirects straight to the employer.
-  if (idm) {
-    const r = await followUrl(host + '/land/ad/' + idm[1], 6000);
-    if (r && r.url && offAdzuna(r.url)) return r.url;
-  }
-  // 2) Follow the given URL; if it lands off-adzuna we're done, else scrape the landing HTML.
-  const r = await followUrl(u, 7000);
-  if (r) {
-    const finalUrl = r.url || u;
-    if (offAdzuna(finalUrl)) return finalUrl;
-    let html = ''; try { html = await r.text(); } catch (e) {}
-    const link = scrapeApplyLink(html, finalUrl);
-    if (link) {
-      if (/\/land\/ad\//.test(link)) { const r2 = await followUrl(link, 6000); if (r2 && r2.url && offAdzuna(r2.url)) return r2.url; }
-      else if (offAdzuna(link)) return link;
+async function fetchJSearch(what, where, remote, country) {
+  if (!JSEARCH_KEY) return { results: [], configured: false }
+  const q = [what, where].filter(Boolean).join(' in ').trim() || what
+  const params = new URLSearchParams({ query: q + (remote ? ' remote' : ''), page: '1', num_pages: '1', country: country || 'us', date_posted: 'month' })
+  const d = await fetchJson(`https://jsearch.p.rapidapi.com/search?${params.toString()}`, {
+    ms: 9000, headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
+  })
+  const jobs = (d && d.data) || []
+  const results = jobs.map((j) => {
+    const link = jsearchApplyLink(j)
+    return {
+      id: 'js_' + (j.job_id || Math.random().toString(36).slice(2)),
+      title: j.job_title || '',
+      company: j.employer_name || '',
+      location: [j.job_city, j.job_state, j.job_country].filter(Boolean).join(', ') || (j.job_is_remote ? 'Remote' : ''),
+      salaryMin: j.job_min_salary || null, salaryMax: j.job_max_salary || null, salaryPredicted: false,
+      url: link.url, direct: link.direct,
+      category: (j.job_publisher || ''), categoryTag: '',
+      contractTime: j.job_employment_type || '',
+      description: cleanText(j.job_description || '').slice(0, 2000),
+      created: j.job_posted_at_datetime_utc || '',
+      source: 'jsearch',
     }
-  }
-  return u
+  }).filter((j) => j.url)
+  return { results, configured: true }
+}
+
+// ── Himalayas — free, no key: remote jobs with a DIRECT applicationLink ──────────────────────────
+async function fetchHimalayas() {
+  const d = await fetchJson('https://himalayas.app/jobs/api?limit=50', { ms: 8000 })
+  const jobs = (d && (d.jobs || d.data)) || []
+  return jobs.map((j) => ({
+    id: 'hi_' + (j.guid || j.id || Math.random().toString(36).slice(2)),
+    title: j.title || '',
+    company: j.companyName || (j.company && j.company.name) || '',
+    location: (Array.isArray(j.locationRestrictions) && j.locationRestrictions.join(', ')) || 'Remote',
+    salaryMin: j.minSalary || null, salaryMax: j.maxSalary || null, salaryPredicted: false,
+    url: j.applicationLink || j.url || '', direct: !!j.applicationLink,
+    category: (Array.isArray(j.categories) && j.categories[0]) || '', categoryTag: '',
+    contractTime: (Array.isArray(j.employmentType) && j.employmentType[0]) || '',
+    description: cleanText(j.description || j.excerpt || '').slice(0, 2000),
+    created: j.pubDate || j.publishedDate || '',
+    source: 'himalayas',
+  })).filter((j) => j.url)
 }
 
 // ── Per-ATS board fetchers → normalized results ─────────────────────────────────────────────────
@@ -416,6 +430,8 @@ export default async function handler(req, res) {
     // Kick off every source in parallel.
     const tasks = []
     tasks.push(fetchAdzuna(body, country).then((r) => ({ kind: 'adzuna', ...r })).catch(() => ({ kind: 'adzuna', results: [] })))
+    tasks.push(fetchJSearch(titles || industry, body.where, body.remote, country).then((r) => ({ kind: 'jsearch', ...r })).catch(() => ({ kind: 'jsearch', results: [] })))
+    tasks.push(fetchHimalayas().then((results) => ({ kind: 'himalayas', results })).catch(() => ({ kind: 'himalayas', results: [] })))
     if (seedBoards.length) tasks.push(fetchBoards(seedBoards).then((results) => ({ kind: 'ats', results })).catch(() => ({ kind: 'ats', results: [] })))
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
@@ -427,21 +443,23 @@ export default async function handler(req, res) {
     }
 
     const settled = await Promise.allSettled(tasks)
-    const bucket = { adzuna: [], ats: [], discovered: [] }
-    let adzunaConfigured = false
+    const bucket = { adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [] }
+    let adzunaConfigured = false, jsearchConfigured = false
     for (const s of settled) {
       if (s.status !== 'fulfilled') continue
       const v = s.value
       if (v.kind === 'adzuna') { adzunaConfigured = !!v.configured; bucket.adzuna = v.results || [] }
+      else if (v.kind === 'jsearch') { jsearchConfigured = !!v.configured; bucket.jsearch = v.results || [] }
+      else if (v.kind === 'himalayas') bucket.himalayas = v.results || []
       else if (v.kind === 'ats') bucket.ats = v.results || []
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
     }
 
-    // Filter ATS/discovered results by title + remote/location (Adzuna already filtered server-side).
+    // Filter the non-Adzuna sources by title + remote/location (Adzuna is filtered server-side).
     const terms = tokenizeTitles(titles)
     const wantRemote = !!body.remote
     const where = String(body.where || '').trim().toLowerCase()
-    const filterBoardJob = (j) => {
+    const filterJob = (j) => {
       if (!titleMatches(j.title, terms)) return false
       if (wantRemote && !looksRemote(j)) return false
       if (where && !wantRemote) {
@@ -450,34 +468,34 @@ export default async function handler(req, res) {
       }
       return true
     }
-    const boardResults = [...bucket.ats, ...bucket.discovered].filter(filterBoardJob)
+    const boardResults = [...bucket.ats, ...bucket.discovered].filter(filterJob)
+    const jsearchResults = bucket.jsearch.filter(filterJob)
+    const himalayasResults = bucket.himalayas.filter(filterJob)
 
-    let merged = dedupe([...bucket.adzuna, ...boardResults])
+    // Mark each result direct/aggregator; ATS boards + Himalayas are always direct.
+    boardResults.forEach((j) => { j.direct = true })
+    himalayasResults.forEach((j) => { j.direct = true })
+    bucket.adzuna.forEach((j) => { j.direct = false })
 
-    // Prefer board (company-site) jobs first, then Adzuna, then cap.
+    // Dedupe preferring DIRECT-link sources over Adzuna's aggregator link for the same job.
+    let merged = dedupe([...boardResults, ...jsearchResults, ...himalayasResults, ...bucket.adzuna])
+
+    // Order: direct links first (company boards / JSearch-direct / Himalayas / USAJobs), Adzuna last.
     const cap = Math.min(80, Math.max(20, parseInt(body.resultsPerPage, 10) || 50))
-    merged.sort((a, b) => (a.source === 'adzuna' ? 1 : 0) - (b.source === 'adzuna' ? 1 : 0))
+    const rank = (j) => (j.source === 'adzuna' ? 2 : (j.direct === false ? 1 : 0))
+    merged.sort((a, b) => rank(a) - rank(b))
     merged = merged.slice(0, cap)
-
-    // Resolve Adzuna links to the real employer posting (skips Adzuna's interface + email pop-ups).
-    // Bounded to the final Adzuna results only; keeps the Adzuna URL as a fallback when unresolved.
-    const adz = merged.filter((j) => j.source === 'adzuna')
-    if (adz.length) {
-      await Promise.allSettled(adz.map(async (j) => {
-        const f = await resolveFinalUrl(j.url)
-        if (f && f !== j.url) { j.adzunaUrl = j.url; j.url = f }
-      }))
-    }
 
     return res.status(200).json({
       results: merged,
       count: merged.length,
       sources: {
-        adzuna: bucket.adzuna.length,
-        adzunaConfigured,
+        adzuna: bucket.adzuna.length, adzunaConfigured,
+        jsearch: jsearchResults.length, jsearchConfigured,
+        himalayas: himalayasResults.length,
         ats: bucket.ats.length,
         discovered: bucket.discovered.length,
-        discoveredBoards: discovered.map((b) => `${b.ats}:${b.slug}`),
+        directCount: merged.filter((j) => j.direct !== false).length,
       },
     })
   } catch (err) {
