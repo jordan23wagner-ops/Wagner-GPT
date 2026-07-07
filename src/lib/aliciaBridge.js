@@ -26,20 +26,21 @@ export function waitForExtension(timeoutMs = 1200) {
   })
 }
 
-// Hand a batch of jobs to the extension to auto-apply. Each job: { url, title, company, resumeText }.
-// The extension opens each posting (paced) and auto-fills, stopping before the final Submit.
-// Returns true if the extension acknowledged, false if it isn't installed.
+// Register a batch of jobs with the extension for auto-fill. Each job: { url, title, company,
+// resumeText }. The WEB APP opens the posting tabs; the extension fills whichever opened tab matches
+// (following redirects, stopping before Submit). Resolves TRUE only when the extension's background
+// worker actually acknowledges handling it — so the caller can report honestly whether it worked.
 export function sendApply(jobs, opts = {}) {
   return new Promise((resolve) => {
     if (!extensionPresent()) { resolve(false); return }
     const nonce = 'a' + Math.random().toString(36).slice(2)
     const onMsg = (e) => {
       if (e.source === window && e.data && e.data.source === 'alicia-ext' && e.data.type === 'APPLY_ACK' && e.data.nonce === nonce) {
-        window.removeEventListener('message', onMsg); resolve(true)
+        window.removeEventListener('message', onMsg); resolve(!!e.data.ok)
       }
     }
     window.addEventListener('message', onMsg)
     window.postMessage({ source: 'wagner-jobs', type: 'ALICIA_APPLY', nonce, jobs, options: opts }, '*')
-    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(extensionPresent()) }, 2000)
+    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(false) }, 2500)
   })
 }

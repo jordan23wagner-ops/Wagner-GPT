@@ -238,17 +238,20 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
   const applyOne = (job) => {
     const tr = findTailored(resumes, job)
     const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
+    // Always open the tab from the web app (synchronous → not popup-blocked). The extension, if
+    // present, auto-fills the tab it recognizes by URL.
+    const win = job.url ? window.open(job.url, '_blank', 'noopener') : null
+    upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
     if (hasExt) {
-      // Extension present: it opens the posting(s) itself and auto-fills. Fire-and-forget.
+      setStatus(`Opened “${job.title}” — asking Alicia to auto-fill…`)
       sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
-      upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
-      setStatus(`Handed “${job.title}” to the Alicia extension — it’s opening the posting and auto-filling (you click Submit).`)
+        .then((ok) => setStatus(ok
+          ? `Alicia is auto-filling “${job.title}” in the opened tab — review and click Submit.`
+          : `Opened “${job.title}”, but couldn’t reach the Alicia extension to auto-fill. Reload it at chrome://extensions, then try again — or fill manually.`))
     } else {
-      // No extension: open the posting now (synchronous → not popup-blocked), then track it.
-      const win = job.url ? window.open(job.url, '_blank', 'noopener') : null
-      upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
-      if (win) setStatus(`Opened “${job.title}” in a new tab and marked it applied${tr ? ' — tailored résumé is in Résumés, ready to upload.' : '.'}`)
-      else setStatus(`Marked “${job.title}” applied, but your browser blocked the new tab — open it with “View posting”.`)
+      setStatus(win
+        ? `Opened “${job.title}” and marked it applied${tr ? ' (tailored résumé is in Résumés).' : '.'}`
+        : `Marked “${job.title}” applied, but your browser blocked the new tab — open it with “View posting”.`)
     }
     setApplyingId(job.id)
     setTimeout(() => setApplyingId((c) => (c === job.id ? null : c)), 1200)
@@ -494,21 +497,25 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
     setApplySel(Object.fromEntries(progress.filter((r) => r.decision === 'ready').map((r) => [r.job.id, true])))
   }, [phase]) // eslint-disable-line
 
-  // Synchronous off the click — no await before window.open (else the browser blocks the tabs).
+  // Synchronous off the click — open tabs from the web app first (no await before window.open, else
+  // the browser blocks them), then let the extension auto-fill the ones it recognizes.
   const doApply = () => {
     const chosen = progress.filter((r) => applySel[r.job.id] && r.decision !== 'error')
     if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
+    let opened = 0
+    chosen.forEach((r) => { if (r.job.url && window.open(r.job.url, '_blank', 'noopener')) opened++ })
+    chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
+    const blockedNote = opened < chosen.length ? ` (Your browser blocked ${chosen.length - opened} pop-up(s) — open those from the Tracker.)` : ''
     const payloadJobs = chosen.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
     if (hasExt) {
+      setApplyMsg(`Opened ${opened}/${chosen.length} tab(s) — asking Alicia to auto-fill…`)
       sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
-      chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
-      setApplyMsg(`Handed ${chosen.length} to the Alicia extension — it’s opening each posting and auto-filling (you click Submit on each).`)
+        .then((ok) => setApplyMsg(ok
+          ? `Alicia is auto-filling the opened tab(s) — review and click Submit on each.${blockedNote}`
+          : `Opened ${opened} tab(s), but couldn’t reach the Alicia extension to auto-fill. Reload it at chrome://extensions, then try again.${blockedNote}`))
     } else {
-      let opened = 0
-      chosen.forEach((r) => { if (r.job.url && window.open(r.job.url, '_blank', 'noopener')) opened++ })
-      chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
       setApplyMsg(opened
-        ? `Opened ${opened} posting(s) in new tabs and marked applied. Install/enable the Alicia extension (v1.11.0+) for hands-off auto-fill.`
+        ? `Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v1.11.0+) for hands-off auto-fill.${blockedNote}`
         : `Marked ${chosen.length} applied, but your browser blocked the pop-up tabs — open them from the Tracker or each card’s “View posting”.`)
     }
   }
