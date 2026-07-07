@@ -35,59 +35,104 @@ const INDUSTRY_BOARDS = {
     { ats: 'greenhouse', slug: 'dropbox', name: 'Dropbox' },
     { ats: 'greenhouse', slug: 'gitlab', name: 'GitLab' },
     { ats: 'greenhouse', slug: 'cloudflare', name: 'Cloudflare' },
+    { ats: 'greenhouse', slug: 'asana', name: 'Asana' },
+    { ats: 'greenhouse', slug: 'twilio', name: 'Twilio' },
+    { ats: 'greenhouse', slug: 'samsara', name: 'Samsara' },
     { ats: 'lever', slug: 'netflix', name: 'Netflix' },
     { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
     { ats: 'ashby', slug: 'linear', name: 'Linear' },
     { ats: 'ashby', slug: 'notion', name: 'Notion' },
-    { ats: 'greenhouse', slug: 'asana', name: 'Asana' },
+    { ats: 'ashby', slug: 'vercel', name: 'Vercel' },
+    { ats: 'smartrecruiters', slug: 'Square', name: 'Block (Square)' },
+    { ats: 'smartrecruiters', slug: 'Visa', name: 'Visa' },
   ],
   'Cybersecurity': [
     { ats: 'greenhouse', slug: 'cloudflare', name: 'Cloudflare' },
     { ats: 'greenhouse', slug: 'crowdstrike', name: 'CrowdStrike' },
     { ats: 'greenhouse', slug: 'okta', name: 'Okta' },
     { ats: 'greenhouse', slug: 'snyk', name: 'Snyk' },
+    { ats: 'greenhouse', slug: 'hashicorp', name: 'HashiCorp' },
+    { ats: 'greenhouse', slug: 'sentinelone', name: 'SentinelOne' },
     { ats: 'lever', slug: 'tenable', name: 'Tenable' },
     { ats: 'ashby', slug: 'wiz', name: 'Wiz' },
-    { ats: 'greenhouse', slug: 'hashicorp', name: 'HashiCorp' },
+    { ats: 'ashby', slug: 'abnormal', name: 'Abnormal Security' },
   ],
   'AI / Machine Learning': [
     { ats: 'greenhouse', slug: 'databricks', name: 'Databricks' },
-    { ats: 'ashby', slug: 'openai', name: 'OpenAI' },
     { ats: 'greenhouse', slug: 'anthropic', name: 'Anthropic' },
+    { ats: 'greenhouse', slug: 'runwayml', name: 'Runway' },
+    { ats: 'ashby', slug: 'openai', name: 'OpenAI' },
     { ats: 'ashby', slug: 'huggingface', name: 'Hugging Face' },
     { ats: 'ashby', slug: 'scale', name: 'Scale AI' },
-    { ats: 'lever', slug: 'cohere', name: 'Cohere' },
-    { ats: 'greenhouse', slug: 'runwayml', name: 'Runway' },
     { ats: 'ashby', slug: 'perplexity', name: 'Perplexity' },
+    { ats: 'ashby', slug: 'mistral', name: 'Mistral AI' },
+    { ats: 'lever', slug: 'cohere', name: 'Cohere' },
   ],
   'Oil & Gas / Energy': [
     { ats: 'greenhouse', slug: 'tesla', name: 'Tesla Energy' },
     { ats: 'greenhouse', slug: 'sunrun', name: 'Sunrun' },
-    { ats: 'lever', slug: 'form-energy', name: 'Form Energy' },
     { ats: 'greenhouse', slug: 'commonwealthfusion', name: 'Commonwealth Fusion' },
+    { ats: 'lever', slug: 'form-energy', name: 'Form Energy' },
     { ats: 'ashby', slug: 'crusoe', name: 'Crusoe Energy' },
+    { ats: 'smartrecruiters', slug: 'Bosch', name: 'Bosch' },
   ],
   'Healthcare Tech': [
     { ats: 'greenhouse', slug: 'oscar', name: 'Oscar Health' },
     { ats: 'greenhouse', slug: 'devoted', name: 'Devoted Health' },
-    { ats: 'lever', slug: 'ro', name: 'Ro' },
-    { ats: 'ashby', slug: 'commure', name: 'Commure' },
     { ats: 'greenhouse', slug: 'tempus', name: 'Tempus' },
     { ats: 'greenhouse', slug: 'cedar', name: 'Cedar' },
+    { ats: 'greenhouse', slug: 'included', name: 'Included Health' },
+    { ats: 'lever', slug: 'ro', name: 'Ro' },
+    { ats: 'ashby', slug: 'commure', name: 'Commure' },
   ],
   'Manufacturing': [
     { ats: 'greenhouse', slug: 'tesla', name: 'Tesla' },
-    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
     { ats: 'greenhouse', slug: 'relativity', name: 'Relativity Space' },
-    { ats: 'ashby', slug: 'hadrian', name: 'Hadrian' },
     { ats: 'greenhouse', slug: 'zoox', name: 'Zoox' },
+    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
+    { ats: 'ashby', slug: 'hadrian', name: 'Hadrian' },
+    { ats: 'smartrecruiters', slug: 'Bosch', name: 'Bosch' },
   ],
   'Engineering': [
     { ats: 'greenhouse', slug: 'spacex', name: 'SpaceX' },
-    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
     { ats: 'greenhouse', slug: 'relativity', name: 'Relativity Space' },
-    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
     { ats: 'greenhouse', slug: 'nuro', name: 'Nuro' },
+    { ats: 'lever', slug: 'anduril', name: 'Anduril' },
+    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
+  ],
+  'Finance / Fintech': [
+    { ats: 'greenhouse', slug: 'stripe', name: 'Stripe' },
+    { ats: 'greenhouse', slug: 'affirm', name: 'Affirm' },
+    { ats: 'greenhouse', slug: 'robinhood', name: 'Robinhood' },
+    { ats: 'greenhouse', slug: 'sofi', name: 'SoFi' },
+    { ats: 'greenhouse', slug: 'coinbase', name: 'Coinbase' },
+    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
+    { ats: 'ashby', slug: 'mercury', name: 'Mercury' },
+    { ats: 'smartrecruiters', slug: 'Visa', name: 'Visa' },
+  ],
+  'Retail / Consumer': [
+    { ats: 'greenhouse', slug: 'instacart', name: 'Instacart' },
+    { ats: 'greenhouse', slug: 'faire', name: 'Faire' },
+    { ats: 'greenhouse', slug: 'gopuff', name: 'Gopuff' },
+    { ats: 'lever', slug: 'shipbob', name: 'ShipBob' },
+    { ats: 'smartrecruiters', slug: 'McDonalds', name: "McDonald's" },
+    { ats: 'smartrecruiters', slug: 'IKEA', name: 'IKEA' },
+  ],
+  'Product Management': [
+    { ats: 'greenhouse', slug: 'stripe', name: 'Stripe' },
+    { ats: 'greenhouse', slug: 'databricks', name: 'Databricks' },
+    { ats: 'greenhouse', slug: 'asana', name: 'Asana' },
+    { ats: 'greenhouse', slug: 'coinbase', name: 'Coinbase' },
+    { ats: 'ashby', slug: 'notion', name: 'Notion' },
+    { ats: 'ashby', slug: 'ramp', name: 'Ramp' },
+    { ats: 'lever', slug: 'netflix', name: 'Netflix' },
+  ],
+  'Media / Gaming': [
+    { ats: 'lever', slug: 'netflix', name: 'Netflix' },
+    { ats: 'greenhouse', slug: 'discord', name: 'Discord' },
+    { ats: 'greenhouse', slug: 'roblox', name: 'Roblox' },
+    { ats: 'smartrecruiters', slug: 'Ubisoft', name: 'Ubisoft' },
+    { ats: 'smartrecruiters', slug: 'Twitch', name: 'Twitch' },
   ],
 }
 
@@ -276,7 +321,42 @@ async function fetchWorkable({ slug, name }) {
   }))
 }
 
-const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable }
+async function fetchSmartRecruiters({ slug, name }) {
+  const d = await fetchJson(`https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(slug)}/postings?limit=100`)
+  const jobs = (d && d.content) || []
+  return jobs.map((j) => ({
+    id: 'sr_' + slug + '_' + (j.id || ''),
+    title: j.name || '',
+    company: (j.company && j.company.name) || name || slugName(slug),
+    location: [j.location && j.location.city, j.location && j.location.region, j.location && j.location.country].filter(Boolean).join(', ') || (j.location && j.location.remote ? 'Remote' : ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: `https://jobs.smartrecruiters.com/${slug}/${j.id}`,
+    category: (j.function && j.function.label) || (j.department && j.department.label) || '', categoryTag: '',
+    contractTime: (j.typeOfEmployment && j.typeOfEmployment.label) || '',
+    description: cleanText((j.jobAd && j.jobAd.sections && j.jobAd.sections.jobDescription && j.jobAd.sections.jobDescription.text) || '').slice(0, 2000),
+    created: j.releasedDate || '',
+    source: 'smartrecruiters',
+  }))
+}
+async function fetchRecruitee({ slug, name }) {
+  const d = await fetchJson(`https://${encodeURIComponent(slug)}.recruitee.com/api/offers/`)
+  const jobs = (d && d.offers) || []
+  return jobs.map((j) => ({
+    id: 're_' + slug + '_' + (j.id || ''),
+    title: j.title || '',
+    company: j.company_name || name || slugName(slug),
+    location: j.location || [j.city, j.country].filter(Boolean).join(', ') || (j.remote ? 'Remote' : ''),
+    salaryMin: (j.salary && j.salary.min) || null, salaryMax: (j.salary && j.salary.max) || null, salaryPredicted: false,
+    url: j.careers_url || j.careers_apply_url || '',
+    category: j.department || '', categoryTag: '',
+    contractTime: j.employment_type_code || '',
+    description: cleanText(j.description || '').slice(0, 2000),
+    created: j.published_at || '',
+    source: 'recruitee',
+  })).filter((j) => j.url)
+}
+
+const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee }
 
 async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {
