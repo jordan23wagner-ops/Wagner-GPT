@@ -76,7 +76,7 @@ function parseListedSalary(text) {
 }
 function fmtSalary(min, max, period) {
   const fmt = period === 'hour' ? (n) => '$' + (Math.round(n * 100) / 100) : (n) => '$' + Math.round(n / 1000) + 'k'
-  const body = min && max ? fmt(min) + '–' + fmt(max) : fmt(min || max)
+  const body = (min && max && min !== max) ? fmt(min) + '–' + fmt(max) : fmt(min || max)
   return body + (period === 'hour' ? '/hr' : '')
 }
 function salaryInfo(j) {
@@ -232,17 +232,26 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
 
   const [applyingId, setApplyingId] = useState(null)
   // Direct apply for one job (no tailoring): use its existing tailored résumé if present, else the
-  // active résumé. Hands off to the extension (or opens the posting), and tracks it as applied.
-  const applyOne = async (job) => {
+  // active résumé. IMPORTANT: this must run synchronously off the click — calling window.open after
+  // an `await` loses the user gesture and the browser silently blocks the tab. So branch on the
+  // (synchronous) hasExt state and never await before opening.
+  const applyOne = (job) => {
     const tr = findTailored(resumes, job)
     const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
+    if (hasExt) {
+      // Extension present: it opens the posting(s) itself and auto-fills. Fire-and-forget.
+      sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
+      upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
+      setStatus(`Handed “${job.title}” to the Alicia extension — it’s opening the posting and auto-filling (you click Submit).`)
+    } else {
+      // No extension: open the posting now (synchronous → not popup-blocked), then track it.
+      const win = job.url ? window.open(job.url, '_blank', 'noopener') : null
+      upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
+      if (win) setStatus(`Opened “${job.title}” in a new tab and marked it applied${tr ? ' — tailored résumé is in Résumés, ready to upload.' : '.'}`)
+      else setStatus(`Marked “${job.title}” applied, but your browser blocked the new tab — open it with “View posting”.`)
+    }
     setApplyingId(job.id)
-    let ok = false
-    try { if (hasExt) ok = await sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) }) } catch { /* */ }
-    upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
-    if (!ok && job.url) window.open(job.url, '_blank', 'noopener')
-    setApplyingId(null)
-    setStatus(ok ? `Applying to ${job.title} — the extension is opening the posting and auto-filling.` : `Opened ${job.title}; marked applied${tr ? ' (tailored résumé)' : ''}.`)
+    setTimeout(() => setApplyingId((c) => (c === job.id ? null : c)), 1200)
   }
 
   const selectedJobs = results.filter((j) => selected[j.id])
@@ -296,6 +305,11 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
         </div>
       </div>
 
+      <div className="text-xs px-1">
+        {hasExt
+          ? <span className="text-green-600">🔌 Alicia extension detected — Apply auto-fills hands-off.</span>
+          : <span className="text-[var(--muted)]">🔌 Alicia extension not detected — Apply opens the posting in a new tab (install/enable it for hands-off auto-fill).</span>}
+      </div>
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
       {sources && (
         <div className="text-xs text-[var(--muted)] px-1">
@@ -480,19 +494,22 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
     setApplySel(Object.fromEntries(progress.filter((r) => r.decision === 'ready').map((r) => [r.job.id, true])))
   }, [phase]) // eslint-disable-line
 
-  const doApply = async () => {
+  // Synchronous off the click — no await before window.open (else the browser blocks the tabs).
+  const doApply = () => {
     const chosen = progress.filter((r) => applySel[r.job.id] && r.decision !== 'error')
     if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
     const payloadJobs = chosen.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
-    setApplyMsg('Handing off to the Alicia extension…')
-    let ok = false
-    if (hasExt) ok = await sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
-    chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
-    if (ok) setApplyMsg(`Applying to ${chosen.length} — the extension is opening each posting and auto-filling. Click Submit on each.`)
-    else {
-      // Fallback: open postings so the user can apply manually (extension not detected).
-      chosen.forEach((r) => { if (r.job.url) window.open(r.job.url, '_blank', 'noopener') })
-      setApplyMsg(`Opened ${chosen.length} posting(s) in new tabs. Install the Alicia extension for hands-off auto-fill; tracked as "applied".`)
+    if (hasExt) {
+      sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
+      chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
+      setApplyMsg(`Handed ${chosen.length} to the Alicia extension — it’s opening each posting and auto-filling (you click Submit on each).`)
+    } else {
+      let opened = 0
+      chosen.forEach((r) => { if (r.job.url && window.open(r.job.url, '_blank', 'noopener')) opened++ })
+      chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
+      setApplyMsg(opened
+        ? `Opened ${opened} posting(s) in new tabs and marked applied. Install/enable the Alicia extension (v1.11.0+) for hands-off auto-fill.`
+        : `Marked ${chosen.length} applied, but your browser blocked the pop-up tabs — open them from the Tracker or each card’s “View posting”.`)
     }
   }
 
