@@ -103,9 +103,34 @@ A farming economy where you grow plants, harvest them for coins, and expand your
 - **No fail states** — plants never wither. Growth is timestamp-based and advances while the app is closed.
 - **6 free decorations** — Fence, Bench, Fountain, Lantern, Pot, Stepping Stone.
 
+## Jobs
+
+A job-search + application workspace, ported from the *Alicia AI* Chrome extension so it can be
+managed here in one web app (the extension stays only for on-page application autofill, which needs
+browser-extension powers a web page can't have). Three sub-tabs:
+
+- **Search** — pulls jobs from **company career sites in your chosen industry**, not just one
+  aggregator. The `/api/jobs` function fans out to:
+  - Company **ATS boards** (Greenhouse / Lever / Ashby / Workable public JSON), selected per industry
+    from the `INDUSTRY_BOARDS` map in `api/jobs.js` — these are the companies' own career pages.
+  - **Adzuna** (broad aggregator) when `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` are set.
+  - Optional **discovery** via Brave/Tavily (`BRAVE_KEY` / `TAVILY_KEY`) to find more boards for the
+    query, and a keyless **Jina reader** fallback for pages without JSON.
+  Results are merged, deduped, filtered by title/location/remote, and **ranked by résumé fit** (AI via
+  `/api/chat`, lexical fallback), best first. Company-board jobs are surfaced ahead of aggregator jobs.
+  - **Extend coverage** by adding `{ ats, slug, name }` rows to `INDUSTRY_BOARDS` — no other change.
+- **Résumés** — upload PDF/DOCX/TXT (parsed locally by `src/lib/resumeParse.js`, zero deps) or paste
+  text; keep a bank of résumés and mark one **active** (that's what fit-ranking uses).
+- **Tracker** — save jobs from Search and track status (saved → applied → interview → offer/rejected)
+  with notes.
+
+Storage is local-first (`src/lib/jobsStore.js`); optional cloud sync activates once you run
+`supabase-jobs-schema.sql`. No new npm dependencies or API keys were added — every provider key is one
+the backend already uses.
+
 ## Persistence
 
-- **localStorage** — fast local cache for everything (chat, garden, settings).
+- **localStorage** — fast local cache for everything (chat, garden, settings, jobs).
 - **Supabase cloud sync** — conversations and garden state sync to Postgres in the background. Open the app on a new device or browser and everything loads from the cloud.
 - **Local-first** — works fully offline; Supabase syncs when available.
 
@@ -176,7 +201,9 @@ wife-gpt/
 | `OLLAMA_CLOUD_KEY` | Yes | Ollama Cloud chat (primary) |
 | `NVIDIA_NIM_KEY` | Yes | NIM chat fallback + image generation (FLUX.1-dev) |
 | `HUGGINGFACE_KEY` | Recommended | HuggingFace image fallback (free forever, fires when NIM 403s) |
-| `TAVILY_KEY` | Optional | Web search (free 1000/mo at tavily.com). Without it, the web-search toggle gracefully no-ops. |
+| `TAVILY_KEY` | Optional | Web search (free 1000/mo at tavily.com) + Jobs board discovery. Without it, those features gracefully no-op. |
+| `BRAVE_KEY` | Optional | Deep research + Jobs board discovery search. |
+| `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | Optional | Jobs tab: Adzuna aggregator source (free tier at developer.adzuna.com). Without them, Jobs search still works from company ATS boards. |
 | `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
 | `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 
