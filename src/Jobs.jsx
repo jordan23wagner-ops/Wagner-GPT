@@ -13,6 +13,7 @@ import {
   backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
 } from './lib/jobsAI'
 import { extensionPresent, extensionVersion, waitForExtension, sendApply } from './lib/aliciaBridge'
+import { isFortune500, layoffFlag } from './lib/companyData'
 
 // Industries mirror the backend's INDUSTRY_BOARDS keys (plus "Any"). `name` is sent to /api/jobs as
 // `industry` so the backend can pick company ATS boards; `match` maps onto an Adzuna category label.
@@ -222,10 +223,15 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       else scores = lexicalRank(list, resume)
       const byI = {}
       scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
-      list = list.map((j, idx) => { const s = byI[idx] || {}; return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '' } })
-      list.sort((a, b) => (b._score || 0) - (a._score || 0))
+      list = list.map((j, idx) => {
+        const s = byI[idx] || {}
+        return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '', _f500: isFortune500(j.company), _layoff: layoffFlag(j.company) }
+      })
+      // Fortune 500 first (per preference), then by résumé fit within each group.
+      list.sort((a, b) => ((b._f500 ? 1 : 0) - (a._f500 ? 1 : 0)) || ((b._score || 0) - (a._score || 0)))
       setResults(list)
-      setStatus(`Showing ${list.length} jobs, best fit first${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
+      const f500n = list.filter((j) => j._f500).length
+      setStatus(`Showing ${list.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
     } catch (err) {
       setStatus('Search failed: ' + ((err && err.message) || 'unknown') + '.')
     } finally { setBusy(false) }
@@ -362,10 +368,13 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                   {sal && (sal.listed
                     ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
                     : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>)}
+                  {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
+                  {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
                   {tailored && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 text-green-600 border-green-600" title={`Tailored résumé already saved: ${tailored.name}`}><FileCheck size={11} /> résumé ready</span>}
                 </div>
+                {j._layoff && <div className="text-[11px] text-orange-500 mb-1">⚠ {j.company} — recent layoffs: {j._layoff}</div>}
                 {j._reason && <div className="text-xs italic text-[var(--muted)] mb-1">{j._reason}</div>}
                 {j.description && <div className="text-[13px] text-[var(--muted)] line-clamp-2">{j.description.slice(0, 240)}…</div>}
                 <div className="flex gap-2 mt-2 flex-wrap">

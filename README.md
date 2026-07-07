@@ -117,7 +117,9 @@ browser-extension powers a web page can't have). Three sub-tabs:
   - Optional **discovery** via Brave/Tavily (`BRAVE_KEY` / `TAVILY_KEY`) to find more boards for the
     query, and a keyless **Jina reader** fallback for pages without JSON.
   Results are merged, deduped, filtered by title/location/remote, and **ranked by résumé fit** (AI via
-  `/api/chat`, lexical fallback), best first. Company-board jobs are surfaced ahead of aggregator jobs.
+  `/api/chat`, lexical fallback). **Fortune 500 companies are surfaced first**, then best fit within
+  each group (`src/lib/companyData.js`). Cards flagged **★ Fortune 500** and **⚠ recent layoffs**
+  (curated snapshot in `companyData.js` — extend/prune it; it will go stale).
   - **Extend coverage** by adding `{ ats, slug, name }` rows to `INDUSTRY_BOARDS` — no other change.
 - **Résumés** — upload PDF/DOCX/TXT (parsed locally by `src/lib/resumeParse.js`, zero deps) or paste
   text; keep a bank of résumés and mark one **active** (that's what fit-ranking uses).
