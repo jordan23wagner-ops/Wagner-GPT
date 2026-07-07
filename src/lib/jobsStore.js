@@ -7,7 +7,7 @@
 
 import { supabase, hasSupabase } from './supabase'
 
-const LS = { resumes: 'jobs.resumes', tracked: 'jobs.tracked', profile: 'jobs.profile', updatedAt: 'jobs.updatedAt' }
+const LS = { resumes: 'jobs.resumes', tracked: 'jobs.tracked', profile: 'jobs.profile', memory: 'jobs.memory', updatedAt: 'jobs.updatedAt' }
 
 function readLS(key, fallback) {
   try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v) }
@@ -21,13 +21,17 @@ function writeLS(key, val) {
 export function loadResumes() { return readLS(LS.resumes, []) }
 export function loadTracked() { return readLS(LS.tracked, []) }
 export function loadProfile() { return readLS(LS.profile, {}) }
+// Confirmed extra facts/skills the candidate approved (learned during deep tailoring). Each:
+// { id, text, kind:'skill'|'fact', confirmedAt }. Injected into tailoring prompts; never invented.
+export function loadMemory() { return readLS(LS.memory, []) }
 
 export function saveResumes(arr) { writeLS(LS.resumes, arr || []); touch() }
 export function saveTracked(arr) { writeLS(LS.tracked, arr || []); touch() }
 export function saveProfile(obj) { writeLS(LS.profile, obj || {}); touch() }
+export function saveMemory(arr) { writeLS(LS.memory, arr || []); touch() }
 
 function snapshot() {
-  return { resumes: loadResumes(), tracked: loadTracked(), profile: loadProfile(), updatedAt: readLS(LS.updatedAt, 0) }
+  return { resumes: loadResumes(), tracked: loadTracked(), profile: loadProfile(), memory: loadMemory(), updatedAt: readLS(LS.updatedAt, 0) }
 }
 
 // Bump the local updatedAt and schedule a debounced cloud push.
@@ -46,7 +50,7 @@ export async function syncUp() {
   try {
     const { error } = await supabase.from('job_data').upsert({
       id: 1,
-      data: { resumes: s.resumes, tracked: s.tracked, profile: s.profile },
+      data: { resumes: s.resumes, tracked: s.tracked, profile: s.profile, memory: s.memory },
       updated_at: s.updatedAt || Date.now(),
     })
     return !error
@@ -67,8 +71,9 @@ export async function syncDown() {
       if (Array.isArray(d.resumes)) writeLS(LS.resumes, d.resumes)
       if (Array.isArray(d.tracked)) writeLS(LS.tracked, d.tracked)
       if (d.profile && typeof d.profile === 'object') writeLS(LS.profile, d.profile)
+      if (Array.isArray(d.memory)) writeLS(LS.memory, d.memory)
       writeLS(LS.updatedAt, cloudAt)
-      return { resumes: d.resumes || [], tracked: d.tracked || [], profile: d.profile || {}, updatedAt: cloudAt }
+      return { resumes: d.resumes || [], tracked: d.tracked || [], profile: d.profile || {}, memory: d.memory || [], updatedAt: cloudAt }
     }
     return local
   } catch { return local }

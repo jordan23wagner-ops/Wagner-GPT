@@ -123,10 +123,22 @@ browser-extension powers a web page can't have). Three sub-tabs:
   text; keep a bank of résumés and mark one **active** (that's what fit-ranking uses).
 - **Tracker** — save jobs from Search and track status (saved → applied → interview → offer/rejected)
   with notes.
+- **Memory** — skills/facts Alicia has learned about you. Used when tailoring; she never claims
+  anything that isn't here or in your résumé.
+
+**Prep & Apply (targeted, 1–5 at a time).** Check the jobs you want on the results, then:
+- **Quick tailor & apply** — tailors a résumé to each job from your existing résumés + memory (no
+  invention), scores the fit, and saves each tailored résumé to the bank.
+- **Deep rewrite & apply** — Alicia interviews you once to fill gaps across the batch, asks you to
+  **confirm any new skills into Memory**, rewrites per job, **re-scores, and auto-skips weak fits**
+  (below 50) so effort goes to strong matches.
+- **Apply** hands the batch to the Alicia browser extension (detected via `src/lib/aliciaBridge.js`),
+  which opens each posting and auto-fills — stopping before the final Submit (a human always submits).
+  Without the extension it falls back to opening the postings and marking them "applied" in the Tracker.
 
 Storage is local-first (`src/lib/jobsStore.js`); optional cloud sync activates once you run
 `supabase-jobs-schema.sql`. No new npm dependencies or API keys were added — every provider key is one
-the backend already uses.
+the backend already uses. AI helpers live in `src/lib/jobsAI.js`.
 
 ## Persistence
 

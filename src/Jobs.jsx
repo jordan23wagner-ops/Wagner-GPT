@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
   Search, Loader2, FileText, Trash2, Star, StarOff, Upload, ExternalLink,
-  Plus, Pencil, X, Bookmark, Zap,
+  Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
 } from 'lucide-react'
 import { extractResumeText, fileToStored } from './lib/resumeParse'
 import {
-  loadResumes, saveResumes, loadTracked, saveTracked, activeResume, syncDown,
+  loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory,
+  activeResume, syncDown,
 } from './lib/jobsStore'
+import {
+  aiRank, lexicalRank, quickTailor, matchScore,
+  backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
+} from './lib/jobsAI'
+import { extensionPresent, waitForExtension, sendApply } from './lib/aliciaBridge'
 
-// Industries mirror the backend's INDUSTRY_BOARDS keys (plus "Any"). The `name` is sent to
-// /api/jobs as `industry` so the backend can pick company ATS boards; `category` maps the
-// industry onto an Adzuna category label (resolved live against the category list).
+// Industries mirror the backend's INDUSTRY_BOARDS keys (plus "Any"). `name` is sent to /api/jobs as
+// `industry` so the backend can pick company ATS boards; `match` maps onto an Adzuna category label.
 const INDUSTRIES = [
   { name: 'Any industry', match: null },
   { name: 'Software / IT', match: /it jobs/i },
@@ -21,81 +26,17 @@ const INDUSTRIES = [
   { name: 'Manufacturing', match: /manufacturing/i },
   { name: 'Engineering', match: /engineering/i },
 ]
-
 const COUNTRIES = [
   { v: 'us', label: 'United States' }, { v: 'gb', label: 'United Kingdom' },
   { v: 'ca', label: 'Canada' }, { v: 'au', label: 'Australia' },
 ]
-
-// Known ATS hosts our extension can auto-fill — used to badge "auto-fill ready" cards.
 const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr)\.(com|io|co|net)/i
+const MAX_BATCH = 5          // apply 1–5 at a time (targeted, high-quality)
+const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
 
 const uid = (p) => p + Math.random().toString(36).slice(2, 9)
 
-// ── backend text (NDJSON delta stream, same contract as App.jsx /api/chat) ──
-function stripThinking(t) {
-  if (!t) return t
-  let c = t.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  if (/<\/think>/i.test(c)) c = c.replace(/[\s\S]*<\/think>/i, '')
-  return c.replace(/<\/?think>/gi, '').trim()
-}
-async function backendText(sys, user) {
-  const resp = await fetch('/api/chat', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'system', content: sys }], newMessage: user, model: 'auto' }),
-  })
-  if (!resp.ok || !resp.body) throw new Error('Backend ' + resp.status)
-  const reader = resp.body.getReader(), dec = new TextDecoder()
-  let buf = '', text = ''
-  const handle = (line) => {
-    const ln = line.trim(); if (!ln) return
-    try { const ev = JSON.parse(ln); if (ev.delta) text += ev.delta; else if (ev.error) throw new Error(ev.error) } catch { /* skip */ }
-  }
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += dec.decode(value, { stream: true })
-    let i
-    while ((i = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, i)); buf = buf.slice(i + 1) }
-  }
-  if (buf) handle(buf)
-  return text
-}
-
-// ── résumé-fit ranking (AI, with lexical fallback) — ported from jobsearch.js ──
-function lexicalRank(results, resume) {
-  const rt = (resume || '').toLowerCase()
-  const toks = {}
-  rt.replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).forEach((w) => { if (w.length > 3) toks[w] = 1 })
-  const keys = Object.keys(toks)
-  return results.map((j) => {
-    const hay = ((j.title || '') + ' ' + (j.description || '') + ' ' + (j.category || '')).toLowerCase()
-    let hits = 0
-    keys.forEach((w) => { if (hay.indexOf(w) >= 0) hits++ })
-    const score = keys.length ? Math.min(95, Math.round((hits / Math.min(keys.length, 40)) * 100)) : 50
-    return { i: 0, score, reason: '' }
-  })
-}
-async function aiRank(results, resume) {
-  const sys = 'You are Alicia, a job-fit rater. Given the candidate résumé and a numbered list of jobs, ' +
-    'score each job 0-100 for how well the candidate fits it (skills, seniority, domain), and give a ' +
-    'terse 6-12 word reason. Respond ONLY with a strict JSON array, no prose, no code fences: ' +
-    '[{"i":<job number>,"score":<0-100>,"reason":"<short>"}]'
-  const lines = results.map((j, i) =>
-    (i + 1) + '. ' + (j.title || '') + ' @ ' + (j.company || '') + ' | ' + (j.location || '') +
-    ' | ' + (j.category || '') + ' | ' + (j.description || '').slice(0, 240)).join('\n')
-  const user = 'Résumé:\n' + (resume || '').slice(0, 6000) + '\n\nJobs:\n' + lines
-  const raw = await backendText(sys, user)
-  const clean = stripThinking(raw).replace(/^```json\s*/i, '').replace(/```$/, '').trim()
-  let arr = null
-  try { arr = JSON.parse(clean) } catch { const m = clean.match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]) } catch { /* */ } } }
-  if (!Array.isArray(arr)) throw new Error('bad rank json')
-  return arr
-}
-
-// Parse a definitive salary out of the job description text. Company postings often state the
-// real range ("$120,000–$150,000", "$120k-$150k", "$60/hr") — that's the source of truth, so we
-// prefer it over Adzuna's estimated number. Returns { min, max, period:'year'|'hour' } | null.
+// ── salary: prefer the salary listed in the posting over Adzuna's estimate ──
 function money(tok) {
   const k = /k$/i.test(tok.replace(/\s/g, ''))
   const n = parseFloat(tok.replace(/[\s,$]/g, '').replace(/k$/i, ''))
@@ -105,34 +46,28 @@ function parseListedSalary(text) {
   if (!text) return null
   const t = String(text).slice(0, 2000)
   const amt = '\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s?[kK]?'
-  // Hourly range or single.
   let m = new RegExp(amt + '\\s*(?:-|–|—|to)\\s*' + amt + '\\s*(?:\\/|per\\s+|an?\\s+)?\\s*(?:hour|hr)\\b', 'i').exec(t)
     || new RegExp(amt + '\\s*(?:\\/|per\\s+|an?\\s+)\\s*(?:hour|hr)\\b', 'i').exec(t)
   if (m) {
     const nums = m[0].match(new RegExp(amt, 'g')).map(money).filter((n) => n >= 7 && n <= 500)
     if (nums.length) return { min: nums[0], max: nums[1] ?? null, period: 'hour' }
   }
-  // Annual range of two $ amounts.
   const rangeRe = new RegExp(amt + '\\s*(?:-|–|—|to)\\s*' + amt, 'g')
   let match
   while ((match = rangeRe.exec(t))) {
     const nums = match[0].match(new RegExp(amt, 'g')).map(money)
     if (nums.length >= 2 && nums.every((n) => n >= 20000 && n <= 1000000)) return { min: nums[0], max: nums[1], period: 'year' }
   }
-  // Single annual amount with a year context nearby.
   const single = new RegExp('(' + amt + ')\\s*(?:\\/|per\\s+|a\\s+)?\\s*(?:year|yr|annum|annually)', 'i').exec(t)
     || new RegExp('(?:salary|base|compensation|pay)[^.$]{0,40}?(' + amt + ')', 'i').exec(t)
   if (single) { const n = money(single[1]); if (n >= 20000 && n <= 1000000) return { min: n, max: null, period: 'year' } }
   return null
 }
 function fmtSalary(min, max, period) {
-  const fmt = period === 'hour'
-    ? (n) => '$' + (Math.round(n * 100) / 100)
-    : (n) => '$' + Math.round(n / 1000) + 'k'
+  const fmt = period === 'hour' ? (n) => '$' + (Math.round(n * 100) / 100) : (n) => '$' + Math.round(n / 1000) + 'k'
   const body = min && max ? fmt(min) + '–' + fmt(max) : fmt(min || max)
   return body + (period === 'hour' ? '/hr' : '')
 }
-// Returns { text, listed } — listed:true means pulled verbatim from the posting (source of truth).
 function salaryInfo(j) {
   const listed = parseListedSalary(j.description || '')
   if (listed) return { text: fmtSalary(listed.min, listed.max, listed.period), listed: true }
@@ -146,45 +81,51 @@ function fitColor(score) {
 }
 
 export default function Jobs() {
-  const [view, setView] = useState('search') // search | resumes | tracker
+  const [viewTab, setViewTab] = useState('search') // search | resumes | tracker | memory
   const [resumes, setResumes] = useState(loadResumes)
   const [tracked, setTracked] = useState(loadTracked)
+  const [memory, setMemory] = useState(loadMemory)
+  const [hasExt, setHasExt] = useState(extensionPresent())
 
-  // Pull any cloud snapshot on mount (best-effort; no-ops without the table).
   useEffect(() => {
     let alive = true
     syncDown().then((d) => {
       if (!alive || !d) return
       if (Array.isArray(d.resumes)) setResumes(d.resumes)
       if (Array.isArray(d.tracked)) setTracked(d.tracked)
+      if (Array.isArray(d.memory)) setMemory(d.memory)
     })
+    waitForExtension().then((p) => alive && setHasExt(p))
     return () => { alive = false }
   }, [])
 
-  // Persist on change.
   useEffect(() => { saveResumes(resumes) }, [resumes])
   useEffect(() => { saveTracked(tracked) }, [tracked])
+  useEffect(() => { saveMemory(memory) }, [memory])
 
   const active = activeResume(resumes)
 
-  const addToTracker = (job) => {
+  const addSavedResume = (name, text, tailoredForJob) => {
+    const id = uid('r_')
+    setResumes((prev) => [{ id, name, text, file: null, isActive: false, createdAt: Date.now(), tailoredForJob: tailoredForJob || null }, ...prev])
+    return id
+  }
+  const upsertTracked = (job, patch) => {
     setTracked((prev) => {
-      if (job.url && prev.some((t) => t.url === job.url)) return prev
+      const existing = job.url && prev.find((t) => t.url === job.url)
+      if (existing) return prev.map((t) => (t.id === existing.id ? { ...t, ...patch } : t))
       return [{
-        id: uid('tj_'), title: job.title || 'Untitled role', company: job.company || '',
-        location: job.location || '', url: job.url || '', description: (job.description || '').slice(0, 2000),
-        status: 'saved', notes: '', savedAt: Date.now(),
+        id: uid('tj_'), title: job.title || 'Untitled role', company: job.company || '', location: job.location || '',
+        url: job.url || '', description: (job.description || '').slice(0, 2000), status: 'saved', notes: '', savedAt: Date.now(),
+        ...patch,
       }, ...prev]
     })
   }
 
   const TabBtn = ({ id, label, Icon }) => (
-    <button
-      onClick={() => setView(id)}
+    <button onClick={() => setViewTab(id)}
       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${
-        view === id ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'
-      }`}
-    >
+        viewTab === id ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'}`}>
       <Icon size={15} /> {label}
     </button>
   )
@@ -196,21 +137,27 @@ export default function Jobs() {
           <TabBtn id="search" label="Search" Icon={Search} />
           <TabBtn id="resumes" label={`Résumés${resumes.length ? ` (${resumes.length})` : ''}`} Icon={FileText} />
           <TabBtn id="tracker" label={`Tracker${tracked.length ? ` (${tracked.length})` : ''}`} Icon={Bookmark} />
-          <span className="ml-auto text-xs text-[var(--muted)] truncate max-w-[45%]">
+          <TabBtn id="memory" label={`Memory${memory.length ? ` (${memory.length})` : ''}`} Icon={Brain} />
+          <span className="ml-auto text-xs text-[var(--muted)] truncate max-w-[40%]">
             {active ? `Active résumé: ${active.name}` : 'No active résumé — add one for fit ranking'}
           </span>
         </div>
 
-        {view === 'search' && <SearchView activeResume={active} onSave={addToTracker} trackedUrls={tracked.map((t) => t.url)} />}
-        {view === 'resumes' && <ResumesView resumes={resumes} setResumes={setResumes} onGoSearch={() => setView('search')} />}
-        {view === 'tracker' && <TrackerView tracked={tracked} setTracked={setTracked} />}
+        {viewTab === 'search' && (
+          <SearchView activeResume={active} resumes={resumes} memory={memory} setMemory={setMemory}
+            hasExt={hasExt} addSavedResume={addSavedResume} upsertTracked={upsertTracked}
+            trackedUrls={tracked.map((t) => t.url)} />
+        )}
+        {viewTab === 'resumes' && <ResumesView resumes={resumes} setResumes={setResumes} />}
+        {viewTab === 'tracker' && <TrackerView tracked={tracked} setTracked={setTracked} />}
+        {viewTab === 'memory' && <MemoryView memory={memory} setMemory={setMemory} />}
       </div>
     </div>
   )
 }
 
 // ─────────────────────────── Search ───────────────────────────
-function SearchView({ activeResume, onSave, trackedUrls }) {
+function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSavedResume, upsertTracked, trackedUrls }) {
   const [titles, setTitles] = useState('')
   const [industry, setIndustry] = useState('AI / Machine Learning')
   const [location, setLocation] = useState('')
@@ -224,6 +171,8 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
   const [busy, setBusy] = useState(false)
   const [results, setResults] = useState([])
   const [sources, setSources] = useState(null)
+  const [selected, setSelected] = useState({}) // id -> true
+  const [prep, setPrep] = useState(null)        // { mode, jobs } when the prep modal is open
 
   useEffect(() => {
     fetch('/api/jobs', {
@@ -240,7 +189,7 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
   }
 
   const doSearch = async () => {
-    setBusy(true); setResults([]); setSources(null); setStatus('Searching company boards + aggregators…')
+    setBusy(true); setResults([]); setSources(null); setSelected({}); setStatus('Searching company boards + aggregators…')
     try {
       const resp = await fetch('/api/jobs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -250,16 +199,15 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
         }),
       })
       const d = await resp.json()
-      if (d && d.error) { setStatus(d.error); setResults([]); return }
+      if (d && d.error) { setStatus(d.error); return }
       let list = (d && d.results) || []
       setSources(d && d.sources)
       if (!list.length) { setStatus('No jobs found — try broader titles, fewer filters, or a different industry.'); return }
       const resume = (activeResume && activeResume.text) || ''
       setStatus(`Found ${list.length} — ranking by fit…`)
       let scores
-      if (aiFit && resume) {
-        try { scores = await aiRank(list, resume) } catch { scores = lexicalRank(list, resume) }
-      } else { scores = lexicalRank(list, resume) }
+      if (aiFit && resume) { try { scores = await aiRank(list, resume) } catch { scores = lexicalRank(list, resume) } }
+      else scores = lexicalRank(list, resume)
       const byI = {}
       scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
       list = list.map((j, idx) => { const s = byI[idx] || {}; return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '' } })
@@ -269,6 +217,18 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
     } catch (err) {
       setStatus('Search failed: ' + ((err && err.message) || 'unknown') + '.')
     } finally { setBusy(false) }
+  }
+
+  const selectedJobs = results.filter((j) => selected[j.id])
+  const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
+  const selectTop = (n) => { const s = {}; results.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
+  const clearSel = () => setSelected({})
+
+  const startPrep = (mode) => {
+    let jobs = selectedJobs
+    if (!jobs.length) { setStatus('Select one or more jobs first (checkbox on each card).'); return }
+    if (jobs.length > MAX_BATCH) { jobs = jobs.slice(0, MAX_BATCH); setStatus(`Batch capped at ${MAX_BATCH} — prepping your top ${MAX_BATCH} by fit.`) }
+    setPrep({ mode, jobs })
   }
 
   const field = 'w-full bg-[var(--input-bg)] text-[var(--text)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--accent)]'
@@ -282,23 +242,19 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
           <input className={field} value={titles} onChange={(e) => setTitles(e.target.value)}
             placeholder="Project Manager, Program Manager" onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
         </div>
-        <div>
-          <label className={lbl}>Industry</label>
+        <div><label className={lbl}>Industry</label>
           <select className={field} value={industry} onChange={(e) => setIndustry(e.target.value)}>
             {INDUSTRIES.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
           </select>
         </div>
-        <div>
-          <label className={lbl}>Location</label>
+        <div><label className={lbl}>Location</label>
           <input className={field} value={location} onChange={(e) => setLocation(e.target.value)}
             placeholder="City, state, or ZIP (blank = anywhere)" onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
         </div>
-        <div>
-          <label className={lbl}>Minimum salary (USD/yr)</label>
+        <div><label className={lbl}>Minimum salary (USD/yr)</label>
           <input className={field} type="number" value={salaryMin} onChange={(e) => setSalaryMin(e.target.value)} placeholder="e.g. 90000" />
         </div>
-        <div>
-          <label className={lbl}>Country</label>
+        <div><label className={lbl}>Country</label>
           <select className={field} value={country} onChange={(e) => setCountry(e.target.value)}>
             {COUNTRIES.map((c) => <option key={c.v} value={c.v}>{c.label}</option>)}
           </select>
@@ -322,57 +278,281 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
         </div>
       )}
 
+      {/* Batch action bar */}
+      {results.length > 0 && (
+        <div className="sticky top-0 z-10 flex items-center gap-2 flex-wrap rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+          <span className="text-sm font-medium">{selectedJobs.length} selected</span>
+          <button onClick={() => selectTop(MAX_BATCH)} className="text-xs px-2 py-1 rounded-lg bg-[var(--surface-2)]">Select top {MAX_BATCH}</button>
+          {selectedJobs.length > 0 && <button onClick={clearSel} className="text-xs px-2 py-1 rounded-lg bg-[var(--surface-2)]">Clear</button>}
+          <div className="ml-auto flex gap-2">
+            <button onClick={() => startPrep('quick')} disabled={!selectedJobs.length}
+              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] disabled:opacity-40" title="Tailor from your existing résumés, then apply">
+              <Sparkles size={14} /> Quick tailor & apply
+            </button>
+            <button onClick={() => startPrep('deep')} disabled={!selectedJobs.length}
+              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] disabled:opacity-40" title="AI interviews you to fill gaps, rewrites, rescores, drops weak fits">
+              <Wand2 size={14} /> Deep rewrite & apply
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-3">
         {results.map((j) => {
           const atsReady = ATS_HOST_RE.test((j.url || '').replace(/^https?:\/\//, ''))
           const scoreShown = typeof j._score === 'number'
           const saved = trackedUrls.includes(j.url)
+          const sal = salaryInfo(j)
           return (
-            <div key={j.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 flex gap-3">
-              <div className="w-12 h-12 shrink-0 rounded-lg flex items-center justify-center font-bold text-white text-sm"
-                style={{ background: scoreShown ? fitColor(j._score) : 'var(--surface-2)' }}>
-                {scoreShown ? j._score : '—'}
-              </div>
+            <div key={j.id} className={`rounded-xl border bg-[var(--surface)] p-4 flex gap-3 ${selected[j.id] ? 'border-[var(--accent)]' : 'border-[var(--border)]'}`}>
+              <input type="checkbox" checked={!!selected[j.id]} onChange={() => toggle(j.id)} className="mt-1.5 shrink-0" title="Select for tailor & apply" />
+              <div className="w-11 h-11 shrink-0 rounded-lg flex items-center justify-center font-bold text-white text-sm"
+                style={{ background: scoreShown ? fitColor(j._score) : 'var(--surface-2)' }}>{scoreShown ? j._score : '—'}</div>
               <div className="min-w-0 flex-1">
                 <h3 className="font-semibold text-[15px] leading-snug">{j.title}</h3>
-                <div className="text-[13px] text-[var(--muted)] mb-1.5">
-                  {j.company || 'Company undisclosed'}{j.location ? ' · ' + j.location : ''}
-                </div>
+                <div className="text-[13px] text-[var(--muted)] mb-1.5">{j.company || 'Company undisclosed'}{j.location ? ' · ' + j.location : ''}</div>
                 <div className="flex gap-1.5 flex-wrap mb-1.5">
-                  {(() => {
-                    const sal = salaryInfo(j)
-                    if (!sal) return null
-                    return sal.listed
-                      ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
-                      : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>
-                  })()}
+                  {sal && (sal.listed
+                    ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
+                    : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>)}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
-                  {j.contractTime && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{String(j.contractTime).replace('_', '-')}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
                 </div>
                 {j._reason && <div className="text-xs italic text-[var(--muted)] mb-1">{j._reason}</div>}
                 {j.description && <div className="text-[13px] text-[var(--muted)] line-clamp-2">{j.description.slice(0, 240)}…</div>}
                 <div className="flex gap-2 mt-2">
-                  <a href={j.url} target="_blank" rel="noopener noreferrer"
-                    className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80">
-                    <ExternalLink size={13} /> View posting
-                  </a>
-                  <button onClick={() => onSave(j)} disabled={saved}
-                    className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50">
-                    <Bookmark size={13} /> {saved ? 'Saved' : 'Save to tracker'}
-                  </button>
+                  <a href={j.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80"><ExternalLink size={13} /> View posting</a>
+                  <button onClick={() => upsertTracked(j, {})} disabled={saved} className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50"><Bookmark size={13} /> {saved ? 'Saved' : 'Save to tracker'}</button>
                 </div>
               </div>
             </div>
           )
         })}
       </div>
+
+      {prep && (
+        <PrepFlow mode={prep.mode} jobs={prep.jobs} resumes={resumes} activeResume={activeResume}
+          memory={memory} setMemory={setMemory} hasExt={hasExt}
+          addSavedResume={addSavedResume} upsertTracked={upsertTracked}
+          onClose={() => setPrep(null)} />
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────── Prep & Apply flow ───────────────────────────
+function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt, addSavedResume, upsertTracked, onClose }) {
+  // phases: deep → 'qa' → 'confirm' → 'process' → 'review'; quick → 'process' → 'review'
+  const [phase, setPhase] = useState(mode === 'deep' ? 'qa' : 'process')
+  const [history, setHistory] = useState([])   // deep Q&A transcript
+  const [input, setInput] = useState('')
+  const [thinking, setThinking] = useState(false)
+  const [facts, setFacts] = useState([])       // extracted candidate facts (deep)
+  const [factSel, setFactSel] = useState({})
+  const [progress, setProgress] = useState([]) // per-job: { job, state, score, tailoredText, resumeId, decision }
+  const [applyMsg, setApplyMsg] = useState('')
+  const started = useRef(false)
+  const base = (activeResume && activeResume.text) || (resumes[0] && resumes[0].text) || ''
+  const others = resumes.filter((r) => !activeResume || r.id !== activeResume.id).map((r) => r.text)
+
+  // Kick off deep Q&A.
+  useEffect(() => {
+    if (mode !== 'deep' || started.current) return
+    started.current = true
+    const h = [{ role: 'system', content: deepSystemPrompt() }, { role: 'user', content: deepIntro(base, jobs) }]
+    setThinking(true)
+    backendChat(h).then((raw) => {
+      const t = stripThinking(raw)
+      setHistory([...h, { role: 'assistant', content: t }])
+    }).catch(() => setHistory([...h, { role: 'assistant', content: 'Let\'s start — what tools or skills have you used that the target roles ask for but your résumé doesn\'t clearly show?' }]))
+      .finally(() => setThinking(false))
+  }, []) // eslint-disable-line
+
+  const sendAnswer = async () => {
+    const text = input.trim()
+    if (!text || thinking) return
+    const h = [...history, { role: 'user', content: text }]
+    setHistory(h); setInput(''); setThinking(true)
+    try {
+      const raw = await backendChat(h)
+      const t = stripThinking(raw)
+      if (/\[\[DONE\]\]/.test(t)) { await finishQA(h) }
+      else setHistory([...h, { role: 'assistant', content: t }])
+    } catch { setHistory([...h, { role: 'assistant', content: '(hmm, connection hiccup — say "done" to continue)' }]) }
+    finally { setThinking(false) }
+  }
+
+  const finishQA = async (h) => {
+    setThinking(true)
+    try {
+      const extracted = await extractConfirmedFacts(h)
+      const fresh = extracted.filter((f) => !memory.some((m) => m.text.toLowerCase() === f.toLowerCase()))
+      if (fresh.length) {
+        setFacts(fresh); setFactSel(Object.fromEntries(fresh.map((f) => [f, true]))); setPhase('confirm')
+      } else { setPhase('process') }
+    } catch { setPhase('process') } finally { setThinking(false) }
+  }
+
+  const confirmFacts = () => {
+    const chosen = facts.filter((f) => factSel[f]).map((f) => ({ id: uid('m_'), text: f, kind: 'skill', confirmedAt: Date.now() }))
+    if (chosen.length) setMemory((prev) => [...chosen, ...prev])
+    setPhase('process')
+  }
+
+  // Run tailor + rescore per job once we hit 'process'.
+  useEffect(() => {
+    if (phase !== 'process') return
+    let cancelled = false
+    ;(async () => {
+      const mem = mode === 'deep'
+        ? [...facts.filter((f) => factSel[f]).map((f) => ({ text: f })), ...memory]
+        : memory
+      const rows = jobs.map((j) => ({ job: j, state: 'pending', score: null, tailoredText: '', resumeId: null, decision: null }))
+      setProgress(rows.map((r) => ({ ...r })))
+      for (let i = 0; i < jobs.length; i++) {
+        if (cancelled) return
+        const job = jobs[i]
+        const set = (patch) => setProgress((p) => p.map((r, k) => (k === i ? { ...r, ...patch } : r)))
+        set({ state: 'tailoring' })
+        let tailoredText = ''
+        try { tailoredText = await quickTailor(job, { activeText: base, otherTexts: others, memory: mem }) }
+        catch { set({ state: 'error', decision: 'skipped' }); continue }
+        set({ state: 'scoring', tailoredText })
+        let score = 60
+        try { score = (await matchScore(tailoredText, job)).score } catch { /* keep default */ }
+        const name = `Tailored — ${job.company || 'Company'} · ${job.title || 'Role'}`.slice(0, 80)
+        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company })
+        // Auto-skip weak fits only for deep rewrite (per the chosen behavior).
+        const decision = (mode === 'deep' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
+        set({ state: 'done', score, resumeId, decision })
+      }
+      if (!cancelled) setPhase('review')
+    })()
+    return () => { cancelled = true }
+  }, [phase]) // eslint-disable-line
+
+  // Review-phase local selection (which ready jobs to actually apply to).
+  const [applySel, setApplySel] = useState({})
+  useEffect(() => {
+    if (phase !== 'review') return
+    setApplySel(Object.fromEntries(progress.filter((r) => r.decision === 'ready').map((r) => [r.job.id, true])))
+  }, [phase]) // eslint-disable-line
+
+  const doApply = async () => {
+    const chosen = progress.filter((r) => applySel[r.job.id] && r.decision !== 'error')
+    if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
+    const payloadJobs = chosen.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
+    setApplyMsg('Handing off to the Alicia extension…')
+    let ok = false
+    if (hasExt) ok = await sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
+    chosen.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
+    if (ok) setApplyMsg(`Applying to ${chosen.length} — the extension is opening each posting and auto-filling. Click Submit on each.`)
+    else {
+      // Fallback: open postings so the user can apply manually (extension not detected).
+      chosen.forEach((r) => { if (r.job.url) window.open(r.job.url, '_blank', 'noopener') })
+      setApplyMsg(`Opened ${chosen.length} posting(s) in new tabs. Install the Alicia extension for hands-off auto-fill; tracked as "applied".`)
+    }
+  }
+
+  const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-2xl max-h-[88vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-3 border-b border-[var(--border)]">
+          <div className="font-semibold text-sm flex items-center gap-2">
+            {mode === 'deep' ? <Wand2 size={16} /> : <Sparkles size={16} />}
+            {mode === 'deep' ? 'Deep rewrite & apply' : 'Quick tailor & apply'} · {jobs.length} job{jobs.length > 1 ? 's' : ''}
+          </div>
+          <button onClick={onClose} className="text-[var(--muted)]"><X size={18} /></button>
+        </div>
+
+        <div className="p-4 overflow-auto flex-1 space-y-3">
+          {/* DEEP: Q&A */}
+          {phase === 'qa' && (
+            <>
+              <p className="text-xs text-[var(--muted)]">Alicia is finding gaps across your {jobs.length} selected jobs. Answer honestly — it only adds what you confirm.</p>
+              <div className="rounded-lg bg-[var(--surface-2)] p-3 text-sm whitespace-pre-wrap min-h-[60px]">{thinking && !lastAssistant ? 'Thinking…' : (lastAssistant ? lastAssistant.content : '')}</div>
+              <div className="flex gap-2">
+                <input className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm"
+                  placeholder='Your answer… (or type "done")' value={input} disabled={thinking}
+                  onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && sendAnswer()} />
+                <button onClick={sendAnswer} disabled={thinking} className="px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm disabled:opacity-50">
+                  {thinking ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+                </button>
+              </div>
+              <button onClick={() => finishQA(history)} disabled={thinking} className="text-xs text-[var(--muted)] underline">Skip questions & generate now</button>
+            </>
+          )}
+
+          {/* DEEP: confirm learned skills into memory */}
+          {phase === 'confirm' && (
+            <>
+              <p className="text-sm font-medium">Add these to your memory?</p>
+              <p className="text-xs text-[var(--muted)]">You mentioned things not clearly on your résumé. Confirm the true ones — Alicia will use them when tailoring now and in the future, and never invent beyond them.</p>
+              <div className="space-y-1.5">
+                {facts.map((f) => (
+                  <label key={f} className="flex items-center gap-2 text-sm rounded-lg bg-[var(--surface-2)] px-3 py-2 cursor-pointer">
+                    <input type="checkbox" checked={!!factSel[f]} onChange={() => setFactSel((s) => ({ ...s, [f]: !s[f] }))} /> {f}
+                  </label>
+                ))}
+              </div>
+              <button onClick={confirmFacts} className="mt-1 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold">Confirm & continue</button>
+            </>
+          )}
+
+          {/* Processing + review share the per-job list */}
+          {(phase === 'process' || phase === 'review') && (
+            <div className="space-y-2">
+              {progress.map((r) => (
+                <div key={r.job.id} className="rounded-lg border border-[var(--border)] p-3">
+                  <div className="flex items-center gap-2">
+                    {phase === 'review' && r.decision !== 'error' && (
+                      <input type="checkbox" checked={!!applySel[r.job.id]} onChange={() => setApplySel((s) => ({ ...s, [r.job.id]: !s[r.job.id] }))}
+                        disabled={r.decision === 'skipped' && false} />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium truncate">{r.job.title} <span className="text-[var(--muted)] font-normal">· {r.job.company}</span></div>
+                      <div className="text-xs text-[var(--muted)]">
+                        {r.state === 'tailoring' && '✍️ tailoring résumé…'}
+                        {r.state === 'scoring' && '📊 scoring fit…'}
+                        {r.state === 'error' && '⚠️ tailoring failed — skipped'}
+                        {r.state === 'done' && (
+                          <>Fit {r.score} · {r.decision === 'skipped'
+                            ? <span className="text-red-500">below {APPLY_THRESHOLD} — auto-skipped</span>
+                            : <span className="text-green-600">ready</span>} · tailored résumé saved</>
+                        )}
+                      </div>
+                    </div>
+                    {(r.state === 'tailoring' || r.state === 'scoring') && <Loader2 size={15} className="animate-spin text-[var(--muted)]" />}
+                    {r.state === 'done' && (r.decision === 'ready' ? <CheckCircle2 size={16} className="text-green-600" /> : <XCircle size={16} className="text-red-500" />)}
+                  </div>
+                </div>
+              ))}
+              {phase === 'process' && <p className="text-xs text-[var(--muted)]">Tailoring and scoring your batch…</p>}
+            </div>
+          )}
+        </div>
+
+        {phase === 'review' && (
+          <div className="p-3 border-t border-[var(--border)] space-y-2">
+            {!hasExt && <div className="text-xs text-[var(--muted)]">Alicia extension not detected — Apply will open the postings in new tabs for manual filling. Install/enable it for hands-off auto-fill.</div>}
+            {applyMsg && <div className="text-xs text-[var(--text)]">{applyMsg}</div>}
+            <div className="flex gap-2">
+              <button onClick={doApply} className="flex-1 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold flex items-center justify-center gap-1.5">
+                <Zap size={15} /> Apply to {progress.filter((r) => applySel[r.job.id]).length} {hasExt ? 'via extension' : '(open tabs)'}
+              </button>
+              <button onClick={onClose} className="px-3 py-2 rounded-lg bg-[var(--surface-2)] text-sm">Done</button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
 // ─────────────────────────── Résumés ───────────────────────────
-function ResumesView({ resumes, setResumes, onGoSearch }) {
+function ResumesView({ resumes, setResumes }) {
   const [status, setStatus] = useState('')
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
@@ -386,7 +566,6 @@ function ResumesView({ resumes, setResumes, onGoSearch }) {
       return [{ id: uid('r_'), name: name || 'Résumé', text, file: file || null, isActive: true, createdAt: Date.now() }, ...cleared]
     })
   }
-
   const onFile = async (e) => {
     const file = e.target.files && e.target.files[0]
     e.target.value = ''
@@ -394,20 +573,18 @@ function ResumesView({ resumes, setResumes, onGoSearch }) {
     setStatus('Reading ' + file.name + '…')
     try {
       const text = await extractResumeText(file)
-      if (!text || text.length < 40) { setStatus('Could not extract text from this file. Try a .docx, .pdf, or paste the text.'); return }
+      if (!text || text.length < 40) { setStatus('Could not extract text. Try a .docx, .pdf, or paste the text.'); return }
       const stored = await fileToStored(file).catch(() => null)
       addResume(file.name.replace(/\.(pdf|docx|txt)$/i, ''), text, stored)
       setStatus('Added ' + file.name + (stored ? '' : ' (text only — file too large to attach)') + '.')
     } catch (err) { setStatus(err.message || 'Could not read that file.') }
   }
-
   const savePaste = () => {
     const t = pasteText.trim()
     if (t.length < 40) { setStatus('Please paste at least a few lines of résumé text.'); return }
     addResume(pasteName.trim() || 'Pasted résumé', t, null)
     setPasteOpen(false); setPasteText(''); setPasteName(''); setStatus('Résumé saved.')
   }
-
   const setActive = (id) => setResumes((prev) => prev.map((r) => ({ ...r, isActive: r.id === id })))
   const del = (id) => setResumes((prev) => prev.filter((r) => r.id !== id))
   const rename = (id) => {
@@ -415,38 +592,29 @@ function ResumesView({ resumes, setResumes, onGoSearch }) {
     const name = window.prompt('Rename résumé', cur ? cur.name : '')
     if (name != null) setResumes((prev) => prev.map((r) => (r.id === id ? { ...r, name: name.trim() || r.name } : r)))
   }
+  const download = (r) => {
+    const blob = new Blob([r.text || ''], { type: 'text/plain' })
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
+    a.download = (r.name || 'resume').replace(/[^\w.-]+/g, '_') + '.txt'; a.click(); URL.revokeObjectURL(a.href)
+  }
 
   return (
     <div className="space-y-3">
       <div className="flex gap-2 flex-wrap">
-        <button onClick={() => fileRef.current && fileRef.current.click()}
-          className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] font-semibold px-3 py-2 rounded-lg text-sm hover:bg-[var(--accent-hover)]">
-          <Upload size={15} /> Upload PDF / DOCX / TXT
-        </button>
-        <button onClick={() => setPasteOpen((o) => !o)}
-          className="flex items-center gap-1.5 bg-[var(--surface-2)] text-[var(--text)] px-3 py-2 rounded-lg text-sm">
-          <Plus size={15} /> Paste text
-        </button>
+        <button onClick={() => fileRef.current && fileRef.current.click()} className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] font-semibold px-3 py-2 rounded-lg text-sm hover:bg-[var(--accent-hover)]"><Upload size={15} /> Upload PDF / DOCX / TXT</button>
+        <button onClick={() => setPasteOpen((o) => !o)} className="flex items-center gap-1.5 bg-[var(--surface-2)] text-[var(--text)] px-3 py-2 rounded-lg text-sm"><Plus size={15} /> Paste text</button>
         <input ref={fileRef} type="file" accept=".pdf,.docx,.txt" onChange={onFile} className="hidden" />
       </div>
-
       {pasteOpen && (
         <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 space-y-2">
           <input className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm" placeholder="Name (e.g. Base résumé)" value={pasteName} onChange={(e) => setPasteName(e.target.value)} />
           <textarea className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm h-40 font-mono" placeholder="Paste your résumé text here…" value={pasteText} onChange={(e) => setPasteText(e.target.value)} />
-          <div className="flex gap-2">
-            <button onClick={savePaste} className="bg-[var(--accent)] text-[var(--accent-text)] px-3 py-1.5 rounded-lg text-sm font-semibold">Save</button>
-            <button onClick={() => setPasteOpen(false)} className="bg-[var(--surface-2)] px-3 py-1.5 rounded-lg text-sm">Cancel</button>
-          </div>
+          <div className="flex gap-2"><button onClick={savePaste} className="bg-[var(--accent)] text-[var(--accent-text)] px-3 py-1.5 rounded-lg text-sm font-semibold">Save</button><button onClick={() => setPasteOpen(false)} className="bg-[var(--surface-2)] px-3 py-1.5 rounded-lg text-sm">Cancel</button></div>
         </div>
       )}
-
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
-
       {resumes.length === 0 ? (
-        <div className="text-center text-[var(--muted)] py-10 text-sm">
-          No résumés yet. Upload or paste one — it powers the fit ranking in Search.
-        </div>
+        <div className="text-center text-[var(--muted)] py-10 text-sm">No résumés yet. Upload or paste one — it powers the fit ranking and tailoring.</div>
       ) : (
         <div className="space-y-2">
           {resumes.map((r) => (
@@ -455,26 +623,52 @@ function ResumesView({ resumes, setResumes, onGoSearch }) {
                 {r.isActive ? <Star size={18} className="text-[var(--accent)] fill-[var(--accent)]" /> : <StarOff size={18} className="text-[var(--muted)]" />}
               </button>
               <div className="min-w-0 flex-1">
-                <div className="font-medium text-sm truncate">{r.name}{r.tailoredForJob ? ` — ${r.tailoredForJob.company || ''}` : ''}</div>
-                <div className="text-xs text-[var(--muted)]">{r.file ? 'file + text' : 'text'} · {(r.text || '').length.toLocaleString()} chars{r.isActive ? ' · active' : ''}</div>
+                <div className="font-medium text-sm truncate">{r.name}</div>
+                <div className="text-xs text-[var(--muted)]">{r.tailoredForJob ? 'tailored' : (r.file ? 'file + text' : 'text')} · {(r.text || '').length.toLocaleString()} chars{r.isActive ? ' · active' : ''}</div>
               </div>
               <button onClick={() => setViewing(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="View"><FileText size={16} /></button>
+              <button onClick={() => download(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Download .txt"><Upload size={16} className="rotate-180" /></button>
               <button onClick={() => rename(r.id)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Rename"><Pencil size={16} /></button>
               <button onClick={() => del(r.id)} className="text-red-500 hover:opacity-80" title="Delete"><Trash2 size={16} /></button>
             </div>
           ))}
         </div>
       )}
-
       {viewing && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setViewing(null)}>
           <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-3 border-b border-[var(--border)]">
-              <div className="font-semibold text-sm truncate">{viewing.name}</div>
-              <button onClick={() => setViewing(null)} className="text-[var(--muted)]"><X size={18} /></button>
-            </div>
+            <div className="flex items-center justify-between p-3 border-b border-[var(--border)]"><div className="font-semibold text-sm truncate">{viewing.name}</div><button onClick={() => setViewing(null)} className="text-[var(--muted)]"><X size={18} /></button></div>
             <pre className="p-4 overflow-auto text-xs whitespace-pre-wrap font-mono text-[var(--text)]">{viewing.text}</pre>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────── Memory ───────────────────────────
+function MemoryView({ memory, setMemory }) {
+  const [text, setText] = useState('')
+  const add = () => { const t = text.trim(); if (!t) return; setMemory((p) => [{ id: uid('m_'), text: t, kind: 'skill', confirmedAt: Date.now() }, ...p]); setText('') }
+  const del = (id) => setMemory((p) => p.filter((m) => m.id !== id))
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-[var(--muted)]">Skills and facts Alicia has learned about you. These are used when tailoring — she'll never claim anything that isn't here or in your résumé. Add your own, or confirm them during a Deep rewrite.</p>
+      <div className="flex gap-2">
+        <input className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm" placeholder="e.g. Led a 5-person team; AWS certified" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <button onClick={add} className="px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold">Add</button>
+      </div>
+      {memory.length === 0 ? (
+        <div className="text-center text-[var(--muted)] py-10 text-sm">Nothing learned yet. Do a Deep rewrite and confirm the skills you mention, or add them here.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {memory.map((m) => (
+            <div key={m.id} className="flex items-center gap-2 rounded-lg bg-[var(--surface)] border border-[var(--border)] px-3 py-2 text-sm">
+              <Brain size={14} className="text-[var(--muted)] shrink-0" />
+              <span className="flex-1">{m.text}</span>
+              <button onClick={() => del(m.id)} className="text-red-500 hover:opacity-80"><Trash2 size={14} /></button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -487,33 +681,20 @@ function TrackerView({ tracked, setTracked }) {
   const setStatus = (id, status) => setTracked((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)))
   const setNotes = (id, notes) => setTracked((prev) => prev.map((t) => (t.id === id ? { ...t, notes } : t)))
   const del = (id) => setTracked((prev) => prev.filter((t) => t.id !== id))
-
   const counts = STATUSES.reduce((acc, s) => { acc[s] = tracked.filter((t) => t.status === s).length; return acc }, {})
-
-  if (!tracked.length) {
-    return <div className="text-center text-[var(--muted)] py-10 text-sm">No tracked applications yet. Save jobs from Search to track them here.</div>
-  }
+  if (!tracked.length) return <div className="text-center text-[var(--muted)] py-10 text-sm">No tracked applications yet. Save jobs from Search to track them here.</div>
   return (
     <div className="space-y-3">
-      <div className="flex gap-2 flex-wrap text-xs text-[var(--muted)]">
-        {STATUSES.map((s) => <span key={s} className="px-2 py-1 rounded-lg bg-[var(--surface-2)]">{s}: {counts[s]}</span>)}
-      </div>
+      <div className="flex gap-2 flex-wrap text-xs text-[var(--muted)]">{STATUSES.map((s) => <span key={s} className="px-2 py-1 rounded-lg bg-[var(--surface-2)]">{s}: {counts[s]}</span>)}</div>
       {tracked.map((t) => (
         <div key={t.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
           <div className="flex items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="font-medium text-sm">{t.title}</div>
-              <div className="text-xs text-[var(--muted)]">{t.company}{t.location ? ' · ' + t.location : ''}</div>
-            </div>
-            <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)}
-              className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs">
-              {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+            <div className="min-w-0 flex-1"><div className="font-medium text-sm">{t.title}</div><div className="text-xs text-[var(--muted)]">{t.company}{t.location ? ' · ' + t.location : ''}</div></div>
+            <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)} className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs">{STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
             {t.url && <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-[var(--muted)] hover:text-[var(--text)] mt-1"><ExternalLink size={15} /></a>}
             <button onClick={() => del(t.id)} className="text-red-500 hover:opacity-80 mt-1"><Trash2 size={15} /></button>
           </div>
-          <input className="mt-2 w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs"
-            placeholder="Notes…" value={t.notes || ''} onChange={(e) => setNotes(t.id, e.target.value)} />
+          <input className="mt-2 w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs" placeholder="Notes…" value={t.notes || ''} onChange={(e) => setNotes(t.id, e.target.value)} />
         </div>
       ))}
     </div>
