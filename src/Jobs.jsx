@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
-  Search, Loader2, FileText, Trash2, Star, StarOff, Upload, ExternalLink,
+  Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
 } from 'lucide-react'
 import { extractResumeText, fileToStored } from './lib/resumeParse'
@@ -35,6 +35,17 @@ const MAX_BATCH = 5          // apply 1–5 at a time (targeted, high-quality)
 const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
 
 const uid = (p) => p + Math.random().toString(36).slice(2, 9)
+
+// Match a job to an already-saved tailored résumé (by posting URL, else company|title) so we don't
+// create duplicates and can show a "résumé ready" badge + one-click apply.
+function jobKey(company, title) { return ((company || '') + '|' + (title || '')).toLowerCase().replace(/\s+/g, ' ').trim() }
+function findTailored(resumes, job) {
+  if (!job) return null
+  return resumes.find((r) => r.tailoredForJob && (
+    (r.tailoredForJob.url && job.url && r.tailoredForJob.url === job.url) ||
+    jobKey(r.tailoredForJob.company, r.tailoredForJob.title) === jobKey(job.company, job.title)
+  )) || null
+}
 
 // ── salary: prefer the salary listed in the posting over Adzuna's estimate ──
 function money(tok) {
@@ -219,6 +230,21 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
     } finally { setBusy(false) }
   }
 
+  const [applyingId, setApplyingId] = useState(null)
+  // Direct apply for one job (no tailoring): use its existing tailored résumé if present, else the
+  // active résumé. Hands off to the extension (or opens the posting), and tracks it as applied.
+  const applyOne = async (job) => {
+    const tr = findTailored(resumes, job)
+    const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
+    setApplyingId(job.id)
+    let ok = false
+    try { if (hasExt) ok = await sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) }) } catch { /* */ }
+    upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
+    if (!ok && job.url) window.open(job.url, '_blank', 'noopener')
+    setApplyingId(null)
+    setStatus(ok ? `Applying to ${job.title} — the extension is opening the posting and auto-filling.` : `Opened ${job.title}; marked applied${tr ? ' (tailored résumé)' : ''}.`)
+  }
+
   const selectedJobs = results.filter((j) => selected[j.id])
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
   const selectTop = (n) => { const s = {}; results.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
@@ -303,6 +329,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
           const scoreShown = typeof j._score === 'number'
           const saved = trackedUrls.includes(j.url)
           const sal = salaryInfo(j)
+          const tailored = findTailored(resumes, j)
           return (
             <div key={j.id} className={`rounded-xl border bg-[var(--surface)] p-4 flex gap-3 ${selected[j.id] ? 'border-[var(--accent)]' : 'border-[var(--border)]'}`}>
               <input type="checkbox" checked={!!selected[j.id]} onChange={() => toggle(j.id)} className="mt-1.5 shrink-0" title="Select for tailor & apply" />
@@ -317,10 +344,16 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, addSaved
                     : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>)}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
+                  {tailored && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 text-green-600 border-green-600" title={`Tailored résumé already saved: ${tailored.name}`}><FileCheck size={11} /> résumé ready</span>}
                 </div>
                 {j._reason && <div className="text-xs italic text-[var(--muted)] mb-1">{j._reason}</div>}
                 {j.description && <div className="text-[13px] text-[var(--muted)] line-clamp-2">{j.description.slice(0, 240)}…</div>}
-                <div className="flex gap-2 mt-2">
+                <div className="flex gap-2 mt-2 flex-wrap">
+                  <button onClick={() => applyOne(j)} disabled={applyingId === j.id}
+                    className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] font-semibold hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                    title={tailored ? 'Apply with the tailored résumé already saved for this job' : 'Apply with your active résumé (no edits)'}>
+                    {applyingId === j.id ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Apply
+                  </button>
                   <a href={j.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80"><ExternalLink size={13} /> View posting</a>
                   <button onClick={() => upsertTracked(j, {})} disabled={saved} className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80 disabled:opacity-50"><Bookmark size={13} /> {saved ? 'Saved' : 'Save to tracker'}</button>
                 </div>
@@ -413,6 +446,14 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       await Promise.all(jobs.map(async (job, i) => {
         if (cancelled) return
         const set = (patch) => setProgress((p) => p.map((r, k) => (k === i ? { ...r, ...patch } : r)))
+        // Reuse an existing tailored résumé for this job (quick mode) instead of doubling up.
+        const existing = mode === 'quick' ? findTailored(resumes, job) : null
+        if (existing) {
+          let score = job._score || 70
+          try { score = (await matchScore(existing.text, job)).score } catch { /* */ }
+          set({ state: 'done', score, tailoredText: existing.text, resumeId: existing.id, decision: 'ready', reused: true })
+          return
+        }
         set({ state: 'tailoring' })
         let tailoredText = ''
         try { tailoredText = await quickTailor(job, { activeText: base, otherTexts: others, memory: mem }) }
@@ -422,7 +463,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         let score = 60
         try { score = (await matchScore(tailoredText, job)).score } catch { /* keep default */ }
         const name = `Tailored — ${job.company || 'Company'} · ${job.title || 'Role'}`.slice(0, 80)
-        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company })
+        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company, url: job.url })
         // Auto-skip weak fits only for deep rewrite (per the chosen behavior).
         const decision = (mode === 'deep' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
         set({ state: 'done', score, resumeId, decision })
@@ -521,7 +562,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
                         {r.state === 'done' && (
                           <>Fit {r.score} · {r.decision === 'skipped'
                             ? <span className="text-red-500">below {APPLY_THRESHOLD} — auto-skipped</span>
-                            : <span className="text-green-600">ready</span>} · tailored résumé saved</>
+                            : <span className="text-green-600">ready</span>} · {r.reused ? 'reused saved résumé' : 'tailored résumé saved'}</>
                         )}
                       </div>
                     </div>
