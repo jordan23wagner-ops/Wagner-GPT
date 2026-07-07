@@ -124,44 +124,59 @@ function slugName(slug) {
 // publishers) so "Apply" lands on the real posting, not an aggregator. Needs a free RapidAPI key.
 const JSEARCH_KEY = process.env.JSEARCH_KEY || process.env.RAPIDAPI_KEY || process.env.JSEARCH || process.env.RAPID_API_KEY
 const DIRECT_PUBLISHER_RE = /greenhouse|lever|ashby|workday|icims|smartrecruiters|taleo|workable|bamboohr|recruitee|jobvite|career|company/i
+function pick(o, keys) { for (const k of keys) { const v = o && o[k]; if (v !== undefined && v !== null && v !== '') return v } return undefined }
 function jsearchApplyLink(j) {
-  const opts = Array.isArray(j.apply_options) ? j.apply_options : []
-  const direct = opts.filter((o) => o && o.is_direct && o.apply_link)
-  const preferred = direct.find((o) => DIRECT_PUBLISHER_RE.test(o.publisher || '') || ATS_HOST_RE.test((o.apply_link || '').replace(/^https?:\/\//, '')))
-  if (preferred) return { url: preferred.apply_link, direct: true }
-  if (direct[0]) return { url: direct[0].apply_link, direct: true }
-  if (j.job_apply_link) return { url: j.job_apply_link, direct: !!j.job_apply_is_direct }
-  return { url: opts[0] ? opts[0].apply_link : '', direct: false }
+  const opts = Array.isArray(j.apply_options) ? j.apply_options : (Array.isArray(j.apply_links) ? j.apply_links : [])
+  const linkOf = (o) => o && (o.apply_link || o.link || o.url)
+  const isDir = (o) => o && (o.is_direct || o.direct)
+  const direct = opts.filter((o) => isDir(o) && linkOf(o))
+  const preferred = direct.find((o) => DIRECT_PUBLISHER_RE.test(o.publisher || '') || ATS_HOST_RE.test((linkOf(o) || '').replace(/^https?:\/\//, '')))
+  if (preferred) return { url: linkOf(preferred), direct: true }
+  if (direct[0]) return { url: linkOf(direct[0]), direct: true }
+  const primary = pick(j, ['job_apply_link', 'apply_link', 'job_google_link', 'url'])
+  if (primary) return { url: primary, direct: !!(j.job_apply_is_direct || j.apply_is_direct) }
+  return { url: opts[0] ? linkOf(opts[0]) : '', direct: false }
+}
+async function jsearchCall(path, params) {
+  try {
+    const r = await fetch(`https://jsearch.p.rapidapi.com${path}?${params.toString()}`, {
+      headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
+      signal: AbortSignal.timeout(9000),
+    })
+    if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch (e) {} return { ok: false, status: r.status, error: 'HTTP ' + r.status + (t ? ': ' + t.replace(/\s+/g, ' ') : '') } }
+    return { ok: true, data: await r.json() }
+  } catch (e) { return { ok: false, error: (e && e.message) || 'fetch failed' } }
 }
 async function fetchJSearch(what, where, remote, country) {
   if (!JSEARCH_KEY) return { results: [], configured: false }
   const q = [what, where].filter(Boolean).join(' in ').trim() || what
   const params = new URLSearchParams({ query: q + (remote ? ' remote' : ''), page: '1', num_pages: '1', country: country || 'us', date_posted: 'month' })
   if (remote) params.set('work_from_home', 'true')
-  let d = null, error = null
-  try {
-    const r = await fetch(`https://jsearch.p.rapidapi.com/search?${params.toString()}`, {
-      headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
-      signal: AbortSignal.timeout(9000),
-    })
-    if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch (e) {} error = 'HTTP ' + r.status + (t ? ': ' + t.replace(/\s+/g, ' ') : ''); }
-    else d = await r.json()
-  } catch (e) { error = (e && e.message) || 'fetch failed'; }
-  if (error) return { results: [], configured: true, error, raw: 0 }
-  const jobs = (d && d.data) || []
+  // JSearch v5 uses /search-v2 (jobs at data.jobs); the classic API uses /search (jobs at data[]).
+  // Try v2 first, fall back to classic on 404 — works on either subscription.
+  let call = await jsearchCall('/search-v2', params)
+  if (!call.ok && call.status === 404) call = await jsearchCall('/search', params)
+  if (!call.ok) return { results: [], configured: true, error: call.error, raw: 0 }
+  const d = call.data
+  const jobs = Array.isArray(d && d.data) ? d.data
+    : (d && d.data && Array.isArray(d.data.jobs)) ? d.data.jobs
+    : (Array.isArray(d && d.jobs) ? d.jobs : [])
   const results = jobs.map((j) => {
     const link = jsearchApplyLink(j)
+    const loc = [pick(j, ['job_city', 'city']), pick(j, ['job_state', 'state']), pick(j, ['job_country', 'country'])].filter(Boolean).join(', ')
     return {
-      id: 'js_' + (j.job_id || Math.random().toString(36).slice(2)),
-      title: j.job_title || '',
-      company: j.employer_name || '',
-      location: [j.job_city, j.job_state, j.job_country].filter(Boolean).join(', ') || (j.job_is_remote ? 'Remote' : ''),
-      salaryMin: j.job_min_salary || null, salaryMax: j.job_max_salary || null, salaryPredicted: false,
+      id: 'js_' + (pick(j, ['job_id', 'id']) || Math.random().toString(36).slice(2)),
+      title: pick(j, ['job_title', 'title']) || '',
+      company: pick(j, ['employer_name', 'company_name', 'company']) || (j.employer && j.employer.name) || '',
+      location: loc || (pick(j, ['job_is_remote', 'is_remote']) ? 'Remote' : ''),
+      salaryMin: pick(j, ['job_min_salary', 'min_salary', 'salary_min']) || null,
+      salaryMax: pick(j, ['job_max_salary', 'max_salary', 'salary_max']) || null,
+      salaryPredicted: false,
       url: link.url, direct: link.direct,
-      category: (j.job_publisher || ''), categoryTag: '',
-      contractTime: j.job_employment_type || '',
-      description: cleanText(j.job_description || '').slice(0, 2000),
-      created: j.job_posted_at_datetime_utc || '',
+      category: pick(j, ['job_publisher', 'publisher']) || '', categoryTag: '',
+      contractTime: pick(j, ['job_employment_type', 'employment_type']) || '',
+      description: cleanText(pick(j, ['job_description', 'description']) || '').slice(0, 2000),
+      created: pick(j, ['job_posted_at_datetime_utc', 'job_posted_at', 'posted_at']) || '',
       source: 'jsearch',
     }
   }).filter((j) => j.url)
