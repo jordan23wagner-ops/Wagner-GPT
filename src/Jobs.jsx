@@ -88,6 +88,20 @@ function salaryInfo(j) {
   if (j.salaryMin || j.salaryMax) return { text: fmtSalary(j.salaryMin, j.salaryMax, 'year') + (j.salaryPredicted ? ' est.' : ''), listed: false }
   return null
 }
+// Numeric annual salary for sorting (listed > Adzuna est.; hourly annualized). 0 when unknown.
+function salaryNumber(j) {
+  const listed = parseListedSalary(j.description || '')
+  if (listed) { const v = listed.max || listed.min || 0; return listed.period === 'hour' ? v * 2080 : v }
+  return j.salaryMax || j.salaryMin || 0
+}
+// Sort the already-fetched results by the chosen key (no re-fetch).
+function sortResults(list, sortBy) {
+  const arr = list.slice()
+  if (sortBy === 'salary') arr.sort((a, b) => (b._sal || 0) - (a._sal || 0) || (b._score || 0) - (a._score || 0))
+  else if (sortBy === 'match') arr.sort((a, b) => (b._score || 0) - (a._score || 0))
+  else /* 'f500' */ arr.sort((a, b) => ((b._f500 ? 1 : 0) - (a._f500 ? 1 : 0)) || ((b._score || 0) - (a._score || 0)))
+  return arr
+}
 function fitColor(score) {
   if (score >= 75) return '#2e7d32'
   if (score >= 50) return '#7a6a12'
@@ -185,6 +199,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
   const [results, setResults] = useState([])
+  const [sortBy, setSortBy] = useState('f500') // f500 | match | salary
   const [sources, setSources] = useState(null)
   const [selected, setSelected] = useState({}) // id -> true
   const [prep, setPrep] = useState(null)        // { mode, jobs } when the prep modal is open
@@ -227,10 +242,8 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
       list = list.map((j, idx) => {
         const s = byI[idx] || {}
-        return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '', _f500: isFortune500(j.company), _layoff: layoffFlag(j.company) }
+        return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '', _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j) }
       })
-      // Fortune 500 first (per preference), then by résumé fit within each group.
-      list.sort((a, b) => ((b._f500 ? 1 : 0) - (a._f500 ? 1 : 0)) || ((b._score || 0) - (a._score || 0)))
       setResults(list)
       const f500n = list.filter((j) => j._f500).length
       setStatus(`Showing ${list.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
@@ -268,9 +281,10 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     setTimeout(() => setApplyingId((c) => (c === job.id ? null : c)), 1200)
   }
 
-  const selectedJobs = results.filter((j) => selected[j.id])
+  const shown = sortResults(results, sortBy)
+  const selectedJobs = shown.filter((j) => selected[j.id])
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
-  const selectTop = (n) => { const s = {}; results.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
+  const selectTop = (n) => { const s = {}; shown.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
   const clearSel = () => setSelected({})
 
   const startPrep = (mode) => {
@@ -351,8 +365,20 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
         </div>
       )}
 
+      {results.length > 0 && (
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-xs text-[var(--muted)]">Sort by</span>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
+            className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs">
+            <option value="f500">Fortune 500 first</option>
+            <option value="match">Best match (fit)</option>
+            <option value="salary">Salary (high → low)</option>
+          </select>
+        </div>
+      )}
+
       <div className="space-y-3">
-        {results.map((j) => {
+        {shown.map((j) => {
           const atsReady = ATS_HOST_RE.test((j.url || '').replace(/^https?:\/\//, ''))
           const scoreShown = typeof j._score === 'number'
           const saved = trackedUrls.includes(j.url)

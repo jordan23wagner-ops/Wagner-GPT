@@ -118,6 +118,16 @@ function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+// Follow an Adzuna redirect link to the real employer posting, so "Apply"/"View" skip Adzuna's
+// landing page (and its email-capture pop-up). Best-effort: HEAD then GET follow; if it never
+// leaves an adzuna host, keep the original URL. Returns the final employer URL or the input.
+function offAdzuna(url) { try { return !/(^|\.)adzuna\.[a-z.]+$/i.test(new URL(url).hostname); } catch (e) { return false; } }
+async function resolveFinalUrl(u) {
+  try { const r = await fetch(u, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(5000) }); if (r && r.url && offAdzuna(r.url)) return r.url; } catch (e) {}
+  try { const r = await fetch(u, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(6000) }); if (r && r.url && offAdzuna(r.url)) return r.url; } catch (e) {}
+  return u
+}
+
 // ── Per-ATS board fetchers → normalized results ─────────────────────────────────────────────────
 
 async function fetchGreenhouse({ slug, name }) {
@@ -411,6 +421,16 @@ export default async function handler(req, res) {
     const cap = Math.min(80, Math.max(20, parseInt(body.resultsPerPage, 10) || 50))
     merged.sort((a, b) => (a.source === 'adzuna' ? 1 : 0) - (b.source === 'adzuna' ? 1 : 0))
     merged = merged.slice(0, cap)
+
+    // Resolve Adzuna links to the real employer posting (skips Adzuna's interface + email pop-ups).
+    // Bounded to the final Adzuna results only; keeps the Adzuna URL as a fallback when unresolved.
+    const adz = merged.filter((j) => j.source === 'adzuna')
+    if (adz.length) {
+      await Promise.allSettled(adz.map(async (j) => {
+        const f = await resolveFinalUrl(j.url)
+        if (f && f !== j.url) { j.adzunaUrl = j.url; j.url = f }
+      }))
+    }
 
     return res.status(200).json({
       results: merged,
