@@ -3,7 +3,8 @@ import {
   Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
 } from 'lucide-react'
-import { extractResumeText, fileToStored } from './lib/resumeParse'
+import { fileToStored } from './lib/resumeParse'
+import { parseDocument } from './lib/parseDocument'
 import {
   loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory,
   activeResume, syncDown,
@@ -647,18 +648,24 @@ function ResumesView({ resumes, setResumes }) {
       return [{ id: uid('r_'), name: name || 'Résumé', text, file: file || null, isActive: true, createdAt: Date.now() }, ...cleared]
     })
   }
+  const noTextTip = 'This file has no selectable text — likely an outlined, scanned, or “Print to PDF” / design-tool (Canva) export, where letters are saved as images/shapes. Upload the original .docx, or use “Paste text”. (Tip: if you can’t highlight text in the PDF, it has no text layer.)'
   const onFile = async (e) => {
     const file = e.target.files && e.target.files[0]
     e.target.value = ''
     if (!file) return
     setStatus('Reading ' + file.name + '…')
     try {
-      const text = await extractResumeText(file)
-      if (!text || text.length < 40) { setStatus('Could not extract text. Try a .docx, .pdf, or paste the text.'); return }
+      // Use the app's pdf.js/mammoth parser (robust) — handles most real text PDFs and .docx.
+      const parsed = await parseDocument(file)
+      const text = (parsed && parsed.text) || ''
+      if (text.length < 40) { setStatus(noTextTip); return }
       const stored = await fileToStored(file).catch(() => null)
       addResume(file.name.replace(/\.(pdf|docx|txt)$/i, ''), text, stored)
       setStatus('Added ' + file.name + (stored ? '' : ' (text only — file too large to attach)') + '.')
-    } catch (err) { setStatus(err.message || 'Could not read that file.') }
+    } catch (err) {
+      const m = (err && err.message) || ''
+      setStatus(/no readable text/i.test(m) ? noTextTip : (m || 'Could not read that file. Try a .docx, a text PDF, or “Paste text”.'))
+    }
   }
   const savePaste = () => {
     const t = pasteText.trim()
