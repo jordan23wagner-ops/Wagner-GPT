@@ -345,6 +345,8 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           {' '}· via Adzuna: {sources.adzuna || 0}
           {typeof sources.jsearch === 'number' && sources.jsearchConfigured ? ` · JSearch: ${sources.jsearch}` : ''}
           {sources.jsearchConfigured === false ? ' · (add JSEARCH_KEY for more direct links)' : ''}
+          {sources.jsearchError ? <span className="text-orange-500"> · JSearch error: {String(sources.jsearchError).slice(0, 120)} (subscribe to the free plan on RapidAPI)</span> : ''}
+          {sources.jsearchConfigured && !sources.jsearchError && sources.jsearchRaw > 0 && sources.jsearch === 0 ? <span className="text-[var(--muted)]"> · (JSearch returned {sources.jsearchRaw} but your filters excluded them — try unchecking Remote only)</span> : ''}
         </div>
       )}
 

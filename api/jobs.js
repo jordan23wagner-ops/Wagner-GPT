@@ -137,9 +137,17 @@ async function fetchJSearch(what, where, remote, country) {
   if (!JSEARCH_KEY) return { results: [], configured: false }
   const q = [what, where].filter(Boolean).join(' in ').trim() || what
   const params = new URLSearchParams({ query: q + (remote ? ' remote' : ''), page: '1', num_pages: '1', country: country || 'us', date_posted: 'month' })
-  const d = await fetchJson(`https://jsearch.p.rapidapi.com/search?${params.toString()}`, {
-    ms: 9000, headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
-  })
+  if (remote) params.set('work_from_home', 'true')
+  let d = null, error = null
+  try {
+    const r = await fetch(`https://jsearch.p.rapidapi.com/search?${params.toString()}`, {
+      headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
+      signal: AbortSignal.timeout(9000),
+    })
+    if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch (e) {} error = 'HTTP ' + r.status + (t ? ': ' + t.replace(/\s+/g, ' ') : ''); }
+    else d = await r.json()
+  } catch (e) { error = (e && e.message) || 'fetch failed'; }
+  if (error) return { results: [], configured: true, error, raw: 0 }
   const jobs = (d && d.data) || []
   const results = jobs.map((j) => {
     const link = jsearchApplyLink(j)
@@ -157,7 +165,7 @@ async function fetchJSearch(what, where, remote, country) {
       source: 'jsearch',
     }
   }).filter((j) => j.url)
-  return { results, configured: true }
+  return { results, configured: true, raw: jobs.length }
 }
 
 // ── Himalayas — free, no key: remote jobs with a DIRECT applicationLink ──────────────────────────
@@ -444,12 +452,12 @@ export default async function handler(req, res) {
 
     const settled = await Promise.allSettled(tasks)
     const bucket = { adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [] }
-    let adzunaConfigured = false, jsearchConfigured = false
+    let adzunaConfigured = false, jsearchConfigured = false, jsearchError = null, jsearchRaw = 0
     for (const s of settled) {
       if (s.status !== 'fulfilled') continue
       const v = s.value
       if (v.kind === 'adzuna') { adzunaConfigured = !!v.configured; bucket.adzuna = v.results || [] }
-      else if (v.kind === 'jsearch') { jsearchConfigured = !!v.configured; bucket.jsearch = v.results || [] }
+      else if (v.kind === 'jsearch') { jsearchConfigured = !!v.configured; bucket.jsearch = v.results || []; jsearchError = v.error || null; jsearchRaw = v.raw || 0 }
       else if (v.kind === 'himalayas') bucket.himalayas = v.results || []
       else if (v.kind === 'ats') bucket.ats = v.results || []
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
@@ -491,7 +499,7 @@ export default async function handler(req, res) {
       count: merged.length,
       sources: {
         adzuna: bucket.adzuna.length, adzunaConfigured,
-        jsearch: jsearchResults.length, jsearchConfigured,
+        jsearch: jsearchResults.length, jsearchConfigured, jsearchError, jsearchRaw,
         himalayas: himalayasResults.length,
         ats: bucket.ats.length,
         discovered: bucket.discovered.length,
