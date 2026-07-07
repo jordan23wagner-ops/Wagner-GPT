@@ -141,7 +141,7 @@ async function jsearchCall(path, params) {
   try {
     const r = await fetch(`https://jsearch.p.rapidapi.com${path}?${params.toString()}`, {
       headers: { 'X-RapidAPI-Key': JSEARCH_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
-      signal: AbortSignal.timeout(9000),
+      signal: AbortSignal.timeout(18000), // v5 /search-v2 can be slow; the function has a 60s budget
     })
     if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch (e) {} return { ok: false, status: r.status, error: 'HTTP ' + r.status + (t ? ': ' + t.replace(/\s+/g, ' ') : '') } }
     return { ok: true, data: await r.json() }
