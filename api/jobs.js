@@ -229,9 +229,13 @@ function boardsFromUrls(urls) {
   return out
 }
 
+// Accept either the _KEY convention or the bare name (this project's Vercel uses `Brave`/`Tavily`).
+const BRAVE_KEY = process.env.BRAVE_KEY || process.env.Brave || process.env.BRAVE
+const TAVILY_KEY = process.env.TAVILY_KEY || process.env.TAVILY || process.env.TAVILY_API_KEY || process.env.Tavily
+
 async function discoverBoards(query) {
-  const braveKey = process.env.BRAVE_KEY
-  const tavilyKey = process.env.TAVILY_KEY || process.env.TAVILY || process.env.TAVILY_API_KEY
+  const braveKey = BRAVE_KEY
+  const tavilyKey = TAVILY_KEY
   const q = `${query} careers (site:greenhouse.io OR site:lever.co OR site:ashbyhq.com)`
   let urls = []
   try {
@@ -369,7 +373,7 @@ export default async function handler(req, res) {
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
     let discovered = []
-    if (discoveryQuery && (process.env.BRAVE_KEY || process.env.TAVILY_KEY || process.env.TAVILY)) {
+    if (discoveryQuery && (BRAVE_KEY || TAVILY_KEY)) {
       const boards = await discoverBoards(discoveryQuery)
       discovered = boards
       if (boards.length) tasks.push(fetchBoards(boards).then((results) => ({ kind: 'discovered', results })).catch(() => ({ kind: 'discovered', results: [] })))
