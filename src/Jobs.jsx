@@ -93,11 +93,51 @@ async function aiRank(results, resume) {
   return arr
 }
 
-function salaryText(j) {
-  if (!j.salaryMin && !j.salaryMax) return ''
-  const fmt = (n) => '$' + Math.round(n / 1000) + 'k'
-  const s = j.salaryMin && j.salaryMax ? (fmt(j.salaryMin) + '–' + fmt(j.salaryMax)) : fmt(j.salaryMin || j.salaryMax)
-  return s + (j.salaryPredicted ? ' est.' : '')
+// Parse a definitive salary out of the job description text. Company postings often state the
+// real range ("$120,000–$150,000", "$120k-$150k", "$60/hr") — that's the source of truth, so we
+// prefer it over Adzuna's estimated number. Returns { min, max, period:'year'|'hour' } | null.
+function money(tok) {
+  const k = /k$/i.test(tok.replace(/\s/g, ''))
+  const n = parseFloat(tok.replace(/[\s,$]/g, '').replace(/k$/i, ''))
+  return Number.isFinite(n) ? (k ? n * 1000 : n) : NaN
+}
+function parseListedSalary(text) {
+  if (!text) return null
+  const t = String(text).slice(0, 2000)
+  const amt = '\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s?[kK]?'
+  // Hourly range or single.
+  let m = new RegExp(amt + '\\s*(?:-|–|—|to)\\s*' + amt + '\\s*(?:\\/|per\\s+|an?\\s+)?\\s*(?:hour|hr)\\b', 'i').exec(t)
+    || new RegExp(amt + '\\s*(?:\\/|per\\s+|an?\\s+)\\s*(?:hour|hr)\\b', 'i').exec(t)
+  if (m) {
+    const nums = m[0].match(new RegExp(amt, 'g')).map(money).filter((n) => n >= 7 && n <= 500)
+    if (nums.length) return { min: nums[0], max: nums[1] ?? null, period: 'hour' }
+  }
+  // Annual range of two $ amounts.
+  const rangeRe = new RegExp(amt + '\\s*(?:-|–|—|to)\\s*' + amt, 'g')
+  let match
+  while ((match = rangeRe.exec(t))) {
+    const nums = match[0].match(new RegExp(amt, 'g')).map(money)
+    if (nums.length >= 2 && nums.every((n) => n >= 20000 && n <= 1000000)) return { min: nums[0], max: nums[1], period: 'year' }
+  }
+  // Single annual amount with a year context nearby.
+  const single = new RegExp('(' + amt + ')\\s*(?:\\/|per\\s+|a\\s+)?\\s*(?:year|yr|annum|annually)', 'i').exec(t)
+    || new RegExp('(?:salary|base|compensation|pay)[^.$]{0,40}?(' + amt + ')', 'i').exec(t)
+  if (single) { const n = money(single[1]); if (n >= 20000 && n <= 1000000) return { min: n, max: null, period: 'year' } }
+  return null
+}
+function fmtSalary(min, max, period) {
+  const fmt = period === 'hour'
+    ? (n) => '$' + (Math.round(n * 100) / 100)
+    : (n) => '$' + Math.round(n / 1000) + 'k'
+  const body = min && max ? fmt(min) + '–' + fmt(max) : fmt(min || max)
+  return body + (period === 'hour' ? '/hr' : '')
+}
+// Returns { text, listed } — listed:true means pulled verbatim from the posting (source of truth).
+function salaryInfo(j) {
+  const listed = parseListedSalary(j.description || '')
+  if (listed) return { text: fmtSalary(listed.min, listed.max, listed.period), listed: true }
+  if (j.salaryMin || j.salaryMax) return { text: fmtSalary(j.salaryMin, j.salaryMax, 'year') + (j.salaryPredicted ? ' est.' : ''), listed: false }
+  return null
 }
 function fitColor(score) {
   if (score >= 75) return '#2e7d32'
@@ -299,7 +339,13 @@ function SearchView({ activeResume, onSave, trackedUrls }) {
                   {j.company || 'Company undisclosed'}{j.location ? ' · ' + j.location : ''}
                 </div>
                 <div className="flex gap-1.5 flex-wrap mb-1.5">
-                  {salaryText(j) && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-green-600">{salaryText(j)}</span>}
+                  {(() => {
+                    const sal = salaryInfo(j)
+                    if (!sal) return null
+                    return sal.listed
+                      ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
+                      : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>
+                  })()}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
                   {j.contractTime && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{String(j.contractTime).replace('_', '-')}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
