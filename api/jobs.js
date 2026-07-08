@@ -201,6 +201,9 @@ const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhi
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
+// A "direct apply" job is one whose final URL opens on a real employer/ATS host — NOT an aggregator.
+// Computed by host so it's honest regardless of a source's self-reported flag.
+function isEmployerHost(h) { return !!h && !isAdzunaHost(h) && !AGGREGATOR_HOST_RE.test(h); }
 // Follow up to 4 redirect hops (Location headers only) starting from an Adzuna redirect_url, and
 // return the first host that is a real employer/ATS (off Adzuna AND off every other aggregator).
 // Returns null if it hits a login wall, a private host, a non-redirect, or never leaves aggregators.
@@ -678,6 +681,11 @@ export default async function handler(req, res) {
       }
       await Promise.allSettled(Array.from({ length: Math.min(6, adzunaRows.length) }, worker))
     }
+
+    // Recompute `direct` by the FINAL host for every row — honest labeling/filtering regardless of a
+    // source's own flag: resolved Adzuna rows and JSearch links to an ATS count as direct; links to
+    // adzuna/linkedin/indeed do not.
+    merged.forEach((j) => { j.direct = isEmployerHost(safeHost(j.url)) })
 
     return res.status(200).json({
       results: merged,

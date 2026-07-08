@@ -241,10 +241,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [remote, setRemote] = useState(false)
   const [fullTime, setFullTime] = useState(true)
   const [aiFit, setAiFit] = useState(true)
-  // Default ON: aggregator links (esp. Adzuna) now log-wall logged-out users, so show only jobs that
-  // open directly on the employer/ATS. The backend resolves what Adzuna links it can to employer URLs
-  // (those then count as direct); the rest are hidden here unless the user opts back in.
-  const [directOnly, setDirectOnly] = useState(true)
+  // Default OFF so the list is never surprisingly empty. When ON it filters to employer/ATS-direct
+  // jobs, but falls back to showing all (with a note) if a search has zero direct results.
+  const [directOnly, setDirectOnly] = useState(false)
   const [categories, setCategories] = useState([])
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -350,7 +349,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     setTimeout(() => setApplyingId((c) => (c === job.id ? null : c)), 1200)
   }
 
-  const shown = sortResults(directOnly ? results.filter((j) => j.direct !== false) : results, sortBy)
+  const directList = results.filter((j) => j.direct !== false)
+  const directFellBack = directOnly && results.length > 0 && directList.length === 0
+  const shown = sortResults((directOnly && directList.length) ? directList : results, sortBy)
   const selectedJobs = shown.filter((j) => selected[j.id])
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
   const selectTop = (n) => { const s = {}; shown.slice(0, n).forEach((j) => { s[j.id] = true }); setSelected(s) }
@@ -410,6 +411,11 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           : <span className="text-[var(--muted)]">🔌 Alicia extension not detected — Apply opens the posting in a new tab (install/enable it for hands-off auto-fill).</span>}
       </div>
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
+      {directFellBack && (
+        <div className="text-xs px-1 text-orange-500">
+          No direct-apply jobs for this search — showing all {results.length}. The ones marked “via Adzuna” open on Adzuna (which may ask you to log in); the Alicia extension will try to skip straight to the employer when you Apply.
+        </div>
+      )}
       {sources && (
         <div className="text-xs text-[var(--muted)] px-1">
           Sources — <span className="text-green-600">direct apply: {sources.directCount ?? '—'}</span>

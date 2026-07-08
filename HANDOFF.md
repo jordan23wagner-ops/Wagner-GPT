@@ -4,7 +4,19 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-08 (latest) — Skip Adzuna's login wall: employer-URL resolution + direct-apply default
+## Update 2026-07-08 (latest) — Adzuna follow-up: honest direct-by-host + never-empty list
+
+Live test of the prior change showed "Direct apply only" (defaulted ON) hid ALL 55 results because the
+Vercel-side resolver resolved 0 of 50 Adzuna rows (datacenter IP blocked, as predicted) and JSearch's 7
+were flagged non-direct. Fixes:
+- `api/jobs.js`: after the resolve pass, recompute `direct` for EVERY row by its final host
+  (`isEmployerHost`) — honest regardless of a source's self-reported flag (a JSearch link to an ATS now
+  counts as direct; resolved Adzuna rows do; links to adzuna/linkedin/indeed don't).
+- `src/Jobs.jsx`: "Direct apply only" defaults OFF again (never a surprising empty list); when ON it
+  filters to direct but FALLS BACK to showing all with an orange note if a search yields zero direct
+  results. The residential-IP resolution now lives in the extension (v1.12.4) — Vercel can't do it.
+
+## Update 2026-07-08 — Skip Adzuna's login wall: employer-URL resolution + direct-apply default
 
 Adzuna's `redirect_url` now login-walls logged-out users (`adzuna.com/details/…?apply=1&after_login`
 → a Facebook/Google/email modal), so Apply never reached the employer. Fixed in `api/jobs.js` +
