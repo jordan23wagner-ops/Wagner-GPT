@@ -1107,7 +1107,7 @@ export default function App() {
           style={{ paddingTop: TOP_INSET }}
         >
           <div className="flex items-center gap-1">
-            <h1 className="text-lg font-bold px-4 py-2">Hello World</h1>
+            <h1 className="text-lg font-bold px-4 py-2">Ho, why is you here?</h1>
             {tab === 'chat' && (
               <button
                 onClick={() => setSidebarOpen(true)}
