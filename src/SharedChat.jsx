@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { MessageSquare, ExternalLink, ImageIcon, FileUp } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
 import { enhanceMessages } from './lib/enhanceMessages'
@@ -8,6 +8,7 @@ import { enhanceMessages } from './lib/enhanceMessages'
 // the same markdown/code/math rendering as the live chat.
 export default function SharedChat({ chat, loading, notFound }) {
   const containerRef = useRef(null)
+  const [images, setImages] = useState({})
 
   // Apply syntax highlighting + math once the snapshot renders (same as the live view).
   useEffect(() => {
@@ -15,6 +16,34 @@ export default function SharedChat({ chat, loading, notFound }) {
   }, [chat])
 
   const messages = chat?.messages || []
+
+  // Handle image pasting
+  useEffect(() => {
+    const handlePaste = (e) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        if (item.type.indexOf('image') !== -1) {
+          e.preventDefault()
+          const file = item.getAsFile()
+          if (file) {
+            const reader = new FileReader()
+            reader.onload = (event) => {
+              const imageData = event.target.result
+              const imageId = Date.now().toString()
+              setImages(prev => ({ ...prev, [imageId]: imageData }))
+            }
+            reader.readAsDataURL(file)
+          }
+        }
+      }
+    }
+
+    document.addEventListener('paste', handlePaste)
+    return () => document.removeEventListener('paste', handlePaste)
+  }, [])
 
   return (
     <div className="flex flex-col h-[100dvh] overflow-x-hidden bg-[var(--bg)] text-[var(--text)]">
