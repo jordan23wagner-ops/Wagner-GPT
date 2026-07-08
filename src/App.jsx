@@ -1,12 +1,14 @@
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect, Suspense, lazy } from 'react'
 import {
   Send, Paperclip, Sun, Moon, Trash2, MessageSquare, Flower2,
   Menu, Plus, X, FileText, Printer, Code2, Droplets, Briefcase,
 } from 'lucide-react'
-import Garden from './Garden'
-import CodeTab from './Code'
-import Attic from './Attic'
-import Jobs from './Jobs'
+// Non-chat tabs are lazy: they were all bundled into the eager first-load chunk even though a
+// session usually opens straight into Chat.
+const Garden = lazy(() => import('./Garden'))
+const CodeTab = lazy(() => import('./Code'))
+const Attic = lazy(() => import('./Attic'))
+const Jobs = lazy(() => import('./Jobs'))
 import {
   loadConversations, saveConversations, loadActiveId, saveActiveId,
   newConversation, titleFromMessages,
@@ -29,7 +31,7 @@ import {
 import { warmEmbedder } from './lib/embed'
 import { RAG_THRESHOLD, docId, buildIndex, retrieveChunks } from './lib/rag'
 import { Share2 } from 'lucide-react'
-import SharedChat from './SharedChat'
+const SharedChat = lazy(() => import('./SharedChat'))
 import { createShare, loadShare, shareUrl, shareIdFromUrl, listShares, deleteShare } from './lib/share'
 import { Settings, Brain, Trash } from 'lucide-react'
 import { hasSupabase } from './lib/supabase'
@@ -54,7 +56,11 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [model, setModel] = useState(() => localStorage.getItem('model') || 'auto')
   const [style, setStyle] = useState(() => localStorage.getItem('style') || 'default')
-  const [tab, setTab] = useState('chat')
+  // ?tab=jobs deep-links straight to a tab (the extension's side panel links here).
+  const [tab, setTab] = useState(() => {
+    const t = new URLSearchParams(window.location.search).get('tab')
+    return ['chat', 'garden', 'attic', 'code', 'jobs'].includes(t) ? t : 'chat'
+  })
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [usage, setUsage] = useState(loadUsage)
   const [theme, setTheme] = useState(() => {
@@ -143,24 +149,33 @@ export default function App() {
   const messages = activeConv ? activeConv.messages : []
   messagesRef.current = messages  // voice callbacks read this to get the latest message list
 
-  // setMessages shim: updates the active conversation's messages (and auto-titles it),
-  // so the streaming code below stays unchanged from the single-history version.
-  const setMessages = (updater) => {
+  // Targeted writer: updates a SPECIFIC conversation's messages (and auto-titles it). Streaming
+  // code captures the conversation id at send time — re-reading activeIdRef per token meant that
+  // switching chats mid-stream appended the reply to whichever chat you were looking at.
+  const updateConvMessages = (convId, updater) => {
     setConversations((prev) =>
       prev.map((c) => {
-        if (c.id !== activeIdRef.current) return c
+        if (c.id !== convId) return c
         const next = typeof updater === 'function' ? updater(c.messages) : updater
         const title = c.title === 'New chat' ? titleFromMessages(next) || c.title : c.title
         return { ...c, messages: next, title, updatedAt: Date.now() }
       })
     )
   }
+  // Shim for UI actions that act on the conversation currently on screen.
+  const setMessages = (updater) => updateConvMessages(activeIdRef.current, updater)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  useEffect(() => { scrollToBottom() }, [messages])
+  useEffect(() => {
+    // Don't hijack the scroll while the user is reading something above — only follow the
+    // stream when they're already near the bottom.
+    const el = messagesContainerRef.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 150) return
+    scrollToBottom()
+  }, [messages])
 
   // Apply syntax highlighting + math rendering once a reply finishes streaming, then
   // bolt a "Run" button onto any Python code blocks (Phase 3 — Pyodide interpreter).
@@ -171,24 +186,25 @@ export default function App() {
     attachArtifacts(messagesContainerRef.current)
   }, [messages, loading])
 
-  // After a reply completes, fetch 3 follow-up suggestions (once per reply).
+  // After a reply completes, fetch follow-up suggestions + auto-extract memory facts — but ONLY on
+  // a loading true→false transition (a reply actually finishing). The old "last message looks like
+  // a finished reply" check re-fired both AI calls every time you merely SELECTED an old chat in
+  // the sidebar, burning free-tier quota on navigation.
+  const prevLoadingRef = useRef(false)
   useEffect(() => {
-    if (loading) return
+    const was = prevLoadingRef.current
+    prevLoadingRef.current = loading
+    if (loading || !was) return
     const last = messages[messages.length - 1]
-    if (!last || last.role !== 'assistant' || !last.content || last.content.length < 12) return
-    if (suggestedForRef.current === last.id) return
-    suggestedForRef.current = last.id
-    fetchSuggestions(messages)
-  }, [loading, messages]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // After a reply completes, auto-extract durable user facts into memory (once per reply).
-  useEffect(() => {
-    if (!memoryEnabled || !memoryAvailable || loading) return
-    const last = messages[messages.length - 1]
-    if (!last || last.role !== 'assistant' || !last.content || last.content.length < 12) return
-    if (extractedForRef.current === last.id) return
-    extractedForRef.current = last.id
-    autoExtractMemory(messages)
+    if (!last || last.role !== 'assistant' || !last.content || last.content.length < 12 || last.cached) return
+    if (suggestedForRef.current !== last.id) {
+      suggestedForRef.current = last.id
+      fetchSuggestions(messages)
+    }
+    if (memoryEnabled && memoryAvailable && extractedForRef.current !== last.id) {
+      extractedForRef.current = last.id
+      autoExtractMemory(messages)
+    }
   }, [loading, messages, memoryEnabled]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const autoExtractMemory = async (convMessages) => {
@@ -208,6 +224,7 @@ export default function App() {
   }
 
   const fetchSuggestions = async (convMessages) => {
+    const convId = activeIdRef.current
     try {
       const recent = convMessages.slice(-6).map((m) => ({ role: m.role, content: m.content || '' }))
       const res = await fetch('/api/suggest', {
@@ -217,7 +234,9 @@ export default function App() {
       })
       if (!res.ok) return
       const data = await res.json()
-      if (Array.isArray(data.suggestions)) setSuggestions(data.suggestions.slice(0, 3))
+      // Drop the result if the user switched chats while it was in flight — otherwise another
+      // conversation's follow-up chips render under this one.
+      if (Array.isArray(data.suggestions) && activeIdRef.current === convId) setSuggestions(data.suggestions.slice(0, 3))
     } catch { /* best-effort; show nothing */ }
   }
 
@@ -244,7 +263,22 @@ export default function App() {
     document.documentElement.classList.toggle('dark', isDarkTheme(theme))
   }, [theme])
 
-  useEffect(() => { saveConversations(conversations) }, [conversations])
+  // Debounced local persistence. Saving synchronously on every state change meant a full
+  // JSON.stringify of ALL conversations (incl. base64 photos) per streamed token, on the main
+  // thread. Flushed on tab-hide/close so nothing is lost.
+  const conversationsRef = useRef(conversations)
+  conversationsRef.current = conversations
+  const saveTimerRef = useRef(null)
+  useEffect(() => {
+    clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => saveConversations(conversationsRef.current), 400)
+  }, [conversations])
+  useEffect(() => {
+    const flush = () => { clearTimeout(saveTimerRef.current); saveConversations(conversationsRef.current) }
+    document.addEventListener('visibilitychange', flush)
+    window.addEventListener('beforeunload', flush)
+    return () => { document.removeEventListener('visibilitychange', flush); window.removeEventListener('beforeunload', flush) }
+  }, [])
   useEffect(() => { saveActiveId(activeId) }, [activeId])
   useEffect(() => { localStorage.setItem('model', model) }, [model])
   useEffect(() => { localStorage.setItem('style', style) }, [style])
@@ -458,6 +492,7 @@ export default function App() {
     // First document → text/RAG context
     if (docFiles.length) {
       const file = docFiles[0]
+      if (docFiles.length > 1) setError(`Only "${file.name}" was attached — one document per message; the other ${docFiles.length - 1} were skipped.`)
       if (!isSupportedDocument(file)) {
         setError('Unsupported file. Try PDF, Word (.docx), CSV, or a text file.')
         return
@@ -483,19 +518,30 @@ export default function App() {
   const [synced, setSynced] = useState(false)
   useEffect(() => {
     if (!hasSupabase) { setSynced(true); return }
+    // Merge against the CURRENT state functionally — merging against the mount snapshot clobbered
+    // any message sent while the Supabase fetch was still in flight (slow connections).
     syncConversationsDown(conversations).then((merged) => {
-      setConversations(merged)
+      setConversations((cur) => {
+        const mergedMap = new Map(merged.map((c) => [c.id, c]))
+        for (const c of cur) {
+          const m = mergedMap.get(c.id)
+          if (!m || (c.updatedAt || 0) >= (m.updatedAt || 0)) mergedMap.set(c.id, c)
+        }
+        return [...mergedMap.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      })
       setSynced(true)
     })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Push the active conversation to Supabase whenever it changes (debounced).
+  // Push the most-recently-updated conversation to Supabase whenever anything changes (debounced).
+  // Keying off the ACTIVE conversation at fire time skipped the push entirely if you switched
+  // chats within the debounce window (and streams can update a non-active conversation now).
   const pushTimerRef = useRef(null)
   useEffect(() => {
     if (!synced || !hasSupabase) return
     clearTimeout(pushTimerRef.current)
     pushTimerRef.current = setTimeout(() => {
-      const conv = conversations.find((c) => c.id === activeIdRef.current)
+      const conv = [...conversationsRef.current].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0]
       if (conv) syncConversationUp(conv)
     }, 1500)
   }, [conversations, synced])
@@ -543,6 +589,10 @@ export default function App() {
   const sendToModel = async (history, payload) => {
     setError(null)
     setLoading(true)
+    // Pin this stream to the conversation it was sent from — every write below targets it, so
+    // switching chats (or opening a new one) mid-stream can no longer misdeliver the reply.
+    const convId = activeIdRef.current
+    const setMsgs = (updater) => updateConvMessages(convId, updater)
 
     // Retrieve relevant long-term memories for this turn (best-effort, time-boxed so the
     // first message stays responsive while the embedding model downloads on first use).
@@ -595,7 +645,7 @@ export default function App() {
     const ensureAssistant = () => {
       if (appended) return
       appended = true
-      setMessages((prev) => [
+      setMsgs((prev) => [
         ...prev,
         { id: assistantId, role: 'assistant', content: '' },
       ])
@@ -605,7 +655,7 @@ export default function App() {
       ensureAssistant()
       accumulated += text
       streamedText += text
-      setMessages((prev) =>
+      setMsgs((prev) =>
         prev.map((m) =>
           m.id === assistantId ? { ...m, content: m.content + text } : m
         )
@@ -618,7 +668,7 @@ export default function App() {
       accumulated += '[image]'
       producedImage = true
       const url = `data:${mediaType || 'image/jpeg'};base64,${b64}`
-      setMessages((prev) =>
+      setMsgs((prev) =>
         prev.map((m) => (m.id === assistantId ? { ...m, image: url } : m))
       )
     }
@@ -712,7 +762,7 @@ export default function App() {
         setLastAttempt(null)
         // Tag the reply with the model that actually answered (useful in Auto mode).
         if (appended && routedModel) {
-          setMessages((prev) =>
+          setMsgs((prev) =>
             prev.map((m) => (m.id === assistantId ? { ...m, via: routedModel } : m))
           )
         }
@@ -828,16 +878,22 @@ export default function App() {
     setResearchSteps([])
     setLoading(true)
     setError(null)
+    const convId = activeIdRef.current
+    const setMsgs = (updater) => updateConvMessages(convId, updater)
     const assistantId = Date.now() + 1
     let appended = false
     const ensureAssistant = () => {
       if (appended) return
       appended = true
-      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+      setMsgs((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }])
     }
+    // Wire the Stop button up — a 60s research run used to be uncancellable.
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       const response = await fetch('/api/deep-research', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: text, memory: [], customInstructions, aboutYou }),
       })
@@ -858,14 +914,14 @@ export default function App() {
           setResearchSteps((prev) => [...prev, evt.step])
         } else if (evt.delta) {
           ensureAssistant()
-          setMessages((prev) =>
+          setMsgs((prev) =>
             prev.map((m) => m.id === assistantId ? { ...m, content: m.content + evt.delta } : m)
           )
         } else if (evt.done) {
           if (evt.sources && evt.sources.length) {
             const list = evt.sources.map((s) => `- [${s.title || s.url}](${s.url})`).join('\n')
             ensureAssistant()
-            setMessages((prev) =>
+            setMsgs((prev) =>
               prev.map((m) =>
                 m.id === assistantId ? { ...m, content: m.content + `\n\n**Sources:**\n${list}` } : m
               )
@@ -891,6 +947,7 @@ export default function App() {
     } finally {
       setLoading(false)
       setResearchSteps([])
+      abortRef.current = null
     }
   }
 
@@ -953,7 +1010,12 @@ export default function App() {
   }
 
   const clearHistory = () => {
-    if (window.confirm('Clear this conversation?')) setMessages([])
+    if (!window.confirm('Clear this conversation?')) return
+    const convId = activeIdRef.current
+    // Reset the title too — it only auto-renames while titled 'New chat', so an emptied
+    // conversation used to keep its stale name forever.
+    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: [], title: 'New chat', updatedAt: Date.now() } : c)))
+    setSuggestions([])
   }
 
   // Phase 7 — create a shareable read-only link for the active conversation and copy it.
@@ -1006,6 +1068,7 @@ export default function App() {
     setActiveId(id)
     setSidebarOpen(false)
     setError(null)
+    setSuggestions([]) // chips belong to the previous conversation
   }
 
   const deleteChat = (id) => {
@@ -1028,7 +1091,9 @@ export default function App() {
   if (shareId) {
     return (
       <div className={darkMode ? 'dark' : ''}>
-        <SharedChat chat={sharedChat} loading={shareLoading} notFound={shareNotFound} />
+        <Suspense fallback={<div className="h-[100dvh] flex items-center justify-center text-sm text-[var(--muted)]">Loading…</div>}>
+          <SharedChat chat={sharedChat} loading={shareLoading} notFound={shareNotFound} />
+        </Suspense>
       </div>
     )
   }
@@ -1138,13 +1203,14 @@ export default function App() {
           </div>
         </div>
 
-        {tab === 'garden' && <Garden darkMode={darkMode} />}
-
-        {tab === 'attic' && <Attic />}
-
-        {tab === 'code' && <CodeTab />}
-
-        {tab === 'jobs' && <Jobs />}
+        {tab !== 'chat' && (
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-sm text-[var(--muted)]"><Loader2 size={18} className="animate-spin mr-2" /> Loading…</div>}>
+            {tab === 'garden' && <Garden darkMode={darkMode} />}
+            {tab === 'attic' && <Attic />}
+            {tab === 'code' && <CodeTab />}
+            {tab === 'jobs' && <Jobs />}
+          </Suspense>
+        )}
 
         {tab === 'chat' && (
         <>
@@ -1512,7 +1578,6 @@ export default function App() {
                 : 'Type a message...'
               }
               className="flex-1 min-w-0 px-4 py-2 rounded-lg border bg-[var(--input-bg)] border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]"
-              disabled={loading}
             />
             {loading ? (
               <button
@@ -1563,6 +1628,9 @@ export default function App() {
                     window.speechSynthesis?.cancel()
                     setSpeakingId(null)
                     setVoiceState('idle')
+                    startVoiceLoop()
+                  } else if (voiceState === 'idle' && !loading) {
+                    // A failed request used to strand voice mode here with a dead button.
                     startVoiceLoop()
                   }
                 }}

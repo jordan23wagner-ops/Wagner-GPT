@@ -4,6 +4,45 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
+## Update 2026-07-08 — Deep-dive fixes: jobs pipeline, core chat perf/correctness, extension handoff v2
+
+Full-codebase review (3 parallel reviewers) → fixes across the stack. Highlights:
+
+**Jobs backend (`api/jobs.js`):** `ATS_HOST_RE` was referenced but undefined (ReferenceError swallowed
+by the catch → the whole JSearch direct-link source silently dead; regex now copied in). Cross-source
+dedupe now also keys `company|title|city` (Greenhouse vs Adzuna URLs never matched, so "direct wins
+over Adzuna" never actually happened). `salaryMin`/`fullTime` now filter the direct sources too (they
+were Adzuna-only, so the top-ranked results ignored the salary floor). New 10-min warm-lambda TTL
+cache for board/Himalayas/discovery fetches. Within-rank newest-first ordering; `page` passthrough
+for Load more. Mocked-logic test: scratchpad `test-jobs-api.mjs` (run against a stubbed fetch).
+
+**Jobs UI (`src/Jobs.jsx` + libs):** backendChat no longer swallows `{error}` NDJSON events (a failed
+tailor could save an EMPTY résumé and hand it to the extension — also now guarded by a min-length
+check). `jobsStore` only bumps `updatedAt` when data actually changed (page-load used to mark the
+local snapshot newest and could clobber newer cloud data). quickTailor secondary material = base
+résumés only, capped at 2 (the prompt previously grew with every tailored résumé ever saved).
+lexicalRank scores job-vocabulary coverage (long résumés pinned everything at 95). 4 unreachable
+industries added. Views stay mounted (tab-peek no longer discards results). UX: posting-age chip +
+newest-first sort, Load more, "applied ✓" badge, tracker (date/résumé-used link/status filters/CSV),
+print-to-PDF résumé export, full deep-rewrite Q&A transcript.
+
+**Core app (`src/App.jsx` + libs/api):** streams are pinned to the conversation they started in
+(switching chats mid-stream used to misdeliver the reply). Local persistence debounced 400ms +
+flushed on hide (was a full JSON.stringify of ALL conversations per streamed token). renderMarkdown
+memoized (settled messages no longer re-parse per token). suggest/memory-extract fire only on a
+loading→done transition (sidebar navigation used to re-fire both AI calls). Lazy-loaded tabs
+(~95 kB off the first chunk). Deep-research Stop works; smart auto-scroll (no hijack while reading);
+composer stays typeable while streaming; ErrorBoundary with reset-local-data; `?tab=` deep link;
+javascript: URLs stripped in markdown/export; cache TTL+LRU eviction; `gptoss:120b` typo (code-locate
+silently fell back to NIM every call); github.js preserves real status (Code tab 409 handling works
+now). NOT done (declined for now): shared-secret auth on github/code endpoints, CORS allowlist,
+Supabase auth — flagged as a real exposure; revisit anytime.
+
+**Extension handoff v2 (see Job-Assistant repo v1.12.0):** tailored résumé actually delivered to
+autofill (was silently discarded), redirect-proof tab adoption, live fill-status forwarded back into
+the Jobs tracker (`onFillStatus` → `t.fillStatus` chip), web→ext sync of the active résumé/profile
+(`sendSync`, fires on résumé change when the extension is present).
+
 ## Update 2026-07-06 — `api/jobs.js`: Adzuna proxy for the Job-Assistant extension
 
 `api/jobs.js` backs the **Job-Assistant** (Alicia AI) Chrome extension's Job Search feature — that

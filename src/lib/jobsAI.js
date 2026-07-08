@@ -27,7 +27,10 @@ export async function backendChat(history) {
   let buf = '', text = ''
   const handle = (line) => {
     const ln = line.trim(); if (!ln) return
-    try { const ev = JSON.parse(ln); if (ev.delta) text += ev.delta; else if (ev.error) throw new Error(ev.error) } catch { /* skip */ }
+    let ev
+    try { ev = JSON.parse(ln) } catch { return } // malformed line — skip it, NOT backend errors
+    if (ev.delta) text += ev.delta
+    else if (ev.error) throw new Error(ev.error) // must propagate: a swallowed error returns '' and downstream saves an empty résumé
   }
   while (true) {
     const { done, value } = await reader.read()
@@ -51,15 +54,16 @@ function tryJson(raw, kind) {
 
 // ── Ranking ──
 export function lexicalRank(results, resume) {
-  const rt = (resume || '').toLowerCase()
-  const toks = {}
-  rt.replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).forEach((w) => { if (w.length > 3) toks[w] = 1 })
-  const keys = Object.keys(toks)
+  // Score = fraction of the JOB's vocabulary covered by the résumé. (The old résumé-side denominator
+  // saturated every job at the 95 cap once the résumé was long, making the fallback ranking useless.)
+  const resumeToks = new Set((resume || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 3))
   return results.map((j) => {
-    const hay = ((j.title || '') + ' ' + (j.description || '') + ' ' + (j.category || '')).toLowerCase()
+    const jobToks = new Set(((j.title || '') + ' ' + (j.description || '') + ' ' + (j.category || ''))
+      .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 3))
+    if (!resumeToks.size || !jobToks.size) return { i: 0, score: 50, reason: '' }
     let hits = 0
-    keys.forEach((w) => { if (hay.indexOf(w) >= 0) hits++ })
-    const score = keys.length ? Math.min(95, Math.round((hits / Math.min(keys.length, 40)) * 100)) : 50
+    jobToks.forEach((w) => { if (resumeToks.has(w)) hits++ })
+    const score = Math.min(95, Math.round((hits / jobToks.size) * 140))
     return { i: 0, score, reason: '' }
   })
 }
@@ -105,7 +109,9 @@ export async function quickTailor(job, { activeText, otherTexts = [], memory = [
     '1. Use ONLY facts present in the candidate material (their résumés + confirmed facts below). NEVER invent employers, titles, dates, degrees, or skills.\n' +
     '2. Re-order, re-word, and re-emphasize existing experience toward this job\'s requirements. You may pull relevant details from the secondary résumés if present.\n' +
     '3. Keep it truthful, ATS-friendly, and one cohesive résumé. Output ONLY the full tailored résumé text — no preamble, no commentary.'
-  const others = otherTexts.filter(Boolean).map((t, i) => `\n\n[Secondary résumé ${i + 1}]\n${t.slice(0, 3000)}`).join('')
+  // Hard cap: the caller filters out tailored résumés, but never let the prompt grow unboundedly —
+  // feeding dozens of near-duplicate résumés back in slows the call and recycles AI output as source.
+  const others = otherTexts.filter(Boolean).slice(0, 2).map((t, i) => `\n\n[Secondary résumé ${i + 1}]\n${t.slice(0, 3000)}`).join('')
   const user = 'JOB: ' + (job.title || '') + ' @ ' + (job.company || '') + '\n' +
     (job.description || '').slice(0, 2500) + memoryBlock(memory) +
     '\n\n[Primary résumé]\n' + (activeText || '').slice(0, 6000) + others +

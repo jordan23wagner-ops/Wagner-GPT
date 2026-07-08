@@ -95,7 +95,8 @@ function mdToHtml(text) {
 
 function formatInline(text) {
   let s = escapeHtml(text)
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" style="color:#2563eb">$1</a>')
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) =>
+    /^(https?:|mailto:|\/|#)/i.test(url) ? `<a href="${url}" style="color:#2563eb">${label}</a>` : label)
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>')
   s = s.replace(/`(.+?)`/g, '<code style="background:#f3f4f6;padding:1px 4px;border-radius:3px;font-size:13px">$1</code>')

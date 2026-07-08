@@ -12,8 +12,12 @@ function esc(s) {
 
 function inline(text) {
   let s = esc(text)
-  // Links first so bold/italic don't mangle URLs: [label](url)
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent,#3b82f6);text-decoration:underline">$1</a>')
+  // Links first so bold/italic don't mangle URLs: [label](url). Scheme-guarded — a model-generated
+  // [click](javascript:...) must never become a live link inside dangerouslySetInnerHTML.
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) =>
+    /^(https?:|mailto:|\/|#)/i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent,#3b82f6);text-decoration:underline">${label}</a>`
+      : label)
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>')
   s = s.replace(/`([^`]+?)`/g, '<code style="background:rgba(128,128,128,.18);padding:1px 4px;border-radius:3px;font-size:0.85em">$1</code>')
@@ -44,7 +48,24 @@ function renderTable(header, rows) {
   )
 }
 
+// Memo cache: the chat re-renders EVERY message on every streamed token; without this, a long chat
+// re-parses every historical reply per token. Keyed by content — only the actively-streaming message
+// misses (its text changes), all settled messages hit.
+const MD_CACHE = new Map()
+const MD_CACHE_MAX = 300
 export default function renderMarkdown(text) {
+  const key = String(text || '')
+  const hit = MD_CACHE.get(key)
+  if (hit !== undefined) return hit
+  const html = renderMarkdownUncached(key)
+  if (key.length < 100000) {
+    MD_CACHE.set(key, html)
+    if (MD_CACHE.size > MD_CACHE_MAX) MD_CACHE.delete(MD_CACHE.keys().next().value)
+  }
+  return html
+}
+
+function renderMarkdownUncached(text) {
   const lines = String(text || '').split('\n')
   const out = []
   let i = 0

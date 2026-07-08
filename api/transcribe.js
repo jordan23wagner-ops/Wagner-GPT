@@ -23,11 +23,16 @@ export default async function handler(req, res) {
   formData.append('response_format', 'json')
   formData.append('language', 'en')
 
-  const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
-    body: formData,
-  })
+  let response
+  try {
+    response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
+      body: formData,
+    })
+  } catch (err) {
+    return res.status(502).json({ error: 'Whisper unreachable: ' + ((err && err.message) || 'network error') })
+  }
 
   if (!response.ok) {
     const body = await response.text().catch(() => '')

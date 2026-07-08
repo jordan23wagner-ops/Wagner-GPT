@@ -13,8 +13,24 @@ function readLS(key, fallback) {
   try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v) }
   catch { return fallback }
 }
+let quotaWarned = false
 function writeLS(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* quota — ignore */ }
+  try { localStorage.setItem(key, JSON.stringify(val)) }
+  catch {
+    if (!quotaWarned) { quotaWarned = true; console.warn('jobsStore: localStorage write failed (quota?) — Jobs data is no longer persisting locally') }
+  }
+}
+// Write only if the serialized value actually changed; returns whether it did. Lets save* skip the
+// updatedAt bump for no-op saves (e.g. the mount-time effects), so merely OPENING the app can't
+// mark the local snapshot "newer" and clobber fresher cloud data from another device.
+function writeLSIfChanged(key, val) {
+  const s = JSON.stringify(val)
+  try { if (localStorage.getItem(key) === s) return false } catch { /* fall through to write */ }
+  try { localStorage.setItem(key, s) } catch {
+    if (!quotaWarned) { quotaWarned = true; console.warn('jobsStore: localStorage write failed (quota?) — Jobs data is no longer persisting locally') }
+    return false
+  }
+  return true
 }
 
 // ── Local getters/setters (synchronous, used everywhere in the UI) ──
@@ -25,10 +41,10 @@ export function loadProfile() { return readLS(LS.profile, {}) }
 // { id, text, kind:'skill'|'fact', confirmedAt }. Injected into tailoring prompts; never invented.
 export function loadMemory() { return readLS(LS.memory, []) }
 
-export function saveResumes(arr) { writeLS(LS.resumes, arr || []); touch() }
-export function saveTracked(arr) { writeLS(LS.tracked, arr || []); touch() }
-export function saveProfile(obj) { writeLS(LS.profile, obj || {}); touch() }
-export function saveMemory(arr) { writeLS(LS.memory, arr || []); touch() }
+export function saveResumes(arr) { if (writeLSIfChanged(LS.resumes, arr || [])) touch() }
+export function saveTracked(arr) { if (writeLSIfChanged(LS.tracked, arr || [])) touch() }
+export function saveProfile(obj) { if (writeLSIfChanged(LS.profile, obj || {})) touch() }
+export function saveMemory(arr) { if (writeLSIfChanged(LS.memory, arr || [])) touch() }
 
 function snapshot() {
   return { resumes: loadResumes(), tracked: loadTracked(), profile: loadProfile(), memory: loadMemory(), updatedAt: readLS(LS.updatedAt, 0) }

@@ -2,19 +2,19 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
-  Folder, FolderOpen, ChevronRight, ChevronDown,
+  Folder, FolderOpen, ChevronRight, ChevronDown, Printer, Download,
 } from 'lucide-react'
 import { fileToStored } from './lib/resumeParse'
 import { parseDocument } from './lib/parseDocument'
 import {
-  loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory,
+  loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory, loadProfile,
   activeResume, syncDown,
 } from './lib/jobsStore'
 import {
   aiRank, lexicalRank, quickTailor, matchScore,
   backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
 } from './lib/jobsAI'
-import { extensionPresent, extensionVersion, waitForExtension, sendApply } from './lib/aliciaBridge'
+import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, onFillStatus } from './lib/aliciaBridge'
 import { isFortune500, layoffFlag } from './lib/companyData'
 
 // Industries mirror the backend's INDUSTRY_BOARDS keys (plus "Any"). `name` is sent to /api/jobs as
@@ -28,6 +28,10 @@ const INDUSTRIES = [
   { name: 'Healthcare Tech', match: /healthcare|nursing/i },
   { name: 'Manufacturing', match: /manufacturing/i },
   { name: 'Engineering', match: /engineering/i },
+  { name: 'Finance / Fintech', match: /accounting|finance/i },
+  { name: 'Retail / Consumer', match: /retail/i },
+  { name: 'Product Management', match: /it jobs/i },
+  { name: 'Media / Gaming', match: /creative|design|media/i },
 ]
 const COUNTRIES = [
   { v: 'us', label: 'United States' }, { v: 'gb', label: 'United Kingdom' },
@@ -99,6 +103,7 @@ function sortResults(list, sortBy) {
   const arr = list.slice()
   if (sortBy === 'salary') arr.sort((a, b) => (b._sal || 0) - (a._sal || 0) || (b._score || 0) - (a._score || 0))
   else if (sortBy === 'match') arr.sort((a, b) => (b._score || 0) - (a._score || 0))
+  else if (sortBy === 'date') arr.sort((a, b) => (b._ts || 0) - (a._ts || 0) || (b._score || 0) - (a._score || 0))
   else /* 'f500' */ arr.sort((a, b) => ((b._f500 ? 1 : 0) - (a._f500 ? 1 : 0)) || ((b._score || 0) - (a._score || 0)))
   return arr
 }
@@ -106,6 +111,26 @@ function fitColor(score) {
   if (score >= 75) return '#2e7d32'
   if (score >= 50) return '#7a6a12'
   return '#7a3a3a'
+}
+// Relative posting age ("3d ago") + numeric timestamp for the date sort. Null when unknown.
+function ageInfo(created) {
+  const t = Date.parse(created || '')
+  if (isNaN(t)) return null
+  const days = Math.max(0, Math.floor((Date.now() - t) / 86400000))
+  const text = days === 0 ? 'today' : days < 30 ? `${days}d ago` : days < 365 ? `${Math.floor(days / 30)}mo ago` : `${Math.floor(days / 365)}y ago`
+  return { ts: t, text, stale: days > 30 }
+}
+const fmtDate = (ms) => (ms ? new Date(ms).toLocaleDateString() : '')
+
+// Hoisted so React doesn't see a brand-new component type (and remount all tab buttons) every render.
+function TabBtn({ id, label, Icon, viewTab, setViewTab }) {
+  return (
+    <button onClick={() => setViewTab(id)}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${
+        viewTab === id ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'}`}>
+      <Icon size={15} /> {label}
+    </button>
+  )
 }
 
 export default function Jobs() {
@@ -125,8 +150,32 @@ export default function Jobs() {
       if (Array.isArray(d.memory)) setMemory(d.memory)
     })
     waitForExtension().then((p) => { if (alive) { setHasExt(p); setExtVer(extensionVersion()) } })
-    return () => { alive = false }
+    // Live fill-status from the extension while it auto-fills application tabs → tracker rows.
+    const off = onFillStatus((p) => {
+      const keyOf = (u) => String(u || '').split('?')[0].replace(/\/+$/, '').toLowerCase()
+      const keys = [keyOf(p.origUrl), keyOf(p.url)].filter(Boolean)
+      if (!keys.length || !p.result) return
+      setTracked((prev) => prev.map((t) => (t.url && keys.includes(keyOf(t.url))
+        ? { ...t, fillStatus: p.result.status, fillAt: Date.now() } : t)))
+    })
+    return () => { alive = false; off() }
   }, [])
+
+  // Push the active résumé (text + original file) and profile into the extension whenever they
+  // change, so autofill always fills with what THIS app has — one source of truth.
+  const activeForSync = activeResume(resumes)
+  useEffect(() => {
+    if (!hasExt || !activeForSync || !activeForSync.text) return
+    const t = setTimeout(() => {
+      sendSync({
+        resumeText: activeForSync.text,
+        resumeName: activeForSync.name,
+        resumeFile: activeForSync.file || null,
+        profile: loadProfile(),
+      })
+    }, 800)
+    return () => clearTimeout(t)
+  }, [hasExt, activeForSync && activeForSync.id, activeForSync && activeForSync.text]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { saveResumes(resumes) }, [resumes])
   useEffect(() => { saveTracked(tracked) }, [tracked])
@@ -151,42 +200,39 @@ export default function Jobs() {
     })
   }
 
-  const TabBtn = ({ id, label, Icon }) => (
-    <button onClick={() => setViewTab(id)}
-      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${
-        viewTab === id ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'}`}>
-      <Icon size={15} /> {label}
-    </button>
-  )
-
+  const tb = { viewTab, setViewTab }
+  // Views stay MOUNTED and toggle with `hidden` — unmounting SearchView used to throw away the
+  // results/selection every time you peeked at the Tracker, forcing a full (quota-burning) re-search.
   return (
     <div className="flex-1 overflow-y-auto bg-[var(--bg)]">
       <div className="max-w-3xl mx-auto p-4 space-y-4 text-[var(--text)]">
         <div className="flex items-center gap-2 flex-wrap">
-          <TabBtn id="search" label="Search" Icon={Search} />
-          <TabBtn id="resumes" label={`Résumés${resumes.length ? ` (${resumes.length})` : ''}`} Icon={FileText} />
-          <TabBtn id="tracker" label={`Tracker${tracked.length ? ` (${tracked.length})` : ''}`} Icon={Bookmark} />
-          <TabBtn id="memory" label={`Memory${memory.length ? ` (${memory.length})` : ''}`} Icon={Brain} />
+          <TabBtn id="search" label="Search" Icon={Search} {...tb} />
+          <TabBtn id="resumes" label={`Résumés${resumes.length ? ` (${resumes.length})` : ''}`} Icon={FileText} {...tb} />
+          <TabBtn id="tracker" label={`Tracker${tracked.length ? ` (${tracked.length})` : ''}`} Icon={Bookmark} {...tb} />
+          <TabBtn id="memory" label={`Memory${memory.length ? ` (${memory.length})` : ''}`} Icon={Brain} {...tb} />
           <span className="ml-auto text-xs text-[var(--muted)] truncate max-w-[40%]">
             {active ? `Active résumé: ${active.name}` : 'No active résumé — add one for fit ranking'}
           </span>
         </div>
 
-        {viewTab === 'search' && (
+        <div className={viewTab === 'search' ? '' : 'hidden'}>
           <SearchView activeResume={active} resumes={resumes} memory={memory} setMemory={setMemory}
             hasExt={hasExt} extVer={extVer} addSavedResume={addSavedResume} upsertTracked={upsertTracked}
-            trackedUrls={tracked.map((t) => t.url)} />
-        )}
-        {viewTab === 'resumes' && <ResumesView resumes={resumes} setResumes={setResumes} />}
-        {viewTab === 'tracker' && <TrackerView tracked={tracked} setTracked={setTracked} />}
-        {viewTab === 'memory' && <MemoryView memory={memory} setMemory={setMemory} />}
+            tracked={tracked} />
+        </div>
+        <div className={viewTab === 'resumes' ? '' : 'hidden'}><ResumesView resumes={resumes} setResumes={setResumes} /></div>
+        <div className={viewTab === 'tracker' ? '' : 'hidden'}><TrackerView tracked={tracked} setTracked={setTracked} resumes={resumes} /></div>
+        <div className={viewTab === 'memory' ? '' : 'hidden'}><MemoryView memory={memory} setMemory={setMemory} /></div>
       </div>
     </div>
   )
 }
 
 // ─────────────────────────── Search ───────────────────────────
-function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, addSavedResume, upsertTracked, trackedUrls }) {
+function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, addSavedResume, upsertTracked, tracked }) {
+  const trackedByUrl = {}
+  tracked.forEach((t) => { if (t.url) trackedByUrl[t.url] = t })
   const [titles, setTitles] = useState('')
   const [industry, setIndustry] = useState('AI / Machine Learning')
   const [location, setLocation] = useState('')
@@ -219,23 +265,35 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     return hit ? hit.tag : ''
   }
 
-  const doSearch = async () => {
-    setBusy(true); setResults([]); setSources(null); setSelected({}); setStatus('Searching company boards + aggregators…')
+  const [page, setPage] = useState(1)
+  const doSearch = async (opts = {}) => {
+    if (busy) return // Enter key used to bypass the disabled button and race two searches
+    const append = !!opts.append
+    const pageN = append ? page + 1 : 1
+    setBusy(true)
+    if (!append) { setResults([]); setSources(null); setSelected({}) }
+    setStatus(append ? 'Loading more…' : 'Searching company boards + aggregators…')
     try {
       const resp = await fetch('/api/jobs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'search', titles: titles.trim(), industry, category: resolveCategory(),
           where: location.trim(), salaryMin: salaryMin.trim(), remote, fullTime, country, resultsPerPage: 60,
+          page: pageN,
         }),
       })
       const d = await resp.json()
       if (d && d.error) { setStatus(d.error); return }
       let list = (d && d.results) || []
-      setSources(d && d.sources)
-      if (!list.length) { setStatus('No jobs found — try broader titles, fewer filters, or a different industry.'); return }
+      if (!append) setSources(d && d.sources)
+      if (append) {
+        // Only sources that page (Adzuna) yield new jobs; drop everything already shown.
+        const seen = new Set(results.map((j) => (j.url || j.id).toLowerCase()))
+        list = list.filter((j) => !seen.has((j.url || j.id).toLowerCase()))
+        if (!list.length) { setStatus('No more new jobs for this search.'); return }
+      } else if (!list.length) { setStatus('No jobs found — try broader titles, fewer filters, or a different industry.'); return }
       const resume = (activeResume && activeResume.text) || ''
-      setStatus(`Found ${list.length} — ranking by fit…`)
+      setStatus(`Found ${list.length}${append ? ' more' : ''} — ranking by fit…`)
       let scores
       if (aiFit && resume) { try { scores = await aiRank(list, resume) } catch { scores = lexicalRank(list, resume) } }
       else scores = lexicalRank(list, resume)
@@ -243,11 +301,18 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
       list = list.map((j, idx) => {
         const s = byI[idx] || {}
-        return { ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '', _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j) }
+        const age = ageInfo(j.created)
+        return {
+          ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '',
+          _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j),
+          _salInfo: salaryInfo(j), _age: age, _ts: age ? age.ts : 0, // precomputed once — cards used to re-regex every render
+        }
       })
-      setResults(list)
-      const f500n = list.filter((j) => j._f500).length
-      setStatus(`Showing ${list.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
+      const merged = append ? [...results, ...list] : list
+      setResults(merged)
+      setPage(pageN)
+      const f500n = merged.filter((j) => j._f500).length
+      setStatus(`Showing ${merged.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
     } catch (err) {
       setStatus('Search failed: ' + ((err && err.message) || 'unknown') + '.')
     } finally { setBusy(false) }
@@ -291,6 +356,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const startPrep = (mode) => {
     let jobs = selectedJobs
     if (!jobs.length) { setStatus('Select one or more jobs first (checkbox on each card).'); return }
+    if (!resumes.length) { setStatus('Add a résumé first (Résumés tab) — tailoring an empty résumé produces nothing usable.'); return }
     if (jobs.length > MAX_BATCH) { jobs = jobs.slice(0, MAX_BATCH); setStatus(`Batch capped at ${MAX_BATCH} — prepping your top ${MAX_BATCH} by fit.`) }
     setPrep({ mode, jobs })
   }
@@ -379,6 +445,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
             <option value="f500">Fortune 500 first</option>
             <option value="match">Best match (fit)</option>
             <option value="salary">Salary (high → low)</option>
+            <option value="date">Newest first</option>
           </select>
         </div>
       )}
@@ -387,8 +454,10 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
         {shown.map((j) => {
           const atsReady = ATS_HOST_RE.test((j.url || '').replace(/^https?:\/\//, ''))
           const scoreShown = typeof j._score === 'number'
-          const saved = trackedUrls.includes(j.url)
-          const sal = salaryInfo(j)
+          const trackedRec = trackedByUrl[j.url]
+          const saved = !!trackedRec
+          const applied = trackedRec && trackedRec.status && trackedRec.status !== 'saved'
+          const sal = j._salInfo
           const tailored = findTailored(resumes, j)
           return (
             <div key={j.id} className={`rounded-xl border bg-[var(--surface)] p-4 flex gap-3 ${selected[j.id] ? 'border-[var(--accent)]' : 'border-[var(--border)]'}`}>
@@ -407,9 +476,11 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                     : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title="Apply opens the employer's own posting directly">✓ direct apply</span>}
                   {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
                   {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
+                  {j._age && <span className={`text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] ${j._age.stale ? 'text-orange-500' : 'text-[var(--muted)]'}`} title={`Posted ${j._age.text}${j._age.stale ? ' — may be stale' : ''}`}>🕒 {j._age.text}</span>}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
                   {tailored && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 text-green-600 border-green-600" title={`Tailored résumé already saved: ${tailored.name}`}><FileCheck size={11} /> résumé ready</span>}
+                  {applied && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#1565c0' }} title={`Already in your tracker: ${trackedRec.status}${trackedRec.savedAt ? ' · ' + fmtDate(trackedRec.savedAt) : ''}`}>✓ {trackedRec.status}</span>}
                 </div>
                 {j._layoff && <div className="text-[11px] text-orange-500 mb-1">⚠ {j.company} — recent layoffs: {j._layoff}</div>}
                 {j._reason && <div className="text-xs italic text-[var(--muted)] mb-1">{j._reason}</div>}
@@ -427,6 +498,12 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
             </div>
           )
         })}
+        {results.length > 0 && (
+          <button onClick={() => doSearch({ append: true })} disabled={busy}
+            className="w-full py-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-50 flex items-center justify-center gap-1.5">
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Load more
+          </button>
+        )}
       </div>
 
       {prep && (
@@ -452,7 +529,9 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
   const [applyMsg, setApplyMsg] = useState('')
   const started = useRef(false)
   const base = (activeResume && activeResume.text) || (resumes[0] && resumes[0].text) || ''
-  const others = resumes.filter((r) => !activeResume || r.id !== activeResume.id).map((r) => r.text)
+  // Secondary material = BASE résumés only. Including tailored ones fed every previous AI output
+  // back into every new tailor call — an unboundedly growing prompt of near-duplicates.
+  const others = resumes.filter((r) => !r.tailoredForJob && (!activeResume || r.id !== activeResume.id)).map((r) => r.text)
 
   // Kick off deep Q&A.
   useEffect(() => {
@@ -512,11 +591,12 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       await Promise.all(jobs.map(async (job, i) => {
         if (cancelled) return
         const set = (patch) => setProgress((p) => p.map((r, k) => (k === i ? { ...r, ...patch } : r)))
-        // Reuse an existing tailored résumé for this job (quick mode) instead of doubling up.
+        // Reuse an existing tailored résumé for this job (quick mode) instead of doubling up —
+        // and reuse its saved score too, instead of a fresh AI call for a number we already computed.
         const existing = mode === 'quick' ? findTailored(resumes, job) : null
         if (existing) {
-          let score = job._score || 70
-          try { score = (await matchScore(existing.text, job)).score } catch { /* */ }
+          let score = (existing.tailoredForJob && existing.tailoredForJob.score) || job._score || 70
+          if (!(existing.tailoredForJob && existing.tailoredForJob.score)) { try { score = (await matchScore(existing.text, job)).score } catch { /* */ } }
           set({ state: 'done', score, tailoredText: existing.text, resumeId: existing.id, decision: 'ready', reused: true })
           return
         }
@@ -524,12 +604,13 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         let tailoredText = ''
         try { tailoredText = await quickTailor(job, { activeText: base, otherTexts: others, memory: mem }) }
         catch { set({ state: 'error', decision: 'skipped' }); return }
+        if (!tailoredText || tailoredText.trim().length < 200) { set({ state: 'error', decision: 'skipped' }); return } // backend hiccup — never save/apply an empty résumé
         if (cancelled) return
         set({ state: 'scoring', tailoredText })
         let score = 60
         try { score = (await matchScore(tailoredText, job)).score } catch { /* keep default */ }
         const name = `Tailored — ${job.company || 'Company'} · ${job.title || 'Role'}`.slice(0, 80)
-        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company, url: job.url })
+        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company, url: job.url, score })
         // Auto-skip weak fits only for deep rewrite (per the chosen behavior).
         const decision = (mode === 'deep' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
         set({ state: 'done', score, resumeId, decision })
@@ -551,7 +632,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
   // Note: browsers typically allow only the first window.open per click, so batches often open 1 tab
   // and block the rest — we report that honestly and leave the blocked ones for "View posting".
   const doApply = () => {
-    const chosen = progress.filter((r) => applySel[r.job.id] && r.decision !== 'error')
+    const chosen = progress.filter((r) => applySel[r.job.id] && r.state === 'done' && r.tailoredText)
     if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
     const openedRows = []
     chosen.forEach((r) => { const w = r.job.url ? window.open(r.job.url, '_blank') : null; if (w) openedRows.push(r) })
@@ -590,7 +671,15 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
           {phase === 'qa' && (
             <>
               <p className="text-xs text-[var(--muted)]">Alicia is finding gaps across your {jobs.length} selected jobs. Answer honestly — it only adds what you confirm.</p>
-              <div className="rounded-lg bg-[var(--surface-2)] p-3 text-sm whitespace-pre-wrap min-h-[60px]">{thinking && !lastAssistant ? 'Thinking…' : (lastAssistant ? lastAssistant.content : '')}</div>
+              <div className="rounded-lg bg-[var(--surface-2)] p-3 text-sm space-y-2 min-h-[60px] max-h-72 overflow-y-auto">
+                {history.filter((m, i) => m.role !== 'system' && i !== 1).map((m, i) => (
+                  <div key={i} className={m.role === 'user' ? 'text-right' : ''}>
+                    <span className={`inline-block whitespace-pre-wrap rounded-lg px-2.5 py-1.5 max-w-[90%] text-left ${m.role === 'user' ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface)]'}`}>{m.content}</span>
+                  </div>
+                ))}
+                {thinking && <div className="text-[var(--muted)]">Thinking…</div>}
+                {!thinking && !lastAssistant && <div className="text-[var(--muted)]">Starting…</div>}
+              </div>
               <div className="flex gap-2">
                 <input className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm"
                   placeholder='Your answer… (or type "done")' value={input} disabled={thinking}
@@ -625,9 +714,8 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
               {progress.map((r) => (
                 <div key={r.job.id} className="rounded-lg border border-[var(--border)] p-3">
                   <div className="flex items-center gap-2">
-                    {phase === 'review' && r.decision !== 'error' && (
-                      <input type="checkbox" checked={!!applySel[r.job.id]} onChange={() => setApplySel((s) => ({ ...s, [r.job.id]: !s[r.job.id] }))}
-                        disabled={r.decision === 'skipped' && false} />
+                    {phase === 'review' && r.state === 'done' && (
+                      <input type="checkbox" checked={!!applySel[r.job.id]} onChange={() => setApplySel((s) => ({ ...s, [r.job.id]: !s[r.job.id] }))} />
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium truncate">{r.job.title} <span className="text-[var(--muted)] font-normal">· {r.job.company}</span></div>
@@ -722,6 +810,18 @@ function ResumesView({ resumes, setResumes }) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
     a.download = (r.name || 'resume').replace(/[^\w.-]+/g, '_') + '.txt'; a.click(); URL.revokeObjectURL(a.href)
   }
+  // Print-ready view → the browser's print dialog saves a clean PDF (ATS portals want PDF, not .txt).
+  const printResume = (r) => {
+    const w = window.open('', '_blank')
+    if (!w) { setStatus('Pop-up blocked — allow pop-ups to print/PDF a résumé.'); return }
+    const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    w.document.write(`<!doctype html><html><head><title>${esc(r.name)}</title><style>
+      body{font:11pt/1.5 Georgia,'Times New Roman',serif;color:#111;background:#fff;max-width:7.5in;margin:0.6in auto;white-space:pre-wrap;word-wrap:break-word}
+      @media print{body{margin:0}}
+    </style></head><body>${esc(r.text)}</body></html>`)
+    w.document.close(); w.focus()
+    setTimeout(() => { try { w.print() } catch { /* user can Ctrl+P */ } }, 300)
+  }
 
   return (
     <div className="space-y-3">
@@ -758,6 +858,7 @@ function ResumesView({ resumes, setResumes }) {
               </div>
             </div>
             <button onClick={() => setViewing(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="View"><FileText size={16} /></button>
+            <button onClick={() => printResume(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Print / save as PDF"><Printer size={16} /></button>
             <button onClick={() => download(r)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Download .txt"><Upload size={16} className="rotate-180" /></button>
             <button onClick={() => rename(r.id)} className="text-[var(--muted)] hover:text-[var(--text)]" title="Rename"><Pencil size={16} /></button>
             <button onClick={() => del(r.id)} className="text-red-500 hover:opacity-80" title="Delete"><Trash2 size={16} /></button>
@@ -833,26 +934,88 @@ function MemoryView({ memory, setMemory }) {
 
 // ─────────────────────────── Tracker ───────────────────────────
 const STATUSES = ['saved', 'applied', 'interview', 'offer', 'rejected']
-function TrackerView({ tracked, setTracked }) {
+// Live autofill states forwarded by the extension while it fills an application tab.
+const FILL_STATUS_LABELS = {
+  ready_to_submit: { text: '✓ filled — click Submit in the tab', color: '#2e7d32' },
+  answered_review: { text: 'AI answered — review in the tab', color: '#7a6a12' },
+  stopped_needs_input: { text: 'needs your input in the tab', color: '#7a6a12' },
+  done_no_more_fields: { text: 'filled', color: '#2e7d32' },
+  no_fields_found: { text: 'no form found — apply manually', color: '#7a3a3a' },
+  stopped_step_cap: { text: 'stopped (too many steps)', color: '#7a3a3a' },
+  no_profile: { text: 'set up the extension profile first', color: '#7a3a3a' },
+  error: { text: 'autofill error', color: '#7a3a3a' },
+}
+function TrackerView({ tracked, setTracked, resumes }) {
+  const [filter, setFilter] = useState('') // '' = all; else one of STATUSES
+  const [viewing, setViewing] = useState(null) // résumé being viewed
   const setStatus = (id, status) => setTracked((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)))
   const setNotes = (id, notes) => setTracked((prev) => prev.map((t) => (t.id === id ? { ...t, notes } : t)))
   const del = (id) => setTracked((prev) => prev.filter((t) => t.id !== id))
   const counts = STATUSES.reduce((acc, s) => { acc[s] = tracked.filter((t) => t.status === s).length; return acc }, {})
+  const exportCsv = () => {
+    const esc = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"'
+    const rows = [['Title', 'Company', 'Location', 'Status', 'Saved', 'Résumé used', 'URL', 'Notes'],
+      ...tracked.map((t) => {
+        const r = t.resumeId && resumes.find((x) => x.id === t.resumeId)
+        return [t.title, t.company, t.location, t.status, t.savedAt ? new Date(t.savedAt).toISOString().slice(0, 10) : '', r ? r.name : '', t.url, t.notes || '']
+      })]
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([rows.map((r) => r.map(esc).join(',')).join('\n')], { type: 'text/csv' }))
+    a.download = 'applications.csv'; a.click(); URL.revokeObjectURL(a.href)
+  }
   if (!tracked.length) return <div className="text-center text-[var(--muted)] py-10 text-sm">No tracked applications yet. Save jobs from Search to track them here.</div>
+  const shown = filter ? tracked.filter((t) => t.status === filter) : tracked
   return (
     <div className="space-y-3">
-      <div className="flex gap-2 flex-wrap text-xs text-[var(--muted)]">{STATUSES.map((s) => <span key={s} className="px-2 py-1 rounded-lg bg-[var(--surface-2)]">{s}: {counts[s]}</span>)}</div>
-      {tracked.map((t) => (
-        <div key={t.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
-          <div className="flex items-start gap-3">
-            <div className="min-w-0 flex-1"><div className="font-medium text-sm">{t.title}</div><div className="text-xs text-[var(--muted)]">{t.company}{t.location ? ' · ' + t.location : ''}</div></div>
-            <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)} className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs">{STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
-            {t.url && <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-[var(--muted)] hover:text-[var(--text)] mt-1"><ExternalLink size={15} /></a>}
-            <button onClick={() => del(t.id)} className="text-red-500 hover:opacity-80 mt-1"><Trash2 size={15} /></button>
+      <div className="flex gap-2 flex-wrap items-center text-xs">
+        <button onClick={() => setFilter('')} className={`px-2 py-1 rounded-lg ${!filter ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'}`}>all: {tracked.length}</button>
+        {STATUSES.map((s) => (
+          <button key={s} onClick={() => setFilter(filter === s ? '' : s)}
+            className={`px-2 py-1 rounded-lg ${filter === s ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)]'}`}>{s}: {counts[s]}</button>
+        ))}
+        <button onClick={exportCsv} className="ml-auto flex items-center gap-1 px-2 py-1 rounded-lg bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--text)]" title="Export all to CSV"><Download size={12} /> CSV</button>
+      </div>
+      {shown.map((t) => {
+        const usedResume = t.resumeId && resumes.find((r) => r.id === t.resumeId)
+        return (
+          <div key={t.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-sm">{t.title}</div>
+                <div className="text-xs text-[var(--muted)]">
+                  {t.company}{t.location ? ' · ' + t.location : ''}
+                  {t.savedAt ? <span title="Saved to tracker"> · {fmtDate(t.savedAt)}</span> : ''}
+                </div>
+                {t.fillStatus && FILL_STATUS_LABELS[t.fillStatus] && (
+                  <div className="text-[11px] mt-0.5 font-medium" style={{ color: FILL_STATUS_LABELS[t.fillStatus].color }}
+                    title={t.fillAt ? 'Last autofill update: ' + new Date(t.fillAt).toLocaleString() : ''}>
+                    ⚡ {FILL_STATUS_LABELS[t.fillStatus].text}
+                  </div>
+                )}
+                {usedResume && (
+                  <button onClick={() => setViewing(usedResume)} className="mt-0.5 text-[11px] text-[var(--accent)] underline flex items-center gap-1" title="The exact résumé you applied with — review it before an interview">
+                    <FileCheck size={11} /> {usedResume.name}
+                  </button>
+                )}
+              </div>
+              <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)} className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs">{STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
+              {t.url && <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-[var(--muted)] hover:text-[var(--text)] mt-1"><ExternalLink size={15} /></a>}
+              <button onClick={() => del(t.id)} className="text-red-500 hover:opacity-80 mt-1"><Trash2 size={15} /></button>
+            </div>
+            {/* Commit notes on blur — per-keystroke commits re-serialized the whole tracker + scheduled a cloud push each key. */}
+            <input className="mt-2 w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs" placeholder="Notes…"
+              defaultValue={t.notes || ''} onBlur={(e) => { if (e.target.value !== (t.notes || '')) setNotes(t.id, e.target.value) }} />
           </div>
-          <input className="mt-2 w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs" placeholder="Notes…" value={t.notes || ''} onChange={(e) => setNotes(t.id, e.target.value)} />
+        )
+      })}
+      {viewing && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setViewing(null)}>
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-3 border-b border-[var(--border)]"><div className="font-semibold text-sm truncate">{viewing.name}</div><button onClick={() => setViewing(null)} className="text-[var(--muted)]"><X size={18} /></button></div>
+            <pre className="p-4 overflow-auto text-xs whitespace-pre-wrap font-mono text-[var(--text)]">{viewing.text}</pre>
+          </div>
         </div>
-      ))}
+      )}
     </div>
   )
 }

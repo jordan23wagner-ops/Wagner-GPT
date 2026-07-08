@@ -9,12 +9,10 @@
 //                            career sites, just via their public JSON endpoints).
 //   3. Discovery (opt)     — Brave/Tavily to find more ATS boards for the query, then fetch them
 //                            (uses BRAVE_KEY / TAVILY_KEY if present; silently skipped otherwise).
-//   4. Jina reader (opt)   — r.jina.ai (no key) to read arbitrary career pages, then one Groq
-//                            extraction pass. Off unless body.deepScrape is set (protects the
-//                            60s function budget).
+//   4. JSearch + Himalayas — direct-apply aggregators (JSearch needs a RapidAPI key).
 //
 // POST { action:'search', titles|what, industry, where, salaryMin, salaryMax, remote, fullTime,
-//        country, resultsPerPage, category, deepScrape } -> { results:[...], count, sources:{...} }
+//        country, resultsPerPage, category, page } -> { results:[...], count, sources:{...} }
 // POST { action:'categories', country }                  -> { categories:[{ tag, label }] }
 //
 // Result item: { id, title, company, location, salaryMin, salaryMax, salaryPredicted, url,
@@ -163,12 +161,33 @@ function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+// Warm-lambda TTL cache. Board contents change hourly at most, but every search used to re-download
+// entire boards (multi-MB JSON for big companies) plus re-run Brave/Tavily discovery — twice the
+// cost for two consecutive searches with tweaked filters. Cached job objects are only ever read or
+// flagged idempotently (j.direct), never structurally mutated, so sharing them across requests is safe.
+const CACHE_TTL_MS = 10 * 60 * 1000
+const _cache = new Map()
+function cached(key, fn) {
+  const hit = _cache.get(key)
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return Promise.resolve(hit.value)
+  return Promise.resolve(fn()).then((value) => {
+    const empty = Array.isArray(value) ? !value.length : !value
+    if (!empty) {
+      _cache.set(key, { at: Date.now(), value })
+      if (_cache.size > 200) _cache.delete(_cache.keys().next().value)
+    }
+    return value
+  })
+}
+
 // ── JSearch (Google for Jobs via RapidAPI) — direct employer/ATS apply links ────────────────────
 // The one broad source that flags DIRECT links: each job's apply_options[] carries is_direct, and
 // job_apply_is_direct on the primary link. We pick the direct option (preferring known ATS/company
 // publishers) so "Apply" lands on the real posting, not an aggregator. Needs a free RapidAPI key.
 const JSEARCH_KEY = process.env.JSEARCH_KEY || process.env.RAPIDAPI_KEY || process.env.JSEARCH || process.env.RAPID_API_KEY
 const DIRECT_PUBLISHER_RE = /greenhouse|lever|ashby|workday|icims|smartrecruiters|taleo|workable|bamboohr|recruitee|jobvite|career|company/i
+// Known ATS hosts (mirror of the client's regex in src/Jobs.jsx — serverless can't import it).
+const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|recruitee)\.(com|io|co|net)/i
 function pick(o, keys) { for (const k of keys) { const v = o && o[k]; if (v !== undefined && v !== null && v !== '') return v } return undefined }
 function jsearchApplyLink(j) {
   const opts = Array.isArray(j.apply_options) ? j.apply_options : (Array.isArray(j.apply_links) ? j.apply_links : [])
@@ -361,7 +380,7 @@ const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fe
 async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {
     const fn = ATS_FETCHERS[b.ats]
-    return fn ? fn(b) : Promise.resolve([])
+    return fn ? cached(b.ats + ':' + b.slug, () => fn(b)) : Promise.resolve([])
   }))
   return settled.flatMap((s) => (s.status === 'fulfilled' && Array.isArray(s.value) ? s.value : []))
 }
@@ -486,14 +505,21 @@ function looksRemote(job) {
 }
 
 function dedupe(jobs) {
-  const seen = new Set()
+  // The same job seen through two sources always has two DIFFERENT URLs (boards.greenhouse.io/...
+  // vs adzuna.com/land/...), so URL identity alone never catches cross-source duplicates. Also key
+  // on company|title|city — direct sources are merged first, so the direct link wins over the same
+  // job's aggregator link. City keeps a company's multi-location postings of the same title distinct.
+  const seenUrl = new Set()
+  const seenJob = new Set()
   const out = []
   for (const j of jobs) {
     if (!j || !j.title) continue
     const urlKey = (j.url || '').split('?')[0].toLowerCase()
-    const idKey = urlKey || (j.company + '|' + j.title).toLowerCase()
-    if (seen.has(idKey)) continue
-    seen.add(idKey)
+    const city = String(j.location || '').split(',')[0].toLowerCase().replace(/[^a-z]/g, '') || (looksRemote(j) ? 'remote' : '')
+    const jobKey = (j.company && j.title) ? (j.company + '|' + j.title + '|' + city).toLowerCase() : ''
+    if ((urlKey && seenUrl.has(urlKey)) || (jobKey && seenJob.has(jobKey))) continue
+    if (urlKey) seenUrl.add(urlKey)
+    if (jobKey) seenJob.add(jobKey)
     out.push(j)
   }
   return out
@@ -534,14 +560,12 @@ export default async function handler(req, res) {
     const tasks = []
     tasks.push(fetchAdzuna(body, country).then((r) => ({ kind: 'adzuna', ...r })).catch(() => ({ kind: 'adzuna', results: [] })))
     tasks.push(fetchJSearch(titles || industry, body.where, body.remote, country).then((r) => ({ kind: 'jsearch', ...r })).catch(() => ({ kind: 'jsearch', results: [] })))
-    tasks.push(fetchHimalayas().then((results) => ({ kind: 'himalayas', results })).catch(() => ({ kind: 'himalayas', results: [] })))
+    tasks.push(cached('himalayas', fetchHimalayas).then((results) => ({ kind: 'himalayas', results })).catch(() => ({ kind: 'himalayas', results: [] })))
     if (seedBoards.length) tasks.push(fetchBoards(seedBoards).then((results) => ({ kind: 'ats', results })).catch(() => ({ kind: 'ats', results: [] })))
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
-    let discovered = []
     if (discoveryQuery && (BRAVE_KEY || TAVILY_KEY)) {
-      const boards = await discoverBoards(discoveryQuery)
-      discovered = boards
+      const boards = await cached('discover:' + discoveryQuery.toLowerCase(), () => discoverBoards(discoveryQuery))
       if (boards.length) tasks.push(fetchBoards(boards).then((results) => ({ kind: 'discovered', results })).catch(() => ({ kind: 'discovered', results: [] })))
     }
 
@@ -558,10 +582,13 @@ export default async function handler(req, res) {
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
     }
 
-    // Filter the non-Adzuna sources by title + remote/location (Adzuna is filtered server-side).
+    // Filter the non-Adzuna sources by title + remote/location + salary/contract (Adzuna gets these
+    // filters server-side via its API params; the direct sources ranked FIRST must honor them too).
     const terms = tokenizeTitles(titles)
     const wantRemote = !!body.remote
     const where = String(body.where || '').trim().toLowerCase()
+    const salaryFloor = parseInt(body.salaryMin, 10) || 0
+    const wantFullTime = !!body.fullTime
     const filterJob = (j) => {
       if (!titleMatches(j.title, terms)) return false
       if (wantRemote && !looksRemote(j)) return false
@@ -569,6 +596,13 @@ export default async function handler(req, res) {
         const loc = (j.location || '').toLowerCase()
         if (loc && !loc.includes(where) && !looksRemote(j)) return false
       }
+      // Salary floor drops only postings whose KNOWN top-of-range is below it — most direct boards
+      // don't publish salary, and those stay in rather than vanishing silently.
+      if (salaryFloor) {
+        const top = j.salaryMax || j.salaryMin
+        if (top && top < salaryFloor) return false
+      }
+      if (wantFullTime && j.contractTime && /part[ _-]?time|intern(ship)?\b|contract|temporary|seasonal/i.test(String(j.contractTime))) return false
       return true
     }
     const boardResults = [...bucket.ats, ...bucket.discovered].filter(filterJob)
@@ -583,10 +617,12 @@ export default async function handler(req, res) {
     // Dedupe preferring DIRECT-link sources over Adzuna's aggregator link for the same job.
     let merged = dedupe([...boardResults, ...jsearchResults, ...himalayasResults, ...bucket.adzuna])
 
-    // Order: direct links first (company boards / JSearch-direct / Himalayas / USAJobs), Adzuna last.
+    // Order: direct links first (company boards / JSearch-direct / Himalayas), Adzuna last;
+    // freshest first within each rank so the cap keeps recent postings, not one giant board's tail.
     const cap = Math.min(80, Math.max(20, parseInt(body.resultsPerPage, 10) || 50))
     const rank = (j) => (j.source === 'adzuna' ? 2 : (j.direct === false ? 1 : 0))
-    merged.sort((a, b) => rank(a) - rank(b))
+    const postedAt = (j) => { const t = Date.parse(j.created || ''); return isNaN(t) ? 0 : t }
+    merged.sort((a, b) => (rank(a) - rank(b)) || (postedAt(b) - postedAt(a)))
     merged = merged.slice(0, cap)
 
     return res.status(200).json({

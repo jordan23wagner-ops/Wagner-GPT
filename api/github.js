@@ -63,7 +63,7 @@ async function gh(token, path, options = {}) {
     let detail = body.slice(0, 200)
     try { detail = JSON.parse(body).message || detail } catch { /* keep raw */ }
     const err = new Error(`GitHub ${response.status}: ${detail}`)
-    err.status = response.status === 404 ? 404 : 502
+    err.status = response.status // preserve it — Code.jsx branches on 409 (sha conflict)
     throw err
   }
   return response.json()

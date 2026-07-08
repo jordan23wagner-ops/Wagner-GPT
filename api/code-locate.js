@@ -55,7 +55,7 @@ export default async function handler(req, res) {
     let raw
     if (OLLAMA_KEY) {
       try {
-        raw = await complete(messages, 'gptoss:120b', OLLAMA_KEY, 'ollama')
+        raw = await complete(messages, 'gpt-oss:120b', OLLAMA_KEY, 'ollama')
       } catch (err) {
         if (!NIM_KEY) throw err
         raw = await complete(messages, 'meta/llama-3.3-70b-instruct', NIM_KEY, 'nim')

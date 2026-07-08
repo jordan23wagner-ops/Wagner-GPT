@@ -44,3 +44,34 @@ export function sendApply(jobs, opts = {}) {
     setTimeout(() => { window.removeEventListener('message', onMsg); resolve(false) }, 2500)
   })
 }
+
+// Push the app's résumé/profile into the extension so autofill always uses what THIS app has
+// (one source of truth instead of two independent résumé stores).
+// data: { resumeText, resumeName, resumeFile: {name,type,b64}, profile }
+export function sendSync(data) {
+  return new Promise((resolve) => {
+    if (!extensionPresent()) { resolve(false); return }
+    const nonce = 's' + Math.random().toString(36).slice(2)
+    const onMsg = (e) => {
+      if (e.source === window && e.data && e.data.source === 'alicia-ext' && e.data.type === 'SYNC_ACK' && e.data.nonce === nonce) {
+        window.removeEventListener('message', onMsg); resolve(!!e.data.ok)
+      }
+    }
+    window.addEventListener('message', onMsg)
+    window.postMessage({ source: 'wagner-jobs', type: 'ALICIA_SYNC', nonce, data }, '*')
+    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(false) }, 2500)
+  })
+}
+
+// Subscribe to live fill-status events forwarded from the extension while it auto-fills an
+// application tab. payload: { result: {status, filled, ...}, url, origUrl, explicit }.
+// Returns an unsubscribe function.
+export function onFillStatus(cb) {
+  const onMsg = (e) => {
+    if (e.source === window && e.data && e.data.source === 'alicia-ext' && e.data.type === 'FILL_STATUS') {
+      try { cb(e.data.payload || {}) } catch { /* subscriber error — ignore */ }
+    }
+  }
+  window.addEventListener('message', onMsg)
+  return () => window.removeEventListener('message', onMsg)
+}
