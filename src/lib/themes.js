@@ -5,7 +5,7 @@
 export const THEMES = [
   { id: 'light', name: 'Light', swatch: '#ffffff', dark: false },
   { id: 'dark', name: 'Dark', swatch: '#1f2937', dark: true },
-  { id: 'yellow', name: 'Yellow Cream', swatch: '#fef5c7', dark: false },
+  { id: 'yellow', name: 'Yellow Cream', swatch: '#fffbeb', dark: false },
   { id: 'ocean', name: 'Ocean', swatch: '#16273d', dark: true },
   { id: 'rose', name: 'Rose', swatch: '#f6c5d1', dark: false },
 ]
