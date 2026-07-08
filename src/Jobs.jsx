@@ -936,6 +936,7 @@ function MemoryView({ memory, setMemory }) {
 const STATUSES = ['saved', 'applied', 'interview', 'offer', 'rejected']
 // Live autofill states forwarded by the extension while it fills an application tab.
 const FILL_STATUS_LABELS = {
+  advancing: { text: 'opening the application…', color: '#1565c0' },
   ready_to_submit: { text: '✓ filled — click Submit in the tab', color: '#2e7d32' },
   answered_review: { text: 'AI answered — review in the tab', color: '#7a6a12' },
   stopped_needs_input: { text: 'needs your input in the tab', color: '#7a6a12' },
