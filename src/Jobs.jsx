@@ -37,7 +37,7 @@ const COUNTRIES = [
   { v: 'us', label: 'United States' }, { v: 'gb', label: 'United Kingdom' },
   { v: 'ca', label: 'Canada' }, { v: 'au', label: 'Australia' },
 ]
-const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr)\.(com|io|co|net)/i
+const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|zohorecruit)\.(com|io|co|net)/i
 const MAX_BATCH = 5          // apply 1–5 at a time (targeted, high-quality)
 const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
 

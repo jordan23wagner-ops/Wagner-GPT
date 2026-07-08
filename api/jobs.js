@@ -187,7 +187,7 @@ function cached(key, fn) {
 const JSEARCH_KEY = process.env.JSEARCH_KEY || process.env.RAPIDAPI_KEY || process.env.JSEARCH || process.env.RAPID_API_KEY
 const DIRECT_PUBLISHER_RE = /greenhouse|lever|ashby|workday|icims|smartrecruiters|taleo|workable|bamboohr|recruitee|jobvite|career|company/i
 // Known ATS hosts (mirror of the client's regex in src/Jobs.jsx — serverless can't import it).
-const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|recruitee)\.(com|io|co|net)/i
+const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|recruitee|zohorecruit)\.(com|io|co|net)/i
 
 // ── Adzuna → employer URL resolution (safe, best-effort) ─────────────────────────────────────────
 // Adzuna's redirect_url login-walls logged-out users (adzuna.com/details/…?apply=1&after_login → a
