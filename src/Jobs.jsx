@@ -241,7 +241,10 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [remote, setRemote] = useState(false)
   const [fullTime, setFullTime] = useState(true)
   const [aiFit, setAiFit] = useState(true)
-  const [directOnly, setDirectOnly] = useState(false)
+  // Default ON: aggregator links (esp. Adzuna) now log-wall logged-out users, so show only jobs that
+  // open directly on the employer/ATS. The backend resolves what Adzuna links it can to employer URLs
+  // (those then count as direct); the rest are hidden here unless the user opts back in.
+  const [directOnly, setDirectOnly] = useState(true)
   const [categories, setCategories] = useState([])
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -472,8 +475,8 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                     ? <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#2e7d32' }} title="Listed in the job posting">💲 {sal.text} <span className="opacity-80 font-normal">listed</span></span>
                     : <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]" title="Estimated — not stated in the posting">{sal.text}</span>)}
                   {j.direct === false
-                    ? <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: '#7c2d12', color: '#fed7aa' }} title="Apply opens the Adzuna page (may show an email pop-up), then the employer site">via Adzuna</span>
-                    : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title="Apply opens the employer's own posting directly">✓ direct apply</span>}
+                    ? <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: '#7c2d12', color: '#fed7aa' }} title="Apply opens Adzuna, which now requires an Adzuna login before forwarding to the employer — enable 'Direct apply only' to hide these">via Adzuna · may need login</span>
+                    : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title={j.resolved ? "Resolved to the employer's own posting (skips Adzuna)" : "Apply opens the employer's own posting directly"}>✓ direct apply</span>}
                   {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
                   {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
                   {j._age && <span className={`text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] ${j._age.stale ? 'text-orange-500' : 'text-[var(--muted)]'}`} title={`Posted ${j._age.text}${j._age.stale ? ' — may be stale' : ''}`}>🕒 {j._age.text}</span>}

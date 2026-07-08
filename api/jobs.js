@@ -188,6 +188,42 @@ const JSEARCH_KEY = process.env.JSEARCH_KEY || process.env.RAPIDAPI_KEY || proce
 const DIRECT_PUBLISHER_RE = /greenhouse|lever|ashby|workday|icims|smartrecruiters|taleo|workable|bamboohr|recruitee|jobvite|career|company/i
 // Known ATS hosts (mirror of the client's regex in src/Jobs.jsx — serverless can't import it).
 const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|recruitee)\.(com|io|co|net)/i
+
+// ── Adzuna → employer URL resolution (safe, best-effort) ─────────────────────────────────────────
+// Adzuna's redirect_url login-walls logged-out users (adzuna.com/details/…?apply=1&after_login → a
+// Facebook/Google/email modal), so it never reaches the employer. We resolve the SHOWN Adzuna rows
+// server-side to the real employer URL. Deliberately NOT a public endpoint (no ?url= SSRF surface):
+// this only ever runs on redirect_urls WE got from the Adzuna API. Defense-in-depth: reject private
+// IP literals on every hop, read only redirect Locations (no HTML scraping), and accept a target
+// ONLY when it lands on a host that is neither Adzuna nor any other aggregator.
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
+const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
+function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
+function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
+// Follow up to 4 redirect hops (Location headers only) starting from an Adzuna redirect_url, and
+// return the first host that is a real employer/ATS (off Adzuna AND off every other aggregator).
+// Returns null if it hits a login wall, a private host, a non-redirect, or never leaves aggregators.
+async function resolveAdzunaUrl(rawUrl, deadline) {
+  let url = rawUrl
+  for (let hop = 0; hop < 4; hop++) {
+    const host = safeHost(url)
+    if (!host || PRIVATE_HOST_RE.test(host)) return null
+    if (!isAdzunaHost(host) && !AGGREGATOR_HOST_RE.test(host)) return url // reached a clean employer/ATS host
+    const budget = deadline - Date.now()
+    if (budget < 400) return null
+    let r
+    try {
+      r = await fetch(url, { method: 'GET', redirect: 'manual', headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(Math.min(2500, budget)) })
+    } catch { return null }
+    if (r.status < 300 || r.status >= 400) return null // terminal page still on an aggregator host
+    const loc = r.headers.get('location')
+    if (!loc) return null
+    try { url = new URL(loc, url).href } catch { return null }
+    if (/\/authenticate|\/login\b|after_login=|interstitial=/i.test(url)) return null // Adzuna login wall
+  }
+  return null
+}
 function pick(o, keys) { for (const k of keys) { const v = o && o[k]; if (v !== undefined && v !== null && v !== '') return v } return undefined }
 function jsearchApplyLink(j) {
   const opts = Array.isArray(j.apply_options) ? j.apply_options : (Array.isArray(j.apply_links) ? j.apply_links : [])
@@ -624,6 +660,24 @@ export default async function handler(req, res) {
     const postedAt = (j) => { const t = Date.parse(j.created || ''); return isNaN(t) ? 0 : t }
     merged.sort((a, b) => (rank(a) - rank(b)) || (postedAt(b) - postedAt(a)))
     merged = merged.slice(0, cap)
+
+    // Best-effort: resolve the SHOWN Adzuna rows to the employer URL so Apply skips Adzuna's login
+    // wall. Only runs when Adzuna rows survived (all-direct searches pay nothing); bounded worker
+    // pool + hard 7s deadline so it can never threaten the 60s budget. A resolved row becomes a
+    // direct-apply row (its Adzuna link kept as `adzunaUrl` fallback); unresolved rows stay labeled.
+    const adzunaRows = merged.filter((j) => j.source === 'adzuna' && j.url && isAdzunaHost(safeHost(j.url)))
+    if (adzunaRows.length) {
+      const deadline = Date.now() + 7000
+      let idx = 0
+      const worker = async () => {
+        while (idx < adzunaRows.length && Date.now() < deadline) {
+          const j = adzunaRows[idx++]
+          const real = await resolveAdzunaUrl(j.url, deadline).catch(() => null)
+          if (real) { j.adzunaUrl = j.url; j.url = real; j.resolved = true; j.direct = true }
+        }
+      }
+      await Promise.allSettled(Array.from({ length: Math.min(6, adzunaRows.length) }, worker))
+    }
 
     return res.status(200).json({
       results: merged,

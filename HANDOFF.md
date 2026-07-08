@@ -4,6 +4,34 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
+## Update 2026-07-08 (latest) — Skip Adzuna's login wall: employer-URL resolution + direct-apply default
+
+Adzuna's `redirect_url` now login-walls logged-out users (`adzuna.com/details/…?apply=1&after_login`
+→ a Facebook/Google/email modal), so Apply never reached the employer. Fixed in `api/jobs.js` +
+`src/Jobs.jsx`. Approach chosen after an ultracode workflow (understand → design → adversarial
+stress-test); the adversary killed the first-pass plan's `/api/resolve` endpoint (SSRF/open-proxy)
+and its client-synthesized `/land/ad` URLs (tokenless → 403 / infinite `/authenticate` loop). Shipped
+the safe subset:
+
+- **`api/jobs.js` — bounded, safe employer-URL resolution.** For the SHOWN Adzuna rows only (all-direct
+  searches pay nothing), a capped worker pool (6) with a hard 7s deadline follows the redirect chain
+  (Location headers only, no HTML scraping) via `resolveAdzunaUrl`; it accepts a target ONLY when it
+  lands on a host that is neither Adzuna nor any other aggregator (expanded `AGGREGATOR_HOST_RE`), and
+  rejects private-IP literals on every hop and Adzuna login/authenticate walls. A resolved row becomes
+  a direct-apply row (`resolved:true`, `direct:true`), keeping its Adzuna link as `adzunaUrl` fallback.
+  NOT a public endpoint — no `?url=` SSRF surface; only ever runs on redirect_urls from the Adzuna API.
+  Verified by a mocked-fetch test (resolves adzuna→greenhouse, follows through jobgether→lever, returns
+  null on login wall / private IP / terminal-on-adzuna).
+- **`src/Jobs.jsx` — "Direct apply only" defaults ON.** Aggregator rows are hidden unless the user opts
+  back in; the honest label is now "via Adzuna · may need login". Apply stays a SYNCHRONOUS
+  `window.open(job.url)` (job.url is already the employer URL for resolved rows) — no async-at-click, so
+  no pop-up-block or blank-tab-hang risk (both flagged by the adversary).
+- **Extension v1.12.3:** `skipAggregatorInterstitial` bails on an Adzuna login wall instead of clicking
+  into the modal.
+
+Prior context: the abandoned commit 9eb1452 built a heavier resolver (redirect-follow + HTML scrape)
+that was removed for "direct sources + demote Adzuna"; this reinstates only the safe, bounded core.
+
 ## Update 2026-07-08 — Deep-dive fixes: jobs pipeline, core chat perf/correctness, extension handoff v2
 
 Full-codebase review (3 parallel reviewers) → fixes across the stack. Highlights:
