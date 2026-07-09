@@ -335,14 +335,22 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       setStatus(`Couldn’t open “${job.title}” — your browser blocked the pop-up. Use “View posting” to open it. (Not marked applied.)`)
       return
     }
-    upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
     if (hasExt) {
+      // Don't claim "applied" until we know Alicia actually got the request — sendApply's `ok` only
+      // means the extension ACKed, but that's the earliest honest signal we have. Marking it
+      // unconditionally here previously left false "✓ applied" rows (MEI, Anduril) when the
+      // extension never even received the job.
+      upsertTracked(job, { status: 'saved', resumeId: tr ? tr.id : undefined })
       setStatus(`Opened “${job.title}” — asking Alicia to auto-fill…`)
       sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
-        .then((ok) => setStatus(ok
-          ? `Alicia is auto-filling “${job.title}” — review and click Submit. (On a job description page, it fills once you reach the application form.)`
-          : `Opened “${job.title}” and marked it applied, but couldn’t reach the Alicia extension to auto-fill — check the extension version by the indicator above (needs v1.11.1+), reload it, or fill manually.`))
+        .then((ok) => {
+          if (ok) upsertTracked(job, { status: 'applied' })
+          setStatus(ok
+            ? `Alicia is auto-filling “${job.title}” — review and click Submit. (On a job description page, it fills once you reach the application form.)`
+            : `Opened “${job.title}” but couldn’t reach the Alicia extension to auto-fill — check the extension version by the indicator above (needs v1.11.1+), reload it, or fill manually. Not marked applied yet — update its status once you have.`)
+        })
     } else {
+      upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
       setStatus(`Opened “${job.title}” and marked it applied${tr ? ' (tailored résumé is in Résumés).' : '.'}`)
     }
     setApplyingId(job.id)
@@ -645,19 +653,24 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
     if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
     const openedRows = []
     chosen.forEach((r) => { const w = r.job.url ? window.open(r.job.url, '_blank') : null; if (w) openedRows.push(r) })
-    openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
     const opened = openedRows.length
     const blocked = chosen.length - opened
     const blockedNote = blocked ? ` ${blocked} pop-up(s) were blocked — open those from the Tracker or each card’s “View posting”.` : ''
     if (!opened) { setApplyMsg(`All ${chosen.length} pop-ups were blocked — nothing marked applied. Open them from “View posting”, or apply one at a time.`); return }
     const payloadJobs = openedRows.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
     if (hasExt) {
+      // See applyOne's comment: don't mark "applied" until sendApply confirms Alicia got the request.
+      openedRows.forEach((r) => upsertTracked(r.job, { status: 'saved', resumeId: r.resumeId }))
       setApplyMsg(`Opened ${opened} tab(s) — asking Alicia to auto-fill…`)
       sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
-        .then((ok) => setApplyMsg(ok
-          ? `Alicia is auto-filling ${opened} tab(s) — review and click Submit on each.${blockedNote}`
-          : `Opened ${opened} tab(s) and marked applied, but couldn’t reach the Alicia extension — check its version by the indicator (needs v1.11.1+), reload it, or fill manually.${blockedNote}`))
+        .then((ok) => {
+          if (ok) openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied' }))
+          setApplyMsg(ok
+            ? `Alicia is auto-filling ${opened} tab(s) — review and click Submit on each.${blockedNote}`
+            : `Opened ${opened} tab(s) but couldn’t reach the Alicia extension — check its version by the indicator (needs v1.11.1+), reload it, or fill manually. Not marked applied yet — update status once you have.${blockedNote}`)
+        })
     } else {
+      openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
       setApplyMsg(`Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v1.11.1+) for hands-off auto-fill.${blockedNote}`)
     }
   }
