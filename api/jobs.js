@@ -3,12 +3,21 @@
 // Backs the Job-Assistant extension's Job Search AND the Wagner-GPT "Jobs" tab. Aggregates jobs
 // from several sources and returns ONE unified result shape so callers stay source-agnostic:
 //   1. Adzuna              — broad aggregator (needs ADZUNA_APP_ID / ADZUNA_APP_KEY).
-//   2. Company ATS boards  — public JSON from Greenhouse / Lever / Ashby / Workable career pages,
-//                            selected per industry from INDUSTRY_BOARDS (this is the "jobs from
-//                            company sites in your industry" ask — these ARE the companies' own
-//                            career sites, just via their public JSON endpoints).
-//   3. Discovery (opt)     — Brave/Tavily to find more ATS boards for the query, then fetch them
-//                            (uses BRAVE_KEY / TAVILY_KEY if present; silently skipped otherwise).
+//   2. Company ATS boards  — public JSON from Greenhouse / Lever / Ashby / Workable / SmartRecruiters
+//                            / Recruitee / Workday career pages, selected per industry from
+//                            INDUSTRY_BOARDS (this is the "jobs from company sites in your industry"
+//                            ask — these ARE the companies' own career sites, just via their public
+//                            JSON endpoints). Workday in particular is how most large enterprises
+//                            (the companies too big to be on a startup-oriented ATS) run their job
+//                            boards — see fetchWorkday.
+//   3. Discovery (opt)     — Brave/Tavily search "{query} careers" (no longer scoped to specific ATS
+//                            platforms) to find more boards AND, from the SAME result set, genuinely
+//                            custom company career pages with no public API at all (a real
+//                            "CompanyName.com/careers" with no known ATS behind it) — those go
+//                            through fetchCustomCareerPage (Jina reader + one Groq extraction call)
+//                            instead of a structured fetcher. Uses BRAVE_KEY/TAVILY_KEY (discovery)
+//                            and GROQ_KEY (custom-page extraction) if present; silently skipped
+//                            otherwise.
 //   4. JSearch + Himalayas — direct-apply aggregators (JSearch needs a RapidAPI key).
 //
 // POST { action:'search', titles|what, industry, where, salaryMin, salaryMax, remote, fullTime,
@@ -23,9 +32,13 @@ export const config = { maxDuration: 60 }
 const ADZUNA_BASE = 'https://api.adzuna.com/v1/api/jobs'
 
 // ── Curated company ATS boards per industry ─────────────────────────────────────────────────────
-// industry name (matches the client's INDUSTRIES labels) -> [{ ats, slug, name }].
-// ats is one of: greenhouse | lever | ashby | workable. slug is the company's board id on that ATS.
-// Seed set of well-known companies; extend freely — adding a row here immediately widens coverage.
+// industry name (matches the client's INDUSTRIES labels) -> [{ ats, slug, name }] (or, for workday
+// specifically, [{ ats:'workday', tenant, dataCenter, site, name }] — Workday has no single universal
+// slug the way Greenhouse/Lever do, so a tenant is identified by all three together; discovery
+// extracts them straight out of a found myworkdayjobs.com URL, see WORKDAY_URL_RE below).
+// ats is one of: greenhouse | lever | ashby | workable | smartrecruiters | recruitee | workday.
+// slug is the company's board id on that ATS. Seed set of well-known companies; extend freely —
+// adding a row here immediately widens coverage.
 const INDUSTRY_BOARDS = {
   'Software / IT': [
     { ats: 'greenhouse', slug: 'stripe', name: 'Stripe' },
@@ -414,17 +427,61 @@ async function fetchRecruitee({ slug, name }) {
   })).filter((j) => j.url)
 }
 
-const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee }
+// Workday's CXS API — the job-board backend for the vast majority of large enterprises (the
+// "Sony-sized companies" case Greenhouse/Lever/Ashby don't reach, since those skew tech-startup).
+// The request/response shape is IDENTICAL across every Workday tenant; the only per-company unknowns
+// are which tenant/dataCenter/site a given company uses (there's no universal slug lookup the way
+// Greenhouse has boards-api.greenhouse.io/v1/boards/{slug} — this is a discovery problem, solved
+// below by extracting these three pieces straight out of a myworkdayjobs.com URL Brave/Tavily finds).
+async function fetchWorkday({ tenant, dataCenter, site, name }) {
+  const base = `https://${encodeURIComponent(tenant)}.${encodeURIComponent(dataCenter)}.myworkdayjobs.com`
+  let d
+  try {
+    const r = await fetch(`${base}/wday/cxs/${encodeURIComponent(tenant)}/${encodeURIComponent(site)}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ appliedFacets: {}, limit: 20, offset: 0, searchText: '' }),
+      signal: AbortSignal.timeout(8000),
+    })
+    d = r.ok ? await r.json() : null
+  } catch { d = null }
+  const jobs = (d && d.jobPostings) || []
+  return jobs.map((j) => ({
+    id: 'wd_' + tenant + '_' + site + '_' + (j.bulletFields && j.bulletFields[0] || j.externalPath || Math.random().toString(36).slice(2)),
+    title: j.title || '',
+    company: name || slugName(tenant),
+    location: j.locationsText || (Array.isArray(j.additionalLocations) ? j.additionalLocations.join(', ') : ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.externalPath ? `${base}/${site}${j.externalPath}` : '',
+    category: '', categoryTag: '',
+    contractTime: j.timeType || '',
+    description: '', // CXS's list endpoint doesn't include the full description; the detail endpoint needs a second per-job call, not worth the latency for a search result list
+    created: j.postedOn || '',
+    source: 'workday',
+  })).filter((j) => j.url)
+}
+
+const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, workday: fetchWorkday }
 
 async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {
     const fn = ATS_FETCHERS[b.ats]
-    return fn ? cached(b.ats + ':' + b.slug, () => fn(b)) : Promise.resolve([])
+    const key = b.ats === 'workday' ? `workday:${b.tenant}:${b.dataCenter}:${b.site}` : `${b.ats}:${b.slug}`
+    return fn ? cached(key, () => fn(b)) : Promise.resolve([])
   }))
   return settled.flatMap((s) => (s.status === 'fulfilled' && Array.isArray(s.value) ? s.value : []))
 }
 
 // ── Discovery: find more ATS boards for the query via Brave/Tavily ───────────────────────────────
+
+// Workday needs THREE identifiers out of one URL (tenant/dataCenter/site), not just a slug — handled
+// separately below since its board shape differs from every other {ats,slug} fetcher. Real Workday
+// career-site URLs sometimes carry a locale segment before the site name
+// (…myworkdayjobs.com/en-US/Company_Careers/job/…) and sometimes don't; the optional locale clause
+// covers both without extracting the locale itself as if it were the site. A wrong extraction here
+// just means fetchWorkday's CXS call 404s for that tenant (handled gracefully, returns no jobs) — not
+// a hard failure, so this doesn't need to be perfect, just a reasonable best effort.
+const WORKDAY_URL_RE = /([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:wday\/cxs\/[a-z0-9-]+\/)?(?:[a-z]{2}-[A-Z]{2}\/)?([a-z0-9_-]+)/i
 
 function boardsFromUrls(urls) {
   const seen = new Set()
@@ -435,15 +492,28 @@ function boardsFromUrls(urls) {
     { re: /jobs\.lever\.co\/([a-z0-9-]+)/i, ats: 'lever' },
     { re: /jobs\.ashbyhq\.com\/([a-z0-9-]+)/i, ats: 'ashby' },
     { re: /([a-z0-9-]+)\.workable\.com/i, ats: 'workable' },
+    { re: /(?:jobs|careers)\.smartrecruiters\.com\/([a-zA-Z0-9]+)/i, ats: 'smartrecruiters' },
+    { re: /([a-z0-9-]+)\.recruitee\.com/i, ats: 'recruitee' },
   ]
   for (const u of urls) {
+    const wd = String(u || '').match(WORKDAY_URL_RE)
+    if (wd) {
+      const [, tenant, dataCenter, site] = wd
+      const key = 'workday:' + tenant.toLowerCase() + ':' + site.toLowerCase()
+      if (!seen.has(key)) { seen.add(key); out.push({ ats: 'workday', tenant: tenant.toLowerCase(), dataCenter: dataCenter.toLowerCase(), site, name: slugName(tenant) }) }
+      continue
+    }
     for (const p of patterns) {
       const m = String(u || '').match(p.re)
       if (m && m[1]) {
-        const key = p.ats + ':' + m[1].toLowerCase()
+        const key = p.ats + ':' + m[1].toLowerCase() // dedup is case-insensitive; the STORED slug below is not
         if (!seen.has(key) && !/^(www|apply|jobs|boards|api)$/i.test(m[1])) {
           seen.add(key)
-          out.push({ ats: p.ats, slug: m[1].toLowerCase(), name: slugName(m[1]) })
+          // Preserve the slug's original casing -- SmartRecruiters company IDs are case-sensitive
+          // (see the seed data above: 'Square', 'Visa', 'IKEA'), so lowercasing it here would silently
+          // 404 every SmartRecruiters board found via discovery. Harmless for the other ATS platforms,
+          // whose slugs are conventionally already lowercase in the wild.
+          out.push({ ats: p.ats, slug: m[1], name: slugName(m[1]) })
         }
       }
     }
@@ -451,30 +521,112 @@ function boardsFromUrls(urls) {
   return out
 }
 
+// A discovered URL that ISN'T on any known ATS platform but still looks like a company's own careers
+// page (career/job in the path, not an aggregator) -- this is the genuinely-custom-site case
+// (a "Sony.com/careers" with no public JSON API at all), handled by Jina+AI extraction rather than a
+// structured fetcher. One candidate per hostname, so one company's page isn't sampled multiple times.
+function customCareerPageCandidates(urls, cap = 3) {
+  const seen = new Set()
+  const out = []
+  for (const u of urls) {
+    const host = safeHost(u)
+    if (!host || seen.has(host)) continue
+    if (AGGREGATOR_HOST_RE.test(host) || ATS_HOST_RE.test(host)) continue
+    if (!/career|jobs?\b/i.test(u)) continue
+    seen.add(host)
+    out.push({ url: u, name: slugName(host.replace(/^www\./, '').split('.')[0]) })
+    if (out.length >= cap) break
+  }
+  return out
+}
+
 // Accept either the _KEY convention or the bare name (this project's Vercel uses `Brave`/`Tavily`).
 const BRAVE_KEY = process.env.BRAVE_KEY || process.env.Brave || process.env.BRAVE
 const TAVILY_KEY = process.env.TAVILY_KEY || process.env.TAVILY || process.env.TAVILY_API_KEY || process.env.Tavily
+const GROQ_KEY = process.env.GROQ_KEY || process.env.Groq || process.env.GROQ
 
-async function discoverBoards(query) {
-  const braveKey = BRAVE_KEY
-  const tavilyKey = TAVILY_KEY
-  const q = `${query} careers (site:greenhouse.io OR site:lever.co OR site:ashbyhq.com)`
-  let urls = []
+async function braveOrTavily(q, count) {
   try {
-    if (braveKey) {
-      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=10&safesearch=moderate`
-      const r = await fetch(url, { headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip', 'X-Subscription-Token': braveKey }, signal: AbortSignal.timeout(6000) })
-      if (r.ok) { const d = await r.json(); urls = (d?.web?.results || []).map((x) => x.url) }
-    } else if (tavilyKey) {
+    if (BRAVE_KEY) {
+      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}&safesearch=moderate`
+      const r = await fetch(url, { headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip', 'X-Subscription-Token': BRAVE_KEY }, signal: AbortSignal.timeout(6000) })
+      if (r.ok) { const d = await r.json(); return (d?.web?.results || []).map((x) => x.url) }
+    } else if (TAVILY_KEY) {
       const r = await fetch('https://api.tavily.com/search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: tavilyKey, query: q, max_results: 10, search_depth: 'basic' }),
+        body: JSON.stringify({ api_key: TAVILY_KEY, query: q, max_results: count, search_depth: 'basic' }),
         signal: AbortSignal.timeout(6000),
       })
-      if (r.ok) { const d = await r.json(); urls = (d?.results || []).map((x) => x.url) }
+      if (r.ok) { const d = await r.json(); return (d?.results || []).map((x) => x.url) }
     }
   } catch { /* discovery is best-effort */ }
-  return boardsFromUrls(urls).slice(0, 8)
+  return []
+}
+
+// Deliberately NOT scoped to `site:greenhouse.io OR ...` anymore -- that scoping meant a genuine
+// custom-domain career page (no public JSON API at all) could never surface from discovery, no matter
+// how well it matched the query. A broad "{query} careers" search costs the same one API call and
+// lets boardsFromUrls / customCareerPageCandidates each pick out what they recognize from the SAME
+// result set, covering both the "on a known ATS platform" and "fully custom site" cases at once.
+async function discoverBoards(query) {
+  const urls = await braveOrTavily(`${query} careers`, 10)
+  return { boards: boardsFromUrls(urls).slice(0, 8), customPages: customCareerPageCandidates(urls) }
+}
+
+// Fetch a custom company careers page (no known ATS) via the keyless Jina reader, then one Groq call
+// to extract postings into the same normalized shape every other source uses. Best-effort: any
+// failure (unreachable page, no GROQ_KEY, malformed AI output) returns an empty list, never throws.
+async function fetchCustomCareerPage({ url, name }) {
+  if (!GROQ_KEY) return []
+  let text = ''
+  try {
+    const r = await fetch(`https://r.jina.ai/${url}`, { headers: { Accept: 'text/plain', 'X-Return-Format': 'text' }, signal: AbortSignal.timeout(8000) })
+    if (!r.ok) return []
+    text = (await r.text()).slice(0, 6000)
+  } catch { return [] }
+  if (!text.trim()) return []
+  let data
+  try {
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [{
+          role: 'user',
+          content:
+            'This is the text of a company careers page. List up to 10 real, currently-open job postings you can find on it.\n' +
+            'Return ONLY a JSON array, nothing else. Each item: {"title":"...","location":"...","url":"absolute apply/posting URL if present, else empty string"}.\n' +
+            'If you cannot find any real job postings (e.g. the page is just a search box or landing page with no listed roles), return [].\n\n' +
+            `Page URL: ${url}\nPage text:\n${text}`,
+        }],
+        temperature: 0.1,
+        max_tokens: 1200,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(15000),
+    })
+    data = r.ok ? await r.json() : null
+  } catch { return [] }
+  const content = data?.choices?.[0]?.message?.content || ''
+  let jobs = []
+  try {
+    const match = content.match(/\[[\s\S]*\]/)
+    if (match) jobs = JSON.parse(match[0])
+  } catch { return [] }
+  if (!Array.isArray(jobs)) return []
+  return jobs.filter((j) => j && j.title).slice(0, 10).map((j, i) => ({
+    id: 'cc_' + safeHost(url) + '_' + i,
+    title: String(j.title || ''),
+    company: name,
+    location: String(j.location || ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.url && /^https?:\/\//i.test(j.url) ? j.url : url,
+    category: '', categoryTag: '', contractTime: '',
+    description: '',
+    created: '',
+    source: 'custom',
+  }))
 }
 
 // ── Adzuna source ────────────────────────────────────────────────────────────────────────────────
@@ -604,12 +756,21 @@ export default async function handler(req, res) {
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
     if (discoveryQuery && (BRAVE_KEY || TAVILY_KEY)) {
-      const boards = await cached('discover:' + discoveryQuery.toLowerCase(), () => discoverBoards(discoveryQuery))
+      const { boards, customPages } = await cached('discover:' + discoveryQuery.toLowerCase(), () => discoverBoards(discoveryQuery))
       if (boards.length) tasks.push(fetchBoards(boards).then((results) => ({ kind: 'discovered', results })).catch(() => ({ kind: 'discovered', results: [] })))
+      // Custom (non-ATS) career pages: one Jina fetch + one Groq extraction call each, bounded to a
+      // handful of candidates so this can never meaningfully threaten the request's time/cost budget.
+      if (customPages.length && GROQ_KEY) {
+        tasks.push(
+          Promise.allSettled(customPages.map((p) => cached('custom:' + p.url, () => fetchCustomCareerPage(p))))
+            .then((rs) => ({ kind: 'custom', results: rs.flatMap((r) => (r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : [])) }))
+            .catch(() => ({ kind: 'custom', results: [] }))
+        )
+      }
     }
 
     const settled = await Promise.allSettled(tasks)
-    const bucket = { adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [] }
+    const bucket = { adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [], custom: [] }
     let adzunaConfigured = false, jsearchConfigured = false, jsearchError = null, jsearchRaw = 0
     for (const s of settled) {
       if (s.status !== 'fulfilled') continue
@@ -619,6 +780,7 @@ export default async function handler(req, res) {
       else if (v.kind === 'himalayas') bucket.himalayas = v.results || []
       else if (v.kind === 'ats') bucket.ats = v.results || []
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
+      else if (v.kind === 'custom') bucket.custom = v.results || []
     }
 
     // Filter the non-Adzuna sources by title + remote/location + salary/contract (Adzuna gets these
@@ -644,7 +806,7 @@ export default async function handler(req, res) {
       if (wantFullTime && j.contractTime && /part[ _-]?time|intern(ship)?\b|contract|temporary|seasonal/i.test(String(j.contractTime))) return false
       return true
     }
-    const boardResults = [...bucket.ats, ...bucket.discovered].filter(filterJob)
+    const boardResults = [...bucket.ats, ...bucket.discovered, ...bucket.custom].filter(filterJob)
     const jsearchResults = bucket.jsearch.filter(filterJob)
     const himalayasResults = bucket.himalayas.filter(filterJob)
 
@@ -696,6 +858,7 @@ export default async function handler(req, res) {
         himalayas: himalayasResults.length,
         ats: bucket.ats.length,
         discovered: bucket.discovered.length,
+        custom: bucket.custom.length,
         directCount: merged.filter((j) => j.direct !== false).length,
       },
     })
