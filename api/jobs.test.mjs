@@ -20,6 +20,7 @@ delete process.env.TAVILY_KEY
 delete process.env.TAVILY
 
 const { default: handler } = await import('./jobs.js')
+const { default: crawlHandler } = await import('./jobs-crawl.js')
 
 globalThis.fetch = async (url, opts) => {
   const u = String(url)
@@ -80,6 +81,21 @@ globalThis.fetch = async (url, opts) => {
     return json({ results: [
       { jobId: 901, jobTitle: 'Project Manager', employerName: 'Reed Co', locationName: 'London', jobUrl: 'https://reed.co.uk/job/901', jobDescription: 'Manage reed projects', date: '2026-07-05', minimumSalary: 50000, maximumSalary: 60000, jobType: 'Full-time' },
     ] })
+  }
+  // Supabase crawl cache -- POST (upsertCrawlCache, used only by api/jobs-crawl.js) must be checked
+  // BEFORE the GET branch below since both hit the same table URL.
+  if (u.includes('supabase.co/rest/v1/job_crawl_cache') && opts && opts.method === 'POST') {
+    return { ok: true, json: async () => ([]) }
+  }
+  // Cache HIT, deliberately scoped to a single dedicated industry ("Manufacturing") not used by any
+  // other test in this file -- proves the search handler actually took the cache path (skipping the
+  // live per-company board fetch entirely) rather than merely tolerating cache data alongside live
+  // data. No greenhouse mock exists for the fake company below, so this title can ONLY appear in
+  // results if fetchBoardsFromCache's row was used, not a live (impossible-to-succeed) board fetch.
+  if (u.includes('supabase.co/rest/v1/job_crawl_cache') && u.includes('industry=eq.Manufacturing')) {
+    return json([
+      { url: 'https://boards.greenhouse.io/cachedco/jobs/999', source: 'greenhouse', industry: 'Manufacturing', title: 'Plant Manager', company: 'CachedCo', location: 'Detroit, MI', salary_min: null, salary_max: null, category: '', category_tag: '', contract_time: '', description: 'Run the plant', created: '2026-07-01' },
+    ])
   }
   // Brave discovery: a mix of a Workday tenant (with a locale segment, exercising WORKDAY_URL_RE's
   // optional locale clause), a SmartRecruiters board, a Recruitee board, and a genuinely custom
@@ -336,6 +352,13 @@ async function run() {
   assert(resGb.body.results.some((r) => r.source === 'reed' && r.company === 'Reed Co'), 'Reed job normalized and fires for country:gb')
   assert(!resGb.body.results.some((r) => r.source === 'usajobs'), 'USAJobs does not fire for country:gb (US-only source)')
 
+  // Crawl-cache test (item #3 of the roadmap): a search for the "Manufacturing" industry should read
+  // pre-crawled ATS results straight from job_crawl_cache instead of live-fetching every seed board.
+  const resCache = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Manager', industry: 'Manufacturing', country: 'us' } }, resCache)
+  assert(resCache.body.results.some((r) => r.company === 'CachedCo' && r.title === 'Plant Manager' && r.source === 'greenhouse'), 'cached ATS row surfaces in results -- can only happen via the cache path, since no live-fetch mock exists for this fake company')
+  assert(resCache.body.sources && resCache.body.sources.atsFromCache === true, 'sources.atsFromCache reports true on a cache hit')
+
   // Direct-company-site scraper test: Workday (enterprise ATS) + SmartRecruiters/Recruitee found via
   // broadened discovery + a genuinely custom (no known ATS) careers page via Jina+Groq extraction.
   // (BRAVE_KEY/GROQ_KEY are already set at the top of this file, before jobs.js was imported.)
@@ -368,6 +391,27 @@ async function run() {
   console.log('\nDirect-scraper sources:', JSON.stringify(out3.sources))
   console.log('Direct-scraper results:')
   out3.results.forEach((r) => console.log('  [' + r.source + '] ' + r.title + ' @ ' + r.company + ' — ' + r.location + ' — ' + r.url))
+
+  // Crawl endpoint test (api/jobs-crawl.js): re-fetches every industry's ATS boards and upserts into
+  // job_crawl_cache via the mocked POST above. Unauthenticated since CRON_SECRET isn't set in this
+  // test env -- exercises the "no secret configured, allow the request" path.
+  const resCrawl = mockRes()
+  await crawlHandler({ method: 'GET', headers: {} }, resCrawl)
+  assert(resCrawl.statusCode === 200, 'crawl endpoint status 200, got ' + resCrawl.statusCode)
+  assert(resCrawl.body && resCrawl.body.industries === 11, 'crawl endpoint processes every INDUSTRY_BOARDS industry, got ' + (resCrawl.body && resCrawl.body.industries))
+  const aiSummary = resCrawl.body && resCrawl.body.summary && resCrawl.body.summary.find((s) => s.industry === 'AI / Machine Learning')
+  assert(aiSummary && aiSummary.fetched >= 2, 'crawl fetched multiple ATS jobs for a seeded industry (Databricks/Cohere/Gamma mocks), got ' + (aiSummary && aiSummary.fetched))
+  assert(aiSummary && aiSummary.ok && aiSummary.upserted === aiSummary.fetched, 'crawl upserted every fetched job for that industry (mocked POST returns ok:true)')
+
+  // CRON_SECRET auth test: once set, the crawl endpoint rejects requests without a matching bearer token.
+  process.env.CRON_SECRET = 'test-cron-secret'
+  const resUnauth = mockRes()
+  await crawlHandler({ method: 'GET', headers: {} }, resUnauth)
+  assert(resUnauth.statusCode === 401, 'crawl endpoint rejects an unauthenticated request once CRON_SECRET is set, got ' + resUnauth.statusCode)
+  const resAuth = mockRes()
+  await crawlHandler({ method: 'GET', headers: { authorization: 'Bearer test-cron-secret' } }, resAuth)
+  assert(resAuth.statusCode === 200, 'crawl endpoint accepts a request with the correct bearer token, got ' + resAuth.statusCode)
+  delete process.env.CRON_SECRET
 
   if (fails.length) { console.error('\nFAILURES:\n - ' + fails.join('\n - ')); process.exit(1) }
   console.log('\nALL ASSERTIONS PASSED')

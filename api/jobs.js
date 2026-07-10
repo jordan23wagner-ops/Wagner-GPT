@@ -40,6 +40,66 @@ export const config = { maxDuration: 60 }
 
 const ADZUNA_BASE = 'https://api.adzuna.com/v1/api/jobs'
 
+// ── Supabase-backed crawl cache (item #3 of the roadmap) ────────────────────────────────────────
+// Same project/anon-key + permissive-RLS convention as src/lib/supabase.js and job_data (see
+// supabase-job-crawl-schema.sql) -- the anon key is publishable by design, RLS is what governs
+// access, and it's already committed in the frontend bundle, so reusing it here server-side adds no
+// new exposure. Raw REST (PostgREST) via fetch rather than the @supabase/supabase-js SDK, matching
+// this file's existing all-fetch style and keeping it trivially mockable in jobs.test.mjs.
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mfzzcrsgslkpvzvtveao.supabase.co'
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_7-pjVrDnXLzAAjxXawBpWw_mCVTSR-Z'
+
+// Cache-hit path for the search handler: read pre-crawled ATS-board jobs for an industry instead of
+// live-fetching every company's board on every request. Returns null (not []) on ANY failure --
+// table doesn't exist yet (schema not run), industry never crawled, or the request itself failed --
+// so the caller can tell "no cached data, fall back to live" apart from "cached data, but empty",
+// which never regresses search results below today's always-live behavior.
+async function fetchBoardsFromCache(industry) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/job_crawl_cache?industry=eq.${encodeURIComponent(industry)}&select=*`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!r.ok) return null
+    const rows = await r.json()
+    if (!Array.isArray(rows) || !rows.length) return null
+    return rows.map((row) => ({
+      id: 'cache_' + Buffer.from(String(row.url)).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 24),
+      title: row.title || '', company: row.company || '', location: row.location || '',
+      salaryMin: row.salary_min || null, salaryMax: row.salary_max || null, salaryPredicted: false,
+      url: row.url || '', category: row.category || '', categoryTag: row.category_tag || '',
+      contractTime: row.contract_time || '', description: row.description || '', created: row.created || '',
+      source: row.source || 'ats',
+    })).filter((j) => j.url)
+  } catch { return null }
+}
+
+// Write path, used by api/jobs-crawl.js's scheduled crawl (not called from the search handler
+// itself). Upserts on the url primary key (see supabase-job-crawl-schema.sql) so re-crawling the
+// same posting updates it in place instead of accumulating duplicates.
+export async function upsertCrawlCache(industry, jobs) {
+  if (!jobs || !jobs.length) return { ok: true, count: 0 }
+  const rows = jobs.slice(0, 500).map((j) => ({
+    url: j.url, source: j.source || '', industry, title: j.title || '', company: j.company || '',
+    location: j.location || '', salary_min: j.salaryMin || null, salary_max: j.salaryMax || null,
+    category: j.category || '', category_tag: j.categoryTag || '', contract_time: j.contractTime || '',
+    description: (j.description || '').slice(0, 2000), created: j.created || '',
+    crawled_at: new Date().toISOString(),
+  }))
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/job_crawl_cache`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(rows),
+      signal: AbortSignal.timeout(15000),
+    })
+    return { ok: r.ok, count: r.ok ? rows.length : 0 }
+  } catch { return { ok: false, count: 0 } }
+}
+
 // ── Curated company ATS boards per industry ─────────────────────────────────────────────────────
 // industry name (matches the client's INDUSTRIES labels) -> [{ ats, slug, name }] (or, for workday
 // specifically, [{ ats:'workday', tenant, dataCenter, site, name }] — Workday has no single universal
@@ -48,7 +108,7 @@ const ADZUNA_BASE = 'https://api.adzuna.com/v1/api/jobs'
 // ats is one of: greenhouse | lever | ashby | workable | smartrecruiters | recruitee | workday.
 // slug is the company's board id on that ATS. Seed set of well-known companies; extend freely —
 // adding a row here immediately widens coverage.
-const INDUSTRY_BOARDS = {
+export const INDUSTRY_BOARDS = {
   'Software / IT': [
     { ats: 'greenhouse', slug: 'stripe', name: 'Stripe' },
     { ats: 'greenhouse', slug: 'databricks', name: 'Databricks' },
@@ -638,7 +698,7 @@ async function fetchWorkday({ tenant, dataCenter, site, name }) {
 
 const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, workday: fetchWorkday }
 
-async function fetchBoards(boards) {
+export async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {
     const fn = ATS_FETCHERS[b.ats]
     const key = b.ats === 'workday' ? `workday:${b.tenant}:${b.dataCenter}:${b.site}` : `${b.ats}:${b.slug}`
@@ -1120,7 +1180,17 @@ export default async function handler(req, res) {
     // just mix in irrelevant results, so each only fires for the matching country selection.
     if (country === 'gb') tasks.push(fetchReed(titles || industry, body.where).then((results) => ({ kind: 'reed', results })).catch(() => ({ kind: 'reed', results: [] })))
     if (country === 'us') tasks.push(fetchUsaJobs(titles || industry, body.where).then((results) => ({ kind: 'usajobs', results })).catch(() => ({ kind: 'usajobs', results: [] })))
-    if (seedBoards.length) tasks.push(fetchBoards(seedBoards).then((results) => ({ kind: 'ats', results })).catch(() => ({ kind: 'ats', results: [] })))
+    // Cache-hit skips the live per-company ATS fetch entirely (the slow/heavy part of every search);
+    // any miss (table not set up, industry never crawled, request failed) transparently falls back to
+    // today's always-live fetchBoards(), so this can only ever make results faster, never worse.
+    if (seedBoards.length) {
+      tasks.push((async () => {
+        const cachedRows = await fetchBoardsFromCache(industry)
+        if (cachedRows) return { kind: 'ats', results: cachedRows, atsFromCache: true }
+        const live = await fetchBoards(seedBoards).catch(() => [])
+        return { kind: 'ats', results: live, atsFromCache: false }
+      })().catch(() => ({ kind: 'ats', results: [], atsFromCache: false })))
+    }
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
     if (discoveryQuery && (BRAVE_KEY || TAVILY_KEY)) {
@@ -1143,13 +1213,14 @@ export default async function handler(req, res) {
       themuse: [], jooble: [], careerjet: [], reed: [], usajobs: [],
     }
     let adzunaConfigured = false, jsearchConfigured = false, jsearchError = null, jsearchRaw = 0
+    let atsFromCache = false
     for (const s of settled) {
       if (s.status !== 'fulfilled') continue
       const v = s.value
       if (v.kind === 'adzuna') { adzunaConfigured = !!v.configured; bucket.adzuna = v.results || [] }
       else if (v.kind === 'jsearch') { jsearchConfigured = !!v.configured; bucket.jsearch = v.results || []; jsearchError = v.error || null; jsearchRaw = v.raw || 0 }
       else if (v.kind === 'himalayas') bucket.himalayas = v.results || []
-      else if (v.kind === 'ats') bucket.ats = v.results || []
+      else if (v.kind === 'ats') { bucket.ats = v.results || []; atsFromCache = !!v.atsFromCache }
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
       else if (v.kind === 'custom') bucket.custom = v.results || []
       else if (v.kind === 'themuse') bucket.themuse = v.results || []
@@ -1248,7 +1319,7 @@ export default async function handler(req, res) {
         adzuna: bucket.adzuna.length, adzunaConfigured,
         jsearch: jsearchResults.length, jsearchConfigured, jsearchError, jsearchRaw,
         himalayas: himalayasResults.length,
-        ats: bucket.ats.length,
+        ats: bucket.ats.length, atsFromCache,
         discovered: bucket.discovered.length,
         custom: bucket.custom.length,
         themuse: themuseResults.length,

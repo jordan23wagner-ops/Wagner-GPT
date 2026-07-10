@@ -4,8 +4,12 @@
     "api/chat.js": { "maxDuration": 60 },
     "api/deep-research.js": { "maxDuration": 60 },
     "api/jobs.js": { "maxDuration": 60 },
+    "api/jobs-crawl.js": { "maxDuration": 60 },
     "api/transcribe.js": { "maxDuration": 30 }
   },
+  "crons": [
+    { "path": "/api/jobs-crawl", "schedule": "0 6 * * *" }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }

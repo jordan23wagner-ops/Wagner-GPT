@@ -128,6 +128,12 @@ browser-extension powers a web page can't have). Three sub-tabs:
     (no key), **Jooble** (`JOOBLE_KEY`), **Careerjet** (`CAREERJET_AFFID`). **Reed** (`REED_API_KEY`,
     UK jobs, only called for `country: 'gb'`) is also available. All four are free to sign up for and
     silently no-op if their env var isn't set — none are required for the rest of the Jobs tab to work.
+  - **Crawl cache** (optional): searches read pre-crawled ATS-board results from a Supabase table
+    (`job_crawl_cache`) instead of live-fetching every company's board on every request, when that
+    table has data for the requested industry. `api/jobs-crawl.js`, triggered by Vercel Cron (see
+    `vercel.json`), re-crawls every `INDUSTRY_BOARDS` industry once a day and upserts the results.
+    Run `supabase-job-crawl-schema.sql` to enable it — without it, the Jobs tab works exactly as
+    before (falls back to live-fetching), just without the speed-up. See the env var table below.
   Results are merged, deduped (direct link wins over the same job's Adzuna link), filtered by
   title/location/remote, and **ranked by résumé fit** with **Fortune 500 first** and **direct-apply
   before via-Adzuna**. Cards show **✓ direct apply** / **via Adzuna**, **★ Fortune 500**, and
@@ -236,6 +242,8 @@ wife-gpt/
 | `CAREERJET_AFFID` | Optional | Jobs tab: Careerjet aggregator. Free affiliate id at careerjet.com/partners. |
 | `REED_API_KEY` | Optional | Jobs tab: Reed aggregator — **UK jobs only**, only called when the Jobs tab's country is set to United Kingdom. Free at reed.co.uk/developers. |
 | `USAJOBS_API_KEY` + `USAJOBS_EMAIL` | Optional | Jobs tab: USAJobs (US federal jobs, direct source) — **US jobs only**, only called when country is United States. Both must be set (USAJobs requires the exact registered email as the request's User-Agent). Free at developer.usajobs.gov. |
+| `CRON_SECRET` | Recommended | Protects `api/jobs-crawl.js` (the Jobs tab's scheduled ATS-board crawl). Vercel sends this automatically as a bearer token when set. Without it, the crawl endpoint is triggerable by anyone who finds the URL — low-cost abuse (it can't leak data or spend paid-API budget), but still worth setting to any random string. |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Optional | Overrides the Jobs tab crawl cache's Supabase project/key. Defaults to the same project already used by `src/lib/supabase.js` — only set these if you want the crawl cache on a different project. |
 | `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
 | `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 
