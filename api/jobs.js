@@ -19,6 +19,15 @@
 //                            and GROQ_KEY (custom-page extraction) if present; silently skipped
 //                            otherwise.
 //   4. JSearch + Himalayas — direct-apply aggregators (JSearch needs a RapidAPI key).
+//   5. The Muse            — free, no key: broad recent listings (themuse.com).
+//   6. Jooble               — free API key (JOOBLE_KEY): global aggregator.
+//   7. Careerjet            — free affiliate id (CAREERJET_AFFID): global aggregator.
+//   8. Reed                 — free API key (REED_API_KEY): UK jobs only, only called for country:'gb'.
+//   9. USAJobs              — free API key + registered email (USAJOBS_API_KEY + USAJOBS_EMAIL): US
+//                            federal jobs only, only called for country:'us'. Treated as a DIRECT
+//                            source (it's the government's own official board), not an aggregator.
+//   Sources 6-9 are all silently skipped (empty results, no error) when their env var isn't set --
+//   none of them require signing up to get the other sources working.
 //
 // POST { action:'search', titles|what, industry, where, salaryMin, salaryMax, remote, fullTime,
 //        country, resultsPerPage, category, page } -> { results:[...], count, sources:{...} }
@@ -226,7 +235,12 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // added preemptively rather than one live failure at a time: every host added so far has been a
 // well-known multi-employer job board, the exact category this feature exists to skip, so listing
 // the rest of that category up front should cut down future live-diagnose-then-patch rounds.
-const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*|wellfound|angel|otta|theladders|flexjobs|remoteok|weworkremotely|remote|virtualvocations|powertofly|hired|vettery|ripplematch|idealist|themuse|efinancialcareers|mediabistro|clearancejobs|joinhandshake|higheredjobs|workatastartup)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org|co)$/i
+// themuse/jooble/careerjet are now ALSO first-class sources fetched directly (see fetchTheMuse/
+// fetchJooble/fetchCareerjet/fetchReed below), not just excluded from custom-page discovery --
+// they're still someone else's aggregator, not any single employer's own site, so they still
+// belong here for the final direct-vs-aggregator labeling. reed added to the same list for the
+// same reason.
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*|wellfound|angel|otta|theladders|flexjobs|remoteok|weworkremotely|remote|virtualvocations|powertofly|hired|vettery|ripplematch|idealist|themuse|efinancialcareers|mediabistro|clearancejobs|joinhandshake|higheredjobs|workatastartup|reed)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org|co)$/i
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
@@ -332,6 +346,151 @@ async function fetchHimalayas() {
     created: j.pubDate || j.publishedDate || '',
     source: 'himalayas',
   })).filter((j) => j.url)
+}
+
+// ── The Muse — free, no key: broad listings with a direct posting link ─────────────────────────
+// No server-side category/keyword filter (Muse's `category` param only accepts a fixed list of
+// exact category names, not free-text titles -- passing an arbitrary title through it would just
+// silently return zero results); mirrors Himalayas' approach of pulling a broad recent set and
+// letting the handler's own title/location filter narrow it down.
+async function fetchTheMuse() {
+  const d = await fetchJson('https://www.themuse.com/api/public/jobs?page=0', { ms: 8000 })
+  const items = (d && d.results) || []
+  return items.map((j) => ({
+    id: 'tm_' + (j.id || Math.random().toString(36).slice(2)),
+    title: j.name || '',
+    company: (j.company && j.company.name) || '',
+    location: (Array.isArray(j.locations) ? j.locations.map((l) => l && l.name).filter(Boolean).join(', ') : ''),
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: (j.refs && j.refs.landing_page) || '',
+    category: (Array.isArray(j.categories) && j.categories[0] && j.categories[0].name) || '', categoryTag: '',
+    contractTime: (Array.isArray(j.levels) && j.levels[0] && j.levels[0].name) || '',
+    description: cleanText(j.contents || '').slice(0, 2000),
+    created: j.publication_date || '',
+    source: 'themuse',
+  })).filter((j) => j.url)
+}
+
+// ── Jooble — free API key (jooble.org/api/about); global, keyword+location POST ────────────────
+const JOOBLE_KEY = process.env.JOOBLE_KEY || process.env.Jooble || process.env.JOOBLE
+async function fetchJooble(what, where) {
+  if (!JOOBLE_KEY) return []
+  let d
+  try {
+    const r = await fetch(`https://jooble.org/api/${encodeURIComponent(JOOBLE_KEY)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keywords: what || '', location: where || '' }),
+      signal: AbortSignal.timeout(8000),
+    })
+    d = r.ok ? await r.json() : null
+  } catch { d = null }
+  const jobs = (d && d.jobs) || []
+  return jobs.map((j) => ({
+    id: 'jo_' + (j.id || Math.random().toString(36).slice(2)),
+    title: j.title || '',
+    company: j.company || '',
+    location: j.location || '',
+    salaryMin: null, salaryMax: null, salaryPredicted: false,
+    url: j.link || '',
+    category: '', categoryTag: '',
+    contractTime: j.type || '',
+    description: cleanText(j.snippet || '').slice(0, 2000),
+    created: j.updated || '',
+    source: 'jooble',
+  })).filter((j) => j.url)
+}
+
+// ── Careerjet — free affiliate id (careerjet.com/partners); global via locale_code ──────────────
+const CAREERJET_AFFID = process.env.CAREERJET_AFFID || process.env.CareerjetAffid
+const CAREERJET_LOCALE = { us: 'en_US', gb: 'en_GB', ca: 'en_CA', au: 'en_AU' }
+async function fetchCareerjet(what, where, country) {
+  if (!CAREERJET_AFFID) return []
+  const params = new URLSearchParams({
+    affid: CAREERJET_AFFID,
+    keywords: what || '',
+    location: where || '',
+    locale_code: CAREERJET_LOCALE[country] || 'en_US',
+    user_ip: '127.0.0.1',
+    user_agent: 'Mozilla/5.0 (compatible; Wagner-GPT/1.0)',
+    pagesize: '20',
+  })
+  const d = await fetchJson(`http://public-api.careerjet.com/search?${params.toString()}`, { ms: 8000 })
+  const jobs = (d && d.jobs) || []
+  return jobs.map((j) => ({
+    id: 'cj_' + (j.url ? String(j.url).slice(-40) : Math.random().toString(36).slice(2)),
+    title: j.title || '',
+    company: j.company || '',
+    location: j.locations || '',
+    salaryMin: j.salary_min || null, salaryMax: j.salary_max || null, salaryPredicted: false,
+    url: j.url || '',
+    category: '', categoryTag: '',
+    contractTime: '',
+    description: cleanText(j.description || '').slice(0, 2000),
+    created: j.date || '',
+    source: 'careerjet',
+  })).filter((j) => j.url)
+}
+
+// ── Reed — free API key (reed.co.uk/developers), UK jobs only; only called for country:'gb' ─────
+const REED_API_KEY = process.env.REED_API_KEY || process.env.ReedApiKey
+async function fetchReed(what, where) {
+  if (!REED_API_KEY) return []
+  const params = new URLSearchParams({ keywords: what || '' })
+  if (where) params.set('locationName', where)
+  const d = await fetchJson(`https://www.reed.co.uk/api/1.0/search?${params.toString()}`, {
+    ms: 8000,
+    headers: { Authorization: 'Basic ' + Buffer.from(REED_API_KEY + ':').toString('base64'), Accept: 'application/json' },
+  })
+  const jobs = (d && d.results) || []
+  return jobs.map((j) => ({
+    id: 're_' + (j.jobId || Math.random().toString(36).slice(2)),
+    title: j.jobTitle || '',
+    company: j.employerName || '',
+    location: j.locationName || '',
+    salaryMin: j.minimumSalary || null, salaryMax: j.maximumSalary || null, salaryPredicted: false,
+    url: j.jobUrl || '',
+    category: '', categoryTag: '',
+    contractTime: j.contractType || j.jobType || '',
+    description: cleanText(j.jobDescription || '').slice(0, 2000),
+    created: j.date || '',
+    source: 'reed',
+  })).filter((j) => j.url)
+}
+
+// ── USAJobs — free API key + registered email (developer.usajobs.gov); US federal jobs only, only
+// called for country:'us'. Requires BOTH a key and an email (USAJobs rejects requests whose
+// User-Agent isn't the exact email registered with the key), so both must be set or it no-ops.
+const USAJOBS_API_KEY = process.env.USAJOBS_API_KEY || process.env.UsaJobsApiKey
+const USAJOBS_EMAIL = process.env.USAJOBS_EMAIL || process.env.USAJOBS_USER_AGENT
+async function fetchUsaJobs(what, where) {
+  if (!USAJOBS_API_KEY || !USAJOBS_EMAIL) return []
+  const params = new URLSearchParams({ Keyword: what || '' })
+  if (where) params.set('LocationName', where)
+  const d = await fetchJson(`https://data.usajobs.gov/api/search?${params.toString()}`, {
+    ms: 8000,
+    headers: { Host: 'data.usajobs.gov', 'User-Agent': USAJOBS_EMAIL, 'Authorization-Key': USAJOBS_API_KEY, Accept: 'application/json' },
+  })
+  const items = (d && d.SearchResult && d.SearchResult.SearchResultItems) || []
+  return items.map((it) => {
+    const j = it.MatchedObjectDescriptor || {}
+    const rem = Array.isArray(j.PositionRemuneration) ? j.PositionRemuneration[0] : null
+    return {
+      id: 'uj_' + (it.MatchedObjectId || Math.random().toString(36).slice(2)),
+      title: j.PositionTitle || '',
+      company: j.OrganizationName || j.DepartmentName || '',
+      location: j.PositionLocationDisplay || '',
+      salaryMin: rem ? (Number(rem.MinimumRange) || null) : null,
+      salaryMax: rem ? (Number(rem.MaximumRange) || null) : null,
+      salaryPredicted: false,
+      url: j.PositionURI || '',
+      category: '', categoryTag: '',
+      contractTime: (Array.isArray(j.PositionSchedule) && j.PositionSchedule[0] && j.PositionSchedule[0].Name) || '',
+      description: cleanText((j.UserArea && j.UserArea.Details && j.UserArea.Details.JobSummary) || '').slice(0, 2000),
+      created: j.PositionStartDate || '',
+      source: 'usajobs',
+    }
+  }).filter((j) => j.url)
 }
 
 // ── Per-ATS board fetchers → normalized results ─────────────────────────────────────────────────
@@ -954,6 +1113,13 @@ export default async function handler(req, res) {
     tasks.push(fetchAdzuna(body, country).then((r) => ({ kind: 'adzuna', ...r })).catch(() => ({ kind: 'adzuna', results: [] })))
     tasks.push(fetchJSearch(titles || industry, body.where, body.remote, country).then((r) => ({ kind: 'jsearch', ...r })).catch(() => ({ kind: 'jsearch', results: [] })))
     tasks.push(cached('himalayas', fetchHimalayas).then((results) => ({ kind: 'himalayas', results })).catch(() => ({ kind: 'himalayas', results: [] })))
+    tasks.push(cached('themuse', fetchTheMuse).then((results) => ({ kind: 'themuse', results })).catch(() => ({ kind: 'themuse', results: [] })))
+    tasks.push(fetchJooble(titles || industry, body.where).then((results) => ({ kind: 'jooble', results })).catch(() => ({ kind: 'jooble', results: [] })))
+    tasks.push(fetchCareerjet(titles || industry, body.where, country).then((results) => ({ kind: 'careerjet', results })).catch(() => ({ kind: 'careerjet', results: [] })))
+    // Reed is UK-only; USAJobs is US federal-only -- calling either outside its own country would
+    // just mix in irrelevant results, so each only fires for the matching country selection.
+    if (country === 'gb') tasks.push(fetchReed(titles || industry, body.where).then((results) => ({ kind: 'reed', results })).catch(() => ({ kind: 'reed', results: [] })))
+    if (country === 'us') tasks.push(fetchUsaJobs(titles || industry, body.where).then((results) => ({ kind: 'usajobs', results })).catch(() => ({ kind: 'usajobs', results: [] })))
     if (seedBoards.length) tasks.push(fetchBoards(seedBoards).then((results) => ({ kind: 'ats', results })).catch(() => ({ kind: 'ats', results: [] })))
     // Discovery is best-effort; only when we have a query to search on.
     const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
@@ -972,7 +1138,10 @@ export default async function handler(req, res) {
     }
 
     const settled = await Promise.allSettled(tasks)
-    const bucket = { adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [], custom: [] }
+    const bucket = {
+      adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [], custom: [],
+      themuse: [], jooble: [], careerjet: [], reed: [], usajobs: [],
+    }
     let adzunaConfigured = false, jsearchConfigured = false, jsearchError = null, jsearchRaw = 0
     for (const s of settled) {
       if (s.status !== 'fulfilled') continue
@@ -983,6 +1152,11 @@ export default async function handler(req, res) {
       else if (v.kind === 'ats') bucket.ats = v.results || []
       else if (v.kind === 'discovered') bucket.discovered = v.results || []
       else if (v.kind === 'custom') bucket.custom = v.results || []
+      else if (v.kind === 'themuse') bucket.themuse = v.results || []
+      else if (v.kind === 'jooble') bucket.jooble = v.results || []
+      else if (v.kind === 'careerjet') bucket.careerjet = v.results || []
+      else if (v.kind === 'reed') bucket.reed = v.results || []
+      else if (v.kind === 'usajobs') bucket.usajobs = v.results || []
     }
 
     // Filter the non-Adzuna sources by title + remote/location + salary/contract (Adzuna gets these
@@ -1011,14 +1185,30 @@ export default async function handler(req, res) {
     const boardResults = [...bucket.ats, ...bucket.discovered, ...bucket.custom].filter(filterJob)
     const jsearchResults = bucket.jsearch.filter(filterJob)
     const himalayasResults = bucket.himalayas.filter(filterJob)
+    const themuseResults = bucket.themuse.filter(filterJob)
+    const joobleResults = bucket.jooble.filter(filterJob)
+    const careerjetResults = bucket.careerjet.filter(filterJob)
+    const reedResults = bucket.reed.filter(filterJob)
+    const usajobsResults = bucket.usajobs.filter(filterJob)
 
-    // Mark each result direct/aggregator; ATS boards + Himalayas are always direct.
+    // Mark each result direct/aggregator; ATS boards + Himalayas + USAJobs are direct (USAJobs IS the
+    // federal government's own official job board, not a third-party aggregator over other sites'
+    // postings, the same way a company's own Workday board is direct). The Muse/Jooble/Careerjet/Reed
+    // are aggregators over other companies' postings, same as Adzuna.
     boardResults.forEach((j) => { j.direct = true })
     himalayasResults.forEach((j) => { j.direct = true })
+    usajobsResults.forEach((j) => { j.direct = true })
     bucket.adzuna.forEach((j) => { j.direct = false })
+    themuseResults.forEach((j) => { j.direct = false })
+    joobleResults.forEach((j) => { j.direct = false })
+    careerjetResults.forEach((j) => { j.direct = false })
+    reedResults.forEach((j) => { j.direct = false })
 
-    // Dedupe preferring DIRECT-link sources over Adzuna's aggregator link for the same job.
-    let merged = dedupe([...boardResults, ...jsearchResults, ...himalayasResults, ...bucket.adzuna])
+    // Dedupe preferring DIRECT-link sources over any aggregator's link for the same job.
+    let merged = dedupe([
+      ...boardResults, ...jsearchResults, ...himalayasResults, ...usajobsResults,
+      ...bucket.adzuna, ...themuseResults, ...joobleResults, ...careerjetResults, ...reedResults,
+    ])
 
     // Order: direct links first (company boards / JSearch-direct / Himalayas), Adzuna last;
     // freshest first within each rank so the cap keeps recent postings, not one giant board's tail.
@@ -1061,6 +1251,11 @@ export default async function handler(req, res) {
         ats: bucket.ats.length,
         discovered: bucket.discovered.length,
         custom: bucket.custom.length,
+        themuse: themuseResults.length,
+        jooble: joobleResults.length, joobleConfigured: !!JOOBLE_KEY,
+        careerjet: careerjetResults.length, careerjetConfigured: !!CAREERJET_AFFID,
+        reed: reedResults.length, reedConfigured: !!REED_API_KEY,
+        usajobs: usajobsResults.length, usajobsConfigured: !!(USAJOBS_API_KEY && USAJOBS_EMAIL),
         directCount: merged.filter((j) => j.direct !== false).length,
       },
     })

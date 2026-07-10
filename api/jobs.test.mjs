@@ -11,6 +11,11 @@ process.env.ADZUNA_APP_ID = 'x'
 process.env.ADZUNA_APP_KEY = 'y'
 process.env.BRAVE_KEY = 'test-brave-key'
 process.env.GROQ_KEY = 'test-groq-key'
+process.env.JOOBLE_KEY = 'test-jooble-key'
+process.env.CAREERJET_AFFID = 'test-careerjet-affid'
+process.env.REED_API_KEY = 'test-reed-key'
+process.env.USAJOBS_API_KEY = 'test-usajobs-key'
+process.env.USAJOBS_EMAIL = 'test@example.com'
 delete process.env.TAVILY_KEY
 delete process.env.TAVILY
 
@@ -44,6 +49,37 @@ globalThis.fetch = async (url, opts) => {
       // Duplicate of the greenhouse PM (same title/company-ish) to test dedupe by URL differs → kept; test title filter passes
       { id: 99, title: 'Project Manager', company: { display_name: 'Delta' }, location: { display_name: 'Austin, TX' }, redirect_url: 'https://adzuna.example/99', category: { label: 'IT Jobs', tag: 'it-jobs' }, description: 'PM', created: '2026-07-02', salary_min: 90000, salary_max: 120000 },
     ], count: 1 })
+  }
+  if (u.includes('themuse.com/api/public/jobs')) {
+    return json({ results: [
+      { id: 501, name: 'Project Manager', company: { name: 'Muse Co' }, locations: [{ name: 'Remote' }], categories: [{ name: 'Product Management' }], levels: [{ name: 'Mid Level' }], contents: '<p>Manage products at Muse Co</p>', publication_date: '2026-07-01', refs: { landing_page: 'https://www.themuse.com/jobs/museco/project-manager' } },
+    ] })
+  }
+  if (u.includes('jooble.org/api/test-jooble-key')) {
+    return json({ jobs: [
+      { id: 601, title: 'Project Manager', company: 'Jooble Co', location: 'Remote', snippet: 'Manage jooble projects', link: 'https://jooble.org/jdp/601', updated: '2026-07-02', type: 'Full-time' },
+    ] })
+  }
+  if (u.includes('public-api.careerjet.com/search')) {
+    return json({ jobs: [
+      { title: 'Project Manager', company: 'Careerjet Co', locations: 'Remote', description: 'Manage careerjet projects', url: 'https://careerjet.com/job/701', date: '2026-07-03', salary_min: 80000, salary_max: 100000 },
+    ] })
+  }
+  if (u.includes('data.usajobs.gov/api/search')) {
+    return json({ SearchResult: { SearchResultItems: [
+      { MatchedObjectId: 801, MatchedObjectDescriptor: {
+        PositionTitle: 'Project Manager', OrganizationName: 'USAJobs Agency', PositionLocationDisplay: 'Washington, DC',
+        PositionURI: 'https://www.usajobs.gov/job/801', PositionStartDate: '2026-07-04',
+        PositionRemuneration: [{ MinimumRange: '90000', MaximumRange: '110000' }],
+        PositionSchedule: [{ Name: 'Full-time' }],
+        UserArea: { Details: { JobSummary: 'Manage federal projects' } },
+      } },
+    ] } })
+  }
+  if (u.includes('reed.co.uk/api/1.0/search')) {
+    return json({ results: [
+      { jobId: 901, jobTitle: 'Project Manager', employerName: 'Reed Co', locationName: 'London', jobUrl: 'https://reed.co.uk/job/901', jobDescription: 'Manage reed projects', date: '2026-07-05', minimumSalary: 50000, maximumSalary: 60000, jobType: 'Full-time' },
+    ] })
   }
   // Brave discovery: a mix of a Workday tenant (with a locale segment, exercising WORKDAY_URL_RE's
   // optional locale clause), a SmartRecruiters board, a Recruitee board, and a genuinely custom
@@ -271,6 +307,17 @@ async function run() {
   assert(out.results[out.results.length - 1].source === 'adzuna', 'adzuna sorted last')
   // sources meta
   assert(out.sources && out.sources.ats >= 2, 'sources.ats counted')
+  // New aggregator sources (item #2 of the roadmap): The Muse (keyless), Jooble, Careerjet, USAJobs
+  // (country:'us', treated as direct) all normalized and merged in.
+  assert(out.results.some((r) => r.source === 'themuse' && r.company === 'Muse Co'), 'The Muse job normalized (no key required)')
+  assert(out.results.some((r) => r.source === 'jooble' && r.company === 'Jooble Co'), 'Jooble job normalized')
+  assert(out.results.some((r) => r.source === 'careerjet' && r.company === 'Careerjet Co'), 'Careerjet job normalized')
+  assert(out.results.some((r) => r.source === 'usajobs' && r.company === 'USAJobs Agency'), 'USAJobs job normalized (fires for country:us)')
+  assert(!out.results.some((r) => r.source === 'reed'), 'Reed does not fire for country:us (UK-only source)')
+  const usajobsJob = out.results.find((r) => r.source === 'usajobs')
+  assert(usajobsJob && usajobsJob.direct === true, 'USAJobs treated as a direct source (the government\'s own official board), not an aggregator')
+  const themuseJob = out.results.find((r) => r.source === 'themuse')
+  assert(themuseJob && themuseJob.direct === false, 'The Muse treated as an aggregator, not a direct employer link')
 
   console.log('Results (' + out.results.length + '):')
   out.results.forEach((r) => console.log('  [' + r.source + '] ' + r.title + ' @ ' + r.company + ' — ' + r.location))
@@ -282,6 +329,12 @@ async function run() {
   const remoteTitles = res2.body.results.filter((r) => r.source !== 'adzuna').map((r) => r.title)
   assert(remoteTitles.includes('Senior Project Manager'), 'remote keeps "Remote - US" job')
   assert(!remoteTitles.includes('Project Manager, ML'), 'remote drops SF-only job')
+
+  // Country-gated source test: Reed (UK-only) fires for country:'gb' and USAJobs (US-only) does not.
+  const resGb = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Project Manager', country: 'gb' } }, resGb)
+  assert(resGb.body.results.some((r) => r.source === 'reed' && r.company === 'Reed Co'), 'Reed job normalized and fires for country:gb')
+  assert(!resGb.body.results.some((r) => r.source === 'usajobs'), 'USAJobs does not fire for country:gb (US-only source)')
 
   // Direct-company-site scraper test: Workday (enterprise ATS) + SmartRecruiters/Recruitee found via
   // broadened discovery + a genuinely custom (no known ATS) careers page via Jina+Groq extraction.

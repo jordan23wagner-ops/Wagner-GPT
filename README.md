@@ -120,7 +120,14 @@ browser-extension powers a web page can't have). Three sub-tabs:
   - **Adzuna** (`ADZUNA_APP_ID/KEY`) — broad listings, but its links open Adzuna's own landing page,
     so it's ranked **last** and labeled **"via Adzuna"** in the UI. (Adzuna does not expose the
     employer URL — confirmed — so it can't be de-aggregated server-side.)
-  - Optional **discovery** via Brave/Tavily to find more ATS boards for the query.
+  - Optional **discovery** via Brave/Tavily to find more ATS boards for the query, plus genuinely
+    custom company career pages (no known ATS) parsed via schema.org/JobPosting structured data first,
+    Jina+Groq AI extraction as a fallback.
+  - **USAJobs** (`USAJOBS_API_KEY` + `USAJOBS_EMAIL`, US federal jobs, direct — only called for
+    `country: 'us'`) plus three more aggregators (ranked with Adzuna, not as direct-apply): **The Muse**
+    (no key), **Jooble** (`JOOBLE_KEY`), **Careerjet** (`CAREERJET_AFFID`). **Reed** (`REED_API_KEY`,
+    UK jobs, only called for `country: 'gb'`) is also available. All four are free to sign up for and
+    silently no-op if their env var isn't set — none are required for the rest of the Jobs tab to work.
   Results are merged, deduped (direct link wins over the same job's Adzuna link), filtered by
   title/location/remote, and **ranked by résumé fit** with **Fortune 500 first** and **direct-apply
   before via-Adzuna**. Cards show **✓ direct apply** / **via Adzuna**, **★ Fortune 500**, and
@@ -224,6 +231,11 @@ wife-gpt/
 | `BRAVE_KEY` | Optional | Deep research + Jobs board discovery search. |
 | `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | Optional | Jobs tab: Adzuna listings (free tier at developer.adzuna.com). Note: Adzuna links open Adzuna's landing page, not the employer — treated as a fallback source. |
 | `JSEARCH_KEY` (or `RAPIDAPI_KEY`) | Optional | Jobs tab: JSearch (Google-for-Jobs, RapidAPI) — the breadth source for **direct** employer/ATS apply links (`apply_options` filtered to `is_direct`). Free tier ~200 req/mo. |
+| `GROQ_KEY` | Optional | Jobs tab: AI extraction fallback for custom (non-ATS) company career pages found via discovery. Free tier at console.groq.com. |
+| `JOOBLE_KEY` | Optional | Jobs tab: Jooble aggregator. Free, sign up at jooble.org/api/about. |
+| `CAREERJET_AFFID` | Optional | Jobs tab: Careerjet aggregator. Free affiliate id at careerjet.com/partners. |
+| `REED_API_KEY` | Optional | Jobs tab: Reed aggregator — **UK jobs only**, only called when the Jobs tab's country is set to United Kingdom. Free at reed.co.uk/developers. |
+| `USAJOBS_API_KEY` + `USAJOBS_EMAIL` | Optional | Jobs tab: USAJobs (US federal jobs, direct source) — **US jobs only**, only called when country is United States. Both must be set (USAJobs requires the exact registered email as the request's User-Agent). Free at developer.usajobs.gov. |
 | `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
 | `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 
