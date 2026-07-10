@@ -541,9 +541,11 @@ function boardsFromUrls(urls) {
 // page (career/job in the path, not an aggregator) -- this is the genuinely-custom-site case
 // (a "Sony.com/careers" with no public JSON API at all), handled by structured schema.org data first
 // and Jina+AI extraction as a fallback. One candidate per hostname, so one company's page isn't
-// sampled multiple times. cap raised from 3: checking one more candidate is cheap on average now
-// that most real career pages resolve via free structured-data parsing, not a paid AI call each time.
-function customCareerPageCandidates(urls, cap = 4) {
+// sampled multiple times. cap raised from 3 then 4: checking one more candidate is cheap on average
+// now that most real career pages resolve via free structured-data parsing, not a paid AI call each
+// time, and now that finalizeCustomJobCandidates rejects same-page-anchor-fragment "postings" for
+// free too (no wasted Groq call turns into a wasted result the way it used to).
+function customCareerPageCandidates(urls, cap = 5) {
   const seen = new Set()
   const out = []
   for (const u of urls) {
@@ -609,9 +611,16 @@ async function discoverBoards(query) {
 //    Vestas, Baker Hughes) all traced back to near-identical URLs with no per-posting date/ID, the
 //    signature of one shared search/listing page rather than distinct postings. A real job posting
 //    never shares its exact apply url with a different company's posting.
+// Confirmed live (ACBSP's "What Does A Manufacturing Manager Do?" / Ross's "STORE MANAGER" category
+// links): the AI fallback sometimes returns the SAME page as an anchor-fragment URL for every "job"
+// it lists -- e.g. https://site.example/careers#store-manager -- which is a different STRING from
+// the source page url (so the old exact-match check missed it) but not a different page at all.
+// Stripping the fragment before comparing catches this without needing the model to get it right.
+function stripUrlFragment(u) { return String(u || '').split('#')[0] }
 function finalizeCustomJobCandidates(raw, { url, name, scrapedAt }) {
+  const sourcePage = stripUrlFragment(url)
   const candidates = raw.filter((j) => {
-    if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
+    if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || stripUrlFragment(j.url) === sourcePage) return false
     const company = String(j.company || '').trim()
     return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
   })
@@ -776,6 +785,11 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
             'First check: is this actually one company\'s own job listings (not a job board, aggregator, ' +
             'search-results page, or a generic "browse by category" hub with no individual postings)? ' +
             'If it is a job board/aggregator/category hub, or you cannot confirm a single employer, return [].\n' +
+            'Also reject the WHOLE PAGE (return []) if it is career-advice/informational content -- an ' +
+            '"about this occupation" article, a "how to become a..." guide, an FAQ, or a generic landing ' +
+            'page listing job CATEGORIES (e.g. "Store Manager", "District Manager") rather than actual ' +
+            'open positions with a real location and apply link. Section headings and category names are ' +
+            'NOT job postings even if they contain a job title.\n' +
             'BE CAREFUL: some sites (e.g. industry job boards) publish OTHER companies\' individual job ' +
             'postings on their own domain — a page can look like one specific posting while still being a ' +
             'THIRD PARTY listing for a DIFFERENT real employer. For each posting, find the ACTUAL HIRING ' +

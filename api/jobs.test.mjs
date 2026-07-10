@@ -80,6 +80,11 @@ globalThis.fetch = async (url, opts) => {
       // A real company's own careers page with schema.org/JobPosting JSON-LD markup embedded --
       // must resolve via the free structured-data path WITHOUT ever calling Jina or Groq at all.
       { url: 'https://realcompany.example/careers/opening-1' },
+      // A career-advice/FAQ page (the confirmed-live ACBSP/Ross shape): the AI fallback returns
+      // several "postings" that are really just section headings, each with a URL that's the SAME
+      // page plus an anchor fragment (e.g. #store-manager) -- a different STRING from the source
+      // page url but not a different page. Must be rejected entirely, not just deduped to one.
+      { url: 'https://careeradviceexample.com/careers/manager' },
     ] } })
   }
   if (u.includes('wday/cxs/acme/Acme_Careers/jobs')) {
@@ -189,6 +194,21 @@ globalThis.fetch = async (url, opts) => {
         '</script></head><body>Careers at Real Company</body></html>',
     }
   }
+  // Career-advice page: no structured data, and the AI fallback (mocked below) returns several
+  // "postings" that are really just FAQ/section headings on the SAME page, each url differing from
+  // the source page only by an anchor fragment -- the confirmed-live ACBSP/Ross failure shape.
+  if (u.includes('r.jina.ai/https://careeradviceexample.com/careers/manager')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Career advice — no structured data here</body></html>' }
+    return { ok: true, text: async () => 'What Does A Producer Do?\nHow To Become A Producer?\nGet Producer Jobs Emailed To You\nSearch For Producer Jobs' }
+  }
+  if (u.includes('api.groq.com') && body.includes('careeradviceexample.com')) {
+    return json({ choices: [{ message: { content:
+      '[{"title":"What Does A Producer Do?","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#what-does-a-producer-do"},' +
+      '{"title":"How To Become A Producer?","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#how-to-become-a-producer"},' +
+      '{"title":"Get Producer Jobs Emailed To You","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#get-jobs-emailed"},' +
+      '{"title":"Search For Producer Jobs","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#search-jobs"}]'
+    } }] })
+  }
   if (u.includes('api.groq.com')) {
     if (body.includes('jobboardexample.com')) {
       return json({ choices: [{ message: { content:
@@ -274,6 +294,7 @@ async function run() {
   assert(!out3.results.some((r) => r.company === 'Linkedin' || /linkedin\.com/i.test(r.url)), 'linkedin.com is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" (linkedin.com/jobs/search) before this fix')
   assert(!out3.results.some((r) => /careercircle\.com/i.test(r.url)), 'careercircle.com is excluded as a custom-page candidate entirely -- confirmed live its /browse-jobs/category page surfaced as a fake "custom careers page" producing empty-description, fabricated-timestamp entries before this fix')
   assert(!out3.results.some((r) => /builtincolorado\.com/i.test(r.url)), 'builtincolorado.com (Built In\'s regional tech job board) is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" and fabricated 10 empty-description entries for different real companies before this fix')
+  assert(!out3.results.some((r) => /careeradviceexample\.com/i.test(r.url)), 'career-advice-page "postings" that are really FAQ/section headings on the same page (url differing only by a #anchor fragment) are rejected entirely -- confirmed live via ACBSP\'s "What Does A Manufacturing Manager Do?" and Ross\'s "STORE MANAGER" category links, both fabricated as fake jobs before this fix')
   assert(bySource('workday').some((r) => r.title === 'Senior Producer' && r.company === 'Acme'), 'Workday CXS job normalized correctly, tenant/site extracted from a locale-prefixed discovered URL')
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
