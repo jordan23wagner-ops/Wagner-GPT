@@ -247,12 +247,19 @@ async function callGroqClassify(rows) {
     })
   } catch (e) {
     console.log('[classify] groq fetch threw', rows.length, 'rows', (e && e.message) || e)
-    return null
+    return { ok: false, reason: 'error' }
   }
   if (!r.ok) {
     const errText = await r.text().catch(() => '')
-    console.log('[classify] groq non-ok', r.status, rows.length, 'rows', errText.slice(0, 500))
-    return null
+    // Confirmed live: gpt-oss-120b's free tier hits a per-MINUTE token limit (TPM), not the old
+    // per-day one -- it resets in ~20-30s, not an hour. Distinguishing this from other failures
+    // matters because the right response is completely different (see classifyBatch below): a
+    // short wait + retry the SAME batch, not bisect it into smaller pieces. Bisecting a rate-limited
+    // batch just means MORE separate requests competing for the same limited per-minute budget,
+    // which can make the rate limit worse, not better.
+    const isRateLimit = r.status === 429 || /rate.?limit/i.test(errText)
+    console.log('[classify] groq non-ok', r.status, rows.length, 'rows', isRateLimit ? '(rate limit)' : '', errText.slice(0, 500))
+    return { ok: false, reason: isRateLimit ? 'rate_limit' : 'error' }
   }
   const data = await r.json().catch(() => null)
   const content = data?.choices?.[0]?.message?.content || ''
@@ -261,19 +268,21 @@ async function callGroqClassify(rows) {
     const match = content.match(/\[[\s\S]*\]/)
     if (!match) {
       console.log('[classify] no json array in response', rows.length, 'rows finish_reason=' + finishReason, 'content:', content.slice(0, 300))
-      return null
+      return { ok: false, reason: 'parse_error' }
     }
     const parsed = JSON.parse(match[0])
     if (!Array.isArray(parsed)) {
       console.log('[classify] parsed but not an array', rows.length, 'rows', typeof parsed)
-      return null
+      return { ok: false, reason: 'parse_error' }
     }
-    return parsed
+    return { ok: true, parsed }
   } catch (e) {
     console.log('[classify] JSON.parse threw', rows.length, 'rows finish_reason=' + finishReason, 'error:', (e && e.message) || e, 'content:', content.slice(0, 300))
-    return null
+    return { ok: false, reason: 'parse_error' }
   }
 }
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 // One batched Groq call classifies + cleans up names for many rows at once (cheap: this is a coarse
 // "which of 11 buckets" categorization, not the extraction-quality-critical work fetchCustomCareerPage
@@ -283,20 +292,29 @@ async function callGroqClassify(rows) {
 // than being incorrectly tagged. A wrong-industry classification is a minor quality issue (unlike a
 // fabricated job posting), so this doesn't need the same hardened defenses as fetchCustomCareerPage.
 //
-// Bisection on failure: confirmed live that a single row's messy data can poison an entire 30-company
-// batch's JSON output, silently discarding 29 perfectly fine classifications along with it. Rather
-// than accept that, split the failing batch in half and retry each half independently -- this
-// isolates whichever row(s) are actually the problem to their own single-row batch (worst case ~5
-// extra Groq calls to fully isolate one bad row out of 30) instead of discarding everything.
+// Two different failure modes get two different responses:
+//   - rate_limit: short fixed backoff, then retry the SAME batch size once. Confirmed live this is a
+//     fast-resetting per-minute limit, not the old per-day one -- bisecting here would just add MORE
+//     requests competing for the same limited per-minute budget. If the retry also fails, give up for
+//     this call (leave 'validated' for a future one) rather than looping indefinitely on one batch.
+//   - parse_error/error: bisect. Confirmed live that a single row's messy data can poison an entire
+//     batch's JSON output, silently discarding every other classification in it. Splitting isolates
+//     whichever row(s) are actually the problem to their own single-row batch instead of discarding
+//     everything.
 async function classifyBatch(rows) {
   if (!rows.length || !GROQ_KEY) return []
-  const parsed = await callGroqClassify(rows)
-  if (parsed === null) {
-    if (rows.length === 1) return [] // isolated down to one row and it STILL fails -- genuinely unparseable this round, leave it 'validated' for a later retry
+  let result = await callGroqClassify(rows)
+  if (!result.ok && result.reason === 'rate_limit') {
+    await sleep(2500)
+    result = await callGroqClassify(rows)
+  }
+  if (!result.ok) {
+    if (result.reason === 'rate_limit' || rows.length === 1) return [] // still rate-limited after one retry, or isolated down to one row and it STILL fails -- leave 'validated' for a later attempt
     const mid = Math.ceil(rows.length / 2)
     const [a, b] = await Promise.all([classifyBatch(rows.slice(0, mid)), classifyBatch(rows.slice(mid))])
     return [...a, ...b]
   }
+  const parsed = result.parsed
   return rows
     .map((r, i) => {
       const p = parsed[i]
