@@ -140,6 +140,7 @@ async function run() {
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
   assert(bySource('recruitee').some((r) => r.company === 'Acme3'), 'Recruitee board found via broadened discovery query')
   assert(bySource('custom').some((r) => r.title === 'Senior Producer' && r.url === 'https://customstudio.example/careers/openings/123'), 'genuinely custom (no known ATS) careers page scraped via Jina+Groq, URL taken from the AI extraction')
+  assert(bySource('custom').every((r) => r.created && !isNaN(Date.parse(r.created))), 'custom-page jobs get a real, parseable created date (an empty one sorts as the OLDEST possible posting and silently loses the freshness tiebreak against dated ATS listings, never surfacing past the results cap -- confirmed live)')
   assert(out3.sources.custom === 1, 'sources.custom reports the one extracted custom-page job, got ' + out3.sources.custom)
   assert(out3.sources.discovered >= 3, 'sources.discovered counts the workday+smartrecruiters+recruitee jobs, got ' + out3.sources.discovered)
   console.log('\nDirect-scraper sources:', JSON.stringify(out3.sources))

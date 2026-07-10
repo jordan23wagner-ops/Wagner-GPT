@@ -615,6 +615,14 @@ async function fetchCustomCareerPage({ url, name }) {
     if (match) jobs = JSON.parse(match[0])
   } catch { return [] }
   if (!Array.isArray(jobs)) return []
+  // created is deliberately "now" rather than empty -- confirmed live: an empty created date parses
+  // to NaN in the results sort, which treats it as the OLDEST possible posting, so a custom-scraped
+  // job always lost the freshness tiebreak against hundreds of dated ATS listings and got silently
+  // truncated by the results cap regardless of whether it matched the search's own title/remote
+  // filters. We don't actually know the real posting date (the AI extraction has no reliable way to
+  // find it from arbitrary page text), but "just scraped" is a far more honest proxy than "oldest
+  // thing that exists," and lets these jobs compete fairly for a spot instead of never surfacing.
+  const scrapedAt = new Date().toISOString()
   return jobs.filter((j) => j && j.title).slice(0, 10).map((j, i) => ({
     id: 'cc_' + safeHost(url) + '_' + i,
     title: String(j.title || ''),
@@ -624,7 +632,7 @@ async function fetchCustomCareerPage({ url, name }) {
     url: j.url && /^https?:\/\//i.test(j.url) ? j.url : url,
     category: '', categoryTag: '', contractTime: '',
     description: '',
-    created: '',
+    created: scrapedAt,
     source: 'custom',
   }))
 }
