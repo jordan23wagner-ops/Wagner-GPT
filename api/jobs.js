@@ -639,14 +639,24 @@ function finalizeCustomJobCandidates(raw, { url, name, scrapedAt }) {
 // fetch is being blocked (bot detection), or the site only injects JobPosting JSON-LD via client-side
 // JS that a plain server-side fetch can never see (common on modern SPA career sites). These logs
 // (visible in Vercel's own Logs tab) distinguish the two without guessing.
+// Routed through Jina's reader (X-Return-Format: html) rather than a direct fetch -- confirmed live
+// via diagnostic logging that a direct fetch fails two different ways: some sites 403 it outright
+// (bot detection sees no JS execution, no cookies, an anonymous datacenter IP), and modern
+// client-rendered career sites (confirmed on CareerCircle) inject their content -- including any
+// JobPosting structured data -- via JavaScript AFTER the initial server response, which a direct
+// fetch can never see no matter how it's fetched. Jina already renders JS server-side (it's why the
+// AI-fallback path has been getting real data off CareerCircle at all) and presents its own
+// established reader identity rather than an anonymous IP, so reusing it here should pick up
+// client-injected markup and fare better against basic bot walls, without adding a full headless-
+// browser dependency to this function.
 async function fetchRawHtml(pageUrl) {
   try {
-    const r = await fetch(pageUrl, { headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(8000) })
-    if (!r.ok) { console.log('[structured-data] raw fetch failed', pageUrl, 'status', r.status); return '' }
+    const r = await fetch(`https://r.jina.ai/${pageUrl}`, { headers: { Accept: 'text/html', 'X-Return-Format': 'html' }, signal: AbortSignal.timeout(10000) })
+    if (!r.ok) { console.log('[structured-data] jina html fetch failed', pageUrl, 'status', r.status); return '' }
     const html = await r.text()
-    console.log('[structured-data] raw fetch ok', pageUrl, 'bytes', html.length, 'has ld+json script tag:', /application\/ld\+json/i.test(html))
+    console.log('[structured-data] jina html fetch ok', pageUrl, 'bytes', html.length, 'has ld+json script tag:', /application\/ld\+json/i.test(html))
     return html
-  } catch (e) { console.log('[structured-data] raw fetch threw', pageUrl, (e && e.message) || e); return '' }
+  } catch (e) { console.log('[structured-data] jina html fetch threw', pageUrl, (e && e.message) || e); return '' }
 }
 function extractJsonLdJobPostings(html) {
   const out = []

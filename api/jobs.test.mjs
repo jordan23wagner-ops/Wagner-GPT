@@ -19,6 +19,9 @@ const { default: handler } = await import('./jobs.js')
 globalThis.fetch = async (url, opts) => {
   const u = String(url)
   const body = (opts && opts.body) || ''
+  // Both the structured-data path and the AI-fallback path now hit r.jina.ai/{url} -- they differ
+  // only by this header, matching the real fetchRawHtml/fetchCustomCareerPageViaAi calls.
+  const returnFormat = (opts && opts.headers && opts.headers['X-Return-Format']) || ''
   const json = (obj) => ({ ok: true, json: async () => obj, text: async () => JSON.stringify(obj) })
   if (u.includes('boards-api.greenhouse.io')) {
     return json({ jobs: [
@@ -84,8 +87,11 @@ globalThis.fetch = async (url, opts) => {
       { id: 're1', title: 'Producer', company_name: 'Acme3', city: 'Kyoto', country: 'JP', careers_url: 'https://acme3.recruitee.com/o/producer', description: 'Ship more games', published_at: '2026-06-12' },
     ] })
   }
-  // Jina reader: returns PLAIN TEXT (not JSON) via .text(), matching fetchCustomCareerPage's real call.
+  // Both fetchRawHtml (structured-data path) and fetchCustomCareerPageViaAi (AI fallback) now hit
+  // r.jina.ai/{url}, differing only by X-Return-Format: 'html' vs 'text' -- these mocks branch on
+  // returnFormat to mirror that exactly, matching the real code's two-stage try-structured-then-AI flow.
   if (u.includes('r.jina.ai/https://customstudio.example/careers/openings')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Careers at Custom Studio — no structured data here</body></html>' }
     return { ok: true, text: async () => 'Careers at Custom Studio\n\nSenior Producer — Tokyo, Japan — apply at https://customstudio.example/careers/openings/123' }
   }
   // Should never actually be requested if linkedin.com is correctly excluded as a candidate -- present
@@ -96,16 +102,20 @@ globalThis.fetch = async (url, opts) => {
   // The industry-job-board page: markup names the site itself as if it were the employer (the
   // real-world Rigzone shape) -- must be rejected since "company" equals the board's own name.
   if (u.includes('r.jina.ai/https://jobboardexample.com/careers/listing-123')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Job Board Example — no structured data here</body></html>' }
     return { ok: true, text: async () => 'Job Board Example — Listing #123\n\nSenior Analyst posted on Job Board Example' }
   }
   if (u.includes('r.jina.ai/https://industryboardexample.com/jobs-listing')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Industry Board Example — no structured data here</body></html>' }
     return { ok: true, text: async () => 'Industry Board Example — Process Operations Manager roles\n\nNES Corp — apply here\nSBM Corp — apply here' }
   }
-  // A real company's own careers page with schema.org/JobPosting JSON-LD embedded -- fetched as
-  // PLAIN html (no r.jina.ai/ prefix), matching fetchRawHtml's real call. Deliberately has NO
-  // corresponding r.jina.ai or api.groq.com mock, since a correct implementation should resolve this
+  // A real company's own careers page with schema.org/JobPosting JSON-LD embedded -- returned via
+  // Jina's html-render format (matching fetchRawHtml's real call, which routes through Jina rather
+  // than a direct fetch since a direct fetch was confirmed live to either get 403'd by bot detection
+  // or, on client-rendered sites, simply never see JS-injected markup at all). Deliberately has NO
+  // text-format or api.groq.com mock for this URL, since a correct implementation should resolve this
   // entirely from structured data and never need either.
-  if (u === 'https://realcompany.example/careers/opening-1') {
+  if (u.includes('r.jina.ai/https://realcompany.example/careers/opening-1') && returnFormat === 'html') {
     return {
       ok: true,
       text: async () => '<html><head><script type="application/ld+json">' +
