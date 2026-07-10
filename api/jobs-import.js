@@ -195,16 +195,17 @@ async function fetchUnclassifiedBatch(limit) {
   } catch { return [] }
 }
 
-// One batched Groq call classifies + cleans up names for many rows at once (cheap: this is a coarse
-// "which of 11 buckets" categorization, not the extraction-quality-critical work fetchCustomCareerPage
-// does). Positional: classified[i] corresponds to rows[i]. If the model drops/reorders items (returns
-// a shorter array, or something unparseable), the mismatched rows just come back with industry:null
-// here, get filtered out below, and stay 'validated' -- eligible for a later classify batch rather
-// than being incorrectly tagged. A wrong-industry classification is a minor quality issue (unlike a
-// fabricated job posting), so this doesn't need the same hardened defenses as fetchCustomCareerPage.
-async function classifyBatch(rows) {
-  if (!rows.length || !GROQ_KEY) return []
-  const listing = rows.map((r, i) => `${i}. company_name="${r.company_name}" sample_titles="${r.sample_titles}"`).join('\n')
+// Strip characters that could break the prompt's informal company_name="..."/sample_titles="..."
+// quoting or otherwise confuse the model's own JSON generation -- confirmed live: some batches of 30
+// were coming back with zero classifications (a full-batch parse failure), most likely because one
+// row's messy Common-Crawl-derived text (stray quotes, control characters) threw off the model's
+// output for the WHOLE batch, not just that one row.
+function sanitizeForPrompt(s) {
+  return String(s || '').replace(/["\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+}
+
+async function callGroqClassify(rows) {
+  const listing = rows.map((r, i) => `${i}. company_name="${sanitizeForPrompt(r.company_name)}" sample_titles="${sanitizeForPrompt(r.sample_titles)}"`).join('\n')
   const prompt =
     `Classify each numbered company below into EXACTLY ONE of these industries: ${INDUSTRIES.join(' | ')}\n` +
     'Also clean up company_name if it looks like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes") -- ' +
@@ -226,14 +227,38 @@ async function classifyBatch(rows) {
       signal: AbortSignal.timeout(25000),
     })
     data = r.ok ? await r.json() : null
-  } catch { return [] }
+  } catch { return null }
   const content = data?.choices?.[0]?.message?.content || ''
-  let parsed = []
   try {
     const match = content.match(/\[[\s\S]*\]/)
-    if (match) parsed = JSON.parse(match[0])
-  } catch { return [] }
-  if (!Array.isArray(parsed)) return []
+    if (!match) return null
+    const parsed = JSON.parse(match[0])
+    return Array.isArray(parsed) ? parsed : null
+  } catch { return null }
+}
+
+// One batched Groq call classifies + cleans up names for many rows at once (cheap: this is a coarse
+// "which of 11 buckets" categorization, not the extraction-quality-critical work fetchCustomCareerPage
+// does). Positional: classified[i] corresponds to rows[i]. If the model drops/reorders items (returns
+// a shorter array, or something unparseable), the mismatched rows just come back with industry:null
+// here, get filtered out below, and stay 'validated' -- eligible for a later classify batch rather
+// than being incorrectly tagged. A wrong-industry classification is a minor quality issue (unlike a
+// fabricated job posting), so this doesn't need the same hardened defenses as fetchCustomCareerPage.
+//
+// Bisection on failure: confirmed live that a single row's messy data can poison an entire 30-company
+// batch's JSON output, silently discarding 29 perfectly fine classifications along with it. Rather
+// than accept that, split the failing batch in half and retry each half independently -- this
+// isolates whichever row(s) are actually the problem to their own single-row batch (worst case ~5
+// extra Groq calls to fully isolate one bad row out of 30) instead of discarding everything.
+async function classifyBatch(rows) {
+  if (!rows.length || !GROQ_KEY) return []
+  const parsed = await callGroqClassify(rows)
+  if (parsed === null) {
+    if (rows.length === 1) return [] // isolated down to one row and it STILL fails -- genuinely unparseable this round, leave it 'validated' for a later retry
+    const mid = Math.ceil(rows.length / 2)
+    const [a, b] = await Promise.all([classifyBatch(rows.slice(0, mid)), classifyBatch(rows.slice(mid))])
+    return [...a, ...b]
+  }
   return rows
     .map((r, i) => {
       const p = parsed[i]

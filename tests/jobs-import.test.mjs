@@ -8,6 +8,7 @@ process.env.GROQ_KEY = 'test-groq-key'
 const { default: handler } = await import('../api/jobs-import.js')
 
 const upsertedBatches = [] // capture every POST body sent to ats_board_registry, across all calls
+let classifyTestPhase = 'default' // 'poison' switches the registry-GET/Groq mocks for the bisection test below
 
 globalThis.fetch = async (url, opts) => {
   const u = String(url)
@@ -69,12 +70,33 @@ globalThis.fetch = async (url, opts) => {
     return { ok: true, json: async () => ([]) }
   }
   if (u.includes('ats_board_registry') && u.includes('status=eq.validated')) {
+    if (classifyTestPhase === 'poison') {
+      return json([
+        { id: 'greenhouse:poisonco', ats: 'greenhouse', company_name: 'Poison Co "weird" data', sample_titles: 'Odd\nTitle' },
+        { id: 'greenhouse:goodco', ats: 'greenhouse', company_name: 'Good Co', sample_titles: 'Software Engineer' },
+      ])
+    }
     return json([
       { id: 'greenhouse:realcompany-inc', ats: 'greenhouse', company_name: 'Realcompany Inc', sample_titles: 'Software Engineer, Staff Engineer' },
       { id: 'lever:activecompany', ats: 'lever', company_name: 'Activecompany', sample_titles: 'Product Manager' },
     ])
   }
 
+  if (u.includes('api.groq.com') && classifyTestPhase === 'poison') {
+    // Confirmed live: one poisoned row can make the WHOLE batch's JSON unparseable. Reproduce that
+    // for the 2-row batch (malformed, no closing bracket), but let the bisected 1-row retries
+    // succeed individually -- goodco classifies fine on its own; poisonco keeps failing even in
+    // isolation (simulates a row that's genuinely never going to parse, not just batch-poisoned).
+    if (body.includes('Poison Co') && body.includes('Good Co')) {
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"industry":"Software / IT"' } }] }) } // malformed: unterminated
+    }
+    if (body.includes('Good Co') && !body.includes('Poison Co')) {
+      return json({ choices: [{ message: { content: '[{"industry":"Software / IT","company_name":"Good Co"}]' } }] })
+    }
+    if (body.includes('Poison Co') && !body.includes('Good Co')) {
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'not even json' } }] }) }
+    }
+  }
   if (u.includes('api.groq.com')) {
     return json({ choices: [{ message: { content:
       '[{"industry":"Software / IT","company_name":"Real Company Inc."},' +
@@ -155,6 +177,22 @@ async function run() {
   const ghClassified = classifyBatch && classifyBatch.find((r) => r.id === 'greenhouse:realcompany-inc')
   assert(ghClassified && ghClassified.industry === 'Software / IT', 'realcompany-inc classified into Software / IT per the mocked Groq response, got ' + (ghClassified && ghClassified.industry))
   assert(ghClassified && ghClassified.company_name === 'Real Company Inc.', 'classify also cleans up the display name (slug-derived "Realcompany Inc" -> "Real Company Inc.")')
+
+  // ── Bisection recovery: one poisoned row must not silently discard the whole batch ──
+  // Confirmed live: a 30-company batch containing one row with messy data came back with ZERO
+  // classifications (Groq's whole-batch JSON output unparseable). goodco+poisonco reproduces that at
+  // 2-row scale: the full-batch call returns malformed JSON, so classifyBatch must bisect down to
+  // single-row batches -- goodco succeeds in isolation, poisonco keeps failing even alone (simulates
+  // a row that's genuinely never going to parse, not just batch-poisoned).
+  classifyTestPhase = 'poison'
+  upsertedBatches.length = 0
+  const res3b = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'classify', limit: 30 } }, res3b)
+  assert(res3b.body.classified === 1, 'bisection recovers goodco\'s classification even though the full 2-row batch failed to parse, got classified=' + res3b.body.classified)
+  const poisonUpserts = upsertedBatches.flat()
+  assert(poisonUpserts.some((r) => r.id === 'greenhouse:goodco' && r.status === 'classified'), 'goodco (the non-poisoned row) gets classified via a bisected single-row retry, not lost along with poisonco')
+  assert(!poisonUpserts.some((r) => r.id === 'greenhouse:poisonco'), 'poisonco (permanently unparseable even in isolation) is never upserted -- stays "validated" for a later attempt, not incorrectly tagged')
+  classifyTestPhase = 'default'
 
   // ── CRON_SECRET auth gate (same pattern as jobs-crawl.js) ──
   process.env.CRON_SECRET = 'test-cron-secret'
