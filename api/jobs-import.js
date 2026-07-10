@@ -230,7 +230,16 @@ async function callGroqClassify(rows) {
       method: 'POST',
       headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        // Switched from llama-3.3-70b-versatile after confirmed live: Groq's free tier caps that
+        // model at 100K tokens/day, and it's the SAME model/quota pool fetchCustomCareerPageViaAi
+        // (in jobs.js) uses for live search -- classify was starving live search of its own daily
+        // budget. gpt-oss-120b gets 200K tokens/day on a SEPARATE pool, and is already a proven Groq
+        // model id in this codebase (api/chat.js's 'gptoss' route), not a guess. Unverified: its exact
+        // JSON-formatting style for this task, since it's never been used here for structured
+        // array-extraction before (only open-ended chat) -- if the [classify] diagnostic logs show a
+        // formatting mismatch (e.g. markdown-fenced output) rather than a clean JSON array, that's the
+        // first thing to adjust, not the token/quota math above.
+        model: 'openai/gpt-oss-120b',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1, max_tokens: 4000, stream: false,
       }),
