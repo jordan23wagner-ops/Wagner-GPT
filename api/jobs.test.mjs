@@ -50,6 +50,9 @@ globalThis.fetch = async (url) => {
       { url: 'https://jobs.smartrecruiters.com/AcmeSR/producer-role' },
       { url: 'https://acme3.recruitee.com/o/producer' },
       { url: 'https://customstudio.example/careers/openings' },
+      // LinkedIn's own generic job-search page -- confirmed live to surface as a "custom careers page"
+      // before linkedin was added to AGGREGATOR_HOST_RE; must be excluded as a custom-page candidate.
+      { url: 'https://www.linkedin.com/jobs/search?keywords=Producer' },
     ] } })
   }
   if (u.includes('wday/cxs/acme/Acme_Careers/jobs')) {
@@ -71,8 +74,18 @@ globalThis.fetch = async (url) => {
   if (u.includes('r.jina.ai/https://customstudio.example/careers/openings')) {
     return { ok: true, text: async () => 'Careers at Custom Studio\n\nSenior Producer — Tokyo, Japan — apply at https://customstudio.example/careers/openings/123' }
   }
+  // Should never actually be requested if linkedin.com is correctly excluded as a candidate -- present
+  // so the test can prove exclusion (not just an unrelated fetch failure) is what keeps it out.
+  if (u.includes('r.jina.ai/https://www.linkedin.com/jobs/search')) {
+    return { ok: true, text: async () => 'LinkedIn Jobs\n\nProducer — search results' }
+  }
   if (u.includes('api.groq.com')) {
-    return json({ choices: [{ message: { content: '[{"title":"Senior Producer","location":"Tokyo, Japan","url":"https://customstudio.example/careers/openings/123"}]' } }] })
+    // Second item deliberately has NO real posting url (the AI couldn't confirm one, e.g. it only
+    // found a category/listing page) -- must be dropped rather than falling back to the source page.
+    return json({ choices: [{ message: { content:
+      '[{"title":"Senior Producer","location":"Tokyo, Japan","url":"https://customstudio.example/careers/openings/123"},' +
+      '{"title":"Studio Overview","location":"","url":""}]'
+    } }] })
   }
   return { ok: false, json: async () => ({}), text: async () => '' }
 }
@@ -135,13 +148,15 @@ async function run() {
   const out3 = res3.body
   assert(res3.statusCode === 200, 'direct-scraper search status 200, got ' + res3.statusCode)
   const bySource = (src) => out3.results.filter((r) => r.source === src)
+  assert(!out3.results.some((r) => r.company === 'Linkedin' || /linkedin\.com/i.test(r.url)), 'linkedin.com is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" (linkedin.com/jobs/search) before this fix')
   assert(bySource('workday').some((r) => r.title === 'Senior Producer' && r.company === 'Acme'), 'Workday CXS job normalized correctly, tenant/site extracted from a locale-prefixed discovered URL')
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
   assert(bySource('recruitee').some((r) => r.company === 'Acme3'), 'Recruitee board found via broadened discovery query')
   assert(bySource('custom').some((r) => r.title === 'Senior Producer' && r.url === 'https://customstudio.example/careers/openings/123'), 'genuinely custom (no known ATS) careers page scraped via Jina+Groq, URL taken from the AI extraction')
   assert(bySource('custom').every((r) => r.created && !isNaN(Date.parse(r.created))), 'custom-page jobs get a real, parseable created date (an empty one sorts as the OLDEST possible posting and silently loses the freshness tiebreak against dated ATS listings, never surfacing past the results cap -- confirmed live)')
-  assert(out3.sources.custom === 1, 'sources.custom reports the one extracted custom-page job, got ' + out3.sources.custom)
+  assert(!bySource('custom').some((r) => r.title === 'Studio Overview'), 'a job with no confirmed specific posting url is dropped entirely, never falls back to the generic source page url (confirmed live: this previously surfaced linkedin.com/jobs/search and a Rigzone listings page as if they were real postings)')
+  assert(out3.sources.custom === 1, 'sources.custom reports only the one job with a real posting url, got ' + out3.sources.custom)
   assert(out3.sources.discovered >= 3, 'sources.discovered counts the workday+smartrecruiters+recruitee jobs, got ' + out3.sources.discovered)
   console.log('\nDirect-scraper sources:', JSON.stringify(out3.sources))
   console.log('Direct-scraper results:')

@@ -210,7 +210,9 @@ const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever
 // IP literals on every hop, read only redirect Locations (no HTML scraping), and accept a target
 // ONLY when it lands on a host that is neither Adzuna nor any other aggregator.
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
+// linkedin added after a live test surfaced linkedin.com/jobs/search as a "custom careers page" --
+// exactly the site this whole feature exists to skip, and a clear miss not having it listed already.
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
@@ -595,9 +597,14 @@ async function fetchCustomCareerPage({ url, name }) {
         messages: [{
           role: 'user',
           content:
-            'This is the text of a company careers page. List up to 10 real, currently-open job postings you can find on it.\n' +
-            'Return ONLY a JSON array, nothing else. Each item: {"title":"...","location":"...","url":"absolute apply/posting URL if present, else empty string"}.\n' +
-            'If you cannot find any real job postings (e.g. the page is just a search box or landing page with no listed roles), return [].\n\n' +
+            'This is the text of a page found while searching for a SPECIFIC company\'s own careers page.\n' +
+            'First check: is this actually one company\'s own job listings (not a job board, aggregator, ' +
+            'search-results page, or a generic "browse by category" hub with no individual postings)? ' +
+            'If it is a job board/aggregator/category hub, or you cannot confirm a single employer, return [].\n' +
+            'If it IS a real single company\'s page, list up to 10 real, currently-open, INDIVIDUAL job postings, ' +
+            'each with its own specific posting URL (not the same page URL, not a search/category link).\n' +
+            'Return ONLY a JSON array, nothing else. Each item: {"title":"...","location":"...","url":"the exact absolute URL of THAT SPECIFIC posting"}.\n' +
+            'Never invent or guess a URL — if you cannot find a posting\'s own real URL, omit that item entirely rather than reusing the page URL.\n\n' +
             `Page URL: ${url}\nPage text:\n${text}`,
         }],
         temperature: 0.1,
@@ -623,18 +630,27 @@ async function fetchCustomCareerPage({ url, name }) {
   // find it from arbitrary page text), but "just scraped" is a far more honest proxy than "oldest
   // thing that exists," and lets these jobs compete fairly for a spot instead of never surfacing.
   const scrapedAt = new Date().toISOString()
-  return jobs.filter((j) => j && j.title).slice(0, 10).map((j, i) => ({
-    id: 'cc_' + safeHost(url) + '_' + i,
-    title: String(j.title || ''),
-    company: name,
-    location: String(j.location || ''),
-    salaryMin: null, salaryMax: null, salaryPredicted: false,
-    url: j.url && /^https?:\/\//i.test(j.url) ? j.url : url,
-    category: '', categoryTag: '', contractTime: '',
-    description: '',
-    created: scrapedAt,
-    source: 'custom',
-  }))
+  // A job without its OWN confirmed posting URL gets dropped entirely rather than falling back to
+  // the source page's URL -- confirmed live: that fallback silently pointed "Apply" at a generic
+  // job-board/category hub page (e.g. a Ross Stores careers category page, a Rigzone listings page)
+  // rather than an actual specific posting, which looks like a working result but sends the user
+  // somewhere useless. Requiring a real, DIFFERENT url is a stronger (if stricter) signal that the AI
+  // actually found a specific posting rather than just describing the page it was given.
+  return jobs
+    .filter((j) => j && j.title && j.url && /^https?:\/\//i.test(j.url) && j.url !== url)
+    .slice(0, 10)
+    .map((j, i) => ({
+      id: 'cc_' + safeHost(url) + '_' + i,
+      title: String(j.title || ''),
+      company: name,
+      location: String(j.location || ''),
+      salaryMin: null, salaryMax: null, salaryPredicted: false,
+      url: j.url,
+      category: '', categoryTag: '', contractTime: '',
+      description: '',
+      created: scrapedAt,
+      source: 'custom',
+    }))
 }
 
 // ── Adzuna source ────────────────────────────────────────────────────────────────────────────────
