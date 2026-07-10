@@ -106,7 +106,15 @@ globalThis.fetch = async (url, opts) => {
     return { ok: true, text: async () => 'Job Board Example — Listing #123\n\nSenior Analyst posted on Job Board Example' }
   }
   if (u.includes('r.jina.ai/https://industryboardexample.com/jobs-listing')) {
-    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Industry Board Example — no structured data here</body></html>' }
+    // Confirmed live (careers.acbsp.org / jobdescription.org): "has ld+json script tag: true" yet
+    // "JobPosting nodes found: 0" -- one real cause is a malformed/truncated JSON-LD block that
+    // JSON.parse throws on. Included here (alongside the valid-but-non-JobPosting Organization block)
+    // so extractJsonLdJobPostings's parseFailures counter is exercised and the page still correctly
+    // falls through to the AI fallback rather than the parse error aborting the whole request.
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><head>' +
+      '<script type="application/ld+json">{ this is not valid json </script>' +
+      '<script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@type': 'Organization', name: 'Industry Board Example' }) + '</script>' +
+      '</head><body>Industry Board Example — no JobPosting markup here</body></html>' }
     return { ok: true, text: async () => 'Industry Board Example — Process Operations Manager roles\n\nNES Corp — apply here\nSBM Corp — apply here' }
   }
   // A real company's own careers page with schema.org/JobPosting JSON-LD embedded -- returned via
@@ -115,18 +123,32 @@ globalThis.fetch = async (url, opts) => {
   // or, on client-rendered sites, simply never see JS-injected markup at all). Deliberately has NO
   // text-format or api.groq.com mock for this URL, since a correct implementation should resolve this
   // entirely from structured data and never need either.
+  // The JobPosting is deliberately NESTED three levels deep (WebPage -> mainEntity -> JobPosting,
+  // itself inside an @graph array) rather than a flat top-level node -- confirmed live that some
+  // real sites' JSON-LD shapes this way, which the original flat/@graph-only extractor silently
+  // missed ("ld+json tag exists, 0 JobPosting nodes found"). Also carries an unrelated BreadcrumbList
+  // sibling node to prove the walk doesn't stop at the first non-matching type.
   if (u.includes('r.jina.ai/https://realcompany.example/careers/opening-1') && returnFormat === 'html') {
     return {
       ok: true,
       text: async () => '<html><head><script type="application/ld+json">' +
         JSON.stringify({
-          '@context': 'https://schema.org', '@type': 'JobPosting',
-          title: 'Live Events Producer', // must contain "producer" to pass this test's own title filter (search titles: 'Producer')
-          hiringOrganization: { '@type': 'Organization', name: 'Real Company Inc.' },
-          jobLocation: { '@type': 'Place', address: { addressLocality: 'Austin', addressRegion: 'TX', addressCountry: 'US' } },
-          datePosted: '2026-07-01', validThrough: '2026-12-31', employmentType: 'FULL_TIME',
-          description: 'Produce live events for Real Company.',
-          url: 'https://realcompany.example/careers/opening-1-detail',
+          '@context': 'https://schema.org',
+          '@graph': [
+            { '@type': 'BreadcrumbList', itemListElement: [] },
+            {
+              '@type': 'WebPage',
+              mainEntity: {
+                '@type': 'JobPosting',
+                title: 'Live Events Producer', // must contain "producer" to pass this test's own title filter (search titles: 'Producer')
+                hiringOrganization: { '@type': 'Organization', name: 'Real Company Inc.' },
+                jobLocation: { '@type': 'Place', address: { addressLocality: 'Austin', addressRegion: 'TX', addressCountry: 'US' } },
+                datePosted: '2026-07-01', validThrough: '2026-12-31', employmentType: 'FULL_TIME',
+                description: 'Produce live events for Real Company.',
+                url: 'https://realcompany.example/careers/opening-1-detail',
+              },
+            },
+          ],
         }) +
         '</script></head><body>Careers at Real Company</body></html>',
     }

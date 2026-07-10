@@ -658,20 +658,39 @@ async function fetchRawHtml(pageUrl) {
     return html
   } catch (e) { console.log('[structured-data] jina html fetch threw', pageUrl, (e && e.message) || e); return '' }
 }
+function isJobPostingType(type) {
+  return type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'))
+}
+// Real JobPosting markup isn't always a flat top-level node or a flat @graph array -- sites also
+// nest it under a WebPage's mainEntity, an ItemList's itemListElement, etc. Walk the whole parsed
+// tree (bounded depth) so those shapes aren't silently missed, and track every @type encountered
+// so a "0 matches" result can be explained (wrong type present vs. genuinely no JobPosting at all).
+function collectJobPostingNodes(value, out, seenTypes, depth) {
+  if (!value || depth > 6) return
+  if (Array.isArray(value)) { for (const v of value) collectJobPostingNodes(v, out, seenTypes, depth + 1); return }
+  if (typeof value !== 'object') return
+  const type = value['@type']
+  if (type) seenTypes.add(Array.isArray(type) ? type.join('+') : String(type))
+  if (isJobPostingType(type)) out.push(value)
+  for (const key of Object.keys(value)) {
+    if (key === '@type') continue
+    collectJobPostingNodes(value[key], out, seenTypes, depth + 1)
+  }
+}
 function extractJsonLdJobPostings(html) {
   const out = []
+  const seenTypes = new Set()
+  let scriptCount = 0
+  let parseFailures = 0
   const scriptRe = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
   let m
   while ((m = scriptRe.exec(html))) {
+    scriptCount++
     let parsed
-    try { parsed = JSON.parse(m[1]) } catch { continue }
-    const nodes = Array.isArray(parsed) ? parsed : (Array.isArray(parsed && parsed['@graph']) ? parsed['@graph'] : [parsed])
-    for (const node of nodes) {
-      if (!node) continue
-      const type = node['@type']
-      if (type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'))) out.push(node)
-    }
+    try { parsed = JSON.parse(m[1]) } catch { parseFailures++; continue }
+    collectJobPostingNodes(parsed, out, seenTypes, 0)
   }
+  console.log('[structured-data] ld+json scripts', scriptCount, 'parseFailures', parseFailures, 'types seen', Array.from(seenTypes).join('|') || '(none)', 'JobPosting matches', out.length)
   return out
 }
 function jsonLdOrgName(hiringOrganization) {
