@@ -62,6 +62,11 @@ globalThis.fetch = async (url, opts) => {
       // entries (empty description, "just scraped" timestamp standing in for a real posting date)
       // since a job-board category page has no single real posting for the AI to describe.
       { url: 'https://www.careercircle.com/browse-jobs/category/manufacturing-and-production/producer' },
+      // Built In's regional tech job board -- confirmed live to surface builtincolorado.com/jobs/...
+      // as a "custom careers page" and fabricate 10 empty-description entries (Boeing, BAE Systems,
+      // True Anomaly, ...) all attributed to Built In's own domain, since it's a multi-employer
+      // listing page, not any one of those companies' actual careers site.
+      { url: 'https://www.builtincolorado.com/jobs/dev-engineering' },
       // An INDUSTRY JOB BOARD (not a single employer) that hosts other companies' individual postings
       // on its own domain -- confirmed live via Rigzone (an oil & gas job board). Its host isn't a
       // known aggregator, so it becomes a custom-page candidate; the fix under test is rejecting it
@@ -115,6 +120,19 @@ globalThis.fetch = async (url, opts) => {
   if (u.includes('api.groq.com') && body.includes('careercircle.com')) {
     return json({ choices: [{ message: { content:
       '[{"title":"Producer","company":"Careercircle","location":"","url":"https://www.careercircle.com/job/1"}]'
+    } }] })
+  }
+  // Should never actually be requested if builtincolorado.com is correctly excluded as a candidate --
+  // reproduces the exact live bug (10 fabricated no-description entries for different real companies
+  // sharing the board's own domain) if the exclusion regresses.
+  if (u.includes('r.jina.ai/https://www.builtincolorado.com/jobs/dev-engineering')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Built In Colorado — Software Engineer jobs</body></html>' }
+    return { ok: true, text: async () => 'Built In Colorado — Software Engineer roles\n\nBoeing — apply here\nTrue Anomaly — apply here' }
+  }
+  if (u.includes('api.groq.com') && body.includes('builtincolorado.com')) {
+    return json({ choices: [{ message: { content:
+      '[{"title":"Software Engineer","company":"Boeing","location":"","url":"https://www.builtincolorado.com/job/1"},' +
+      '{"title":"Software Engineer","company":"True Anomaly","location":"","url":"https://www.builtincolorado.com/job/2"}]'
     } }] })
   }
   // The industry-job-board page: markup names the site itself as if it were the employer (the
@@ -255,6 +273,7 @@ async function run() {
   const bySource = (src) => out3.results.filter((r) => r.source === src)
   assert(!out3.results.some((r) => r.company === 'Linkedin' || /linkedin\.com/i.test(r.url)), 'linkedin.com is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" (linkedin.com/jobs/search) before this fix')
   assert(!out3.results.some((r) => /careercircle\.com/i.test(r.url)), 'careercircle.com is excluded as a custom-page candidate entirely -- confirmed live its /browse-jobs/category page surfaced as a fake "custom careers page" producing empty-description, fabricated-timestamp entries before this fix')
+  assert(!out3.results.some((r) => /builtincolorado\.com/i.test(r.url)), 'builtincolorado.com (Built In\'s regional tech job board) is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" and fabricated 10 empty-description entries for different real companies before this fix')
   assert(bySource('workday').some((r) => r.title === 'Senior Producer' && r.company === 'Acme'), 'Workday CXS job normalized correctly, tenant/site extracted from a locale-prefixed discovered URL')
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
