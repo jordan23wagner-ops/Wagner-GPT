@@ -16,8 +16,9 @@ delete process.env.TAVILY
 
 const { default: handler } = await import('./jobs.js')
 
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, opts) => {
   const u = String(url)
+  const body = (opts && opts.body) || ''
   const json = (obj) => ({ ok: true, json: async () => obj, text: async () => JSON.stringify(obj) })
   if (u.includes('boards-api.greenhouse.io')) {
     return json({ jobs: [
@@ -53,6 +54,11 @@ globalThis.fetch = async (url) => {
       // LinkedIn's own generic job-search page -- confirmed live to surface as a "custom careers page"
       // before linkedin was added to AGGREGATOR_HOST_RE; must be excluded as a custom-page candidate.
       { url: 'https://www.linkedin.com/jobs/search?keywords=Producer' },
+      // An INDUSTRY JOB BOARD (not a single employer) that hosts other companies' individual postings
+      // on its own domain -- confirmed live via Rigzone (an oil & gas job board). Its host isn't a
+      // known aggregator, so it becomes a custom-page candidate; the fix under test is rejecting it
+      // by company name, not by host, since an exhaustive niche-job-board host list is impossible.
+      { url: 'https://jobboardexample.com/careers/listing-123' },
     ] } })
   }
   if (u.includes('wday/cxs/acme/Acme_Careers/jobs')) {
@@ -79,12 +85,22 @@ globalThis.fetch = async (url) => {
   if (u.includes('r.jina.ai/https://www.linkedin.com/jobs/search')) {
     return { ok: true, text: async () => 'LinkedIn Jobs\n\nProducer — search results' }
   }
+  // The industry-job-board page: markup names the site itself as if it were the employer (the
+  // real-world Rigzone shape) -- must be rejected since "company" equals the board's own name.
+  if (u.includes('r.jina.ai/https://jobboardexample.com/careers/listing-123')) {
+    return { ok: true, text: async () => 'Job Board Example — Listing #123\n\nSenior Analyst posted on Job Board Example' }
+  }
   if (u.includes('api.groq.com')) {
+    if (body.includes('jobboardexample.com')) {
+      return json({ choices: [{ message: { content:
+        '[{"title":"Senior Analyst","company":"Jobboardexample","location":"Remote","url":"https://jobboardexample.com/careers/listing-123-detail"}]'
+      } }] })
+    }
     // Second item deliberately has NO real posting url (the AI couldn't confirm one, e.g. it only
     // found a category/listing page) -- must be dropped rather than falling back to the source page.
     return json({ choices: [{ message: { content:
-      '[{"title":"Senior Producer","location":"Tokyo, Japan","url":"https://customstudio.example/careers/openings/123"},' +
-      '{"title":"Studio Overview","location":"","url":""}]'
+      '[{"title":"Senior Producer","company":"Custom Studio Inc.","location":"Tokyo, Japan","url":"https://customstudio.example/careers/openings/123"},' +
+      '{"title":"Studio Overview","company":"Custom Studio Inc.","location":"","url":""}]'
     } }] })
   }
   return { ok: false, json: async () => ({}), text: async () => '' }
@@ -153,10 +169,11 @@ async function run() {
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
   assert(bySource('recruitee').some((r) => r.company === 'Acme3'), 'Recruitee board found via broadened discovery query')
-  assert(bySource('custom').some((r) => r.title === 'Senior Producer' && r.url === 'https://customstudio.example/careers/openings/123'), 'genuinely custom (no known ATS) careers page scraped via Jina+Groq, URL taken from the AI extraction')
+  assert(bySource('custom').some((r) => r.title === 'Senior Producer' && r.company === 'Custom Studio Inc.' && r.url === 'https://customstudio.example/careers/openings/123'), 'genuinely custom (no known ATS) careers page scraped via Jina+Groq, real employer name and URL taken from the AI extraction')
   assert(bySource('custom').every((r) => r.created && !isNaN(Date.parse(r.created))), 'custom-page jobs get a real, parseable created date (an empty one sorts as the OLDEST possible posting and silently loses the freshness tiebreak against dated ATS listings, never surfacing past the results cap -- confirmed live)')
   assert(!bySource('custom').some((r) => r.title === 'Studio Overview'), 'a job with no confirmed specific posting url is dropped entirely, never falls back to the generic source page url (confirmed live: this previously surfaced linkedin.com/jobs/search and a Rigzone listings page as if they were real postings)')
-  assert(out3.sources.custom === 1, 'sources.custom reports only the one job with a real posting url, got ' + out3.sources.custom)
+  assert(!out3.results.some((r) => r.company === 'Jobboardexample'), 'a job whose "company" is just the board/site\'s own name (not a real distinct employer) is dropped -- confirmed live: Rigzone, an oil & gas industry job board hosting OTHER companies\' postings, was labeled as the "company" for every single posting it surfaced')
+  assert(out3.sources.custom === 1, 'sources.custom reports only the one job with both a real posting url and a real distinct employer name, got ' + out3.sources.custom)
   assert(out3.sources.discovered >= 3, 'sources.discovered counts the workday+smartrecruiters+recruitee jobs, got ' + out3.sources.discovered)
   console.log('\nDirect-scraper sources:', JSON.stringify(out3.sources))
   console.log('Direct-scraper results:')

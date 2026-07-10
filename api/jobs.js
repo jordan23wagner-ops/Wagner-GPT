@@ -601,10 +601,17 @@ async function fetchCustomCareerPage({ url, name }) {
             'First check: is this actually one company\'s own job listings (not a job board, aggregator, ' +
             'search-results page, or a generic "browse by category" hub with no individual postings)? ' +
             'If it is a job board/aggregator/category hub, or you cannot confirm a single employer, return [].\n' +
-            'If it IS a real single company\'s page, list up to 10 real, currently-open, INDIVIDUAL job postings, ' +
-            'each with its own specific posting URL (not the same page URL, not a search/category link).\n' +
-            'Return ONLY a JSON array, nothing else. Each item: {"title":"...","location":"...","url":"the exact absolute URL of THAT SPECIFIC posting"}.\n' +
-            'Never invent or guess a URL — if you cannot find a posting\'s own real URL, omit that item entirely rather than reusing the page URL.\n\n' +
+            'BE CAREFUL: some sites (e.g. industry job boards) publish OTHER companies\' individual job ' +
+            'postings on their own domain — a page can look like one specific posting while still being a ' +
+            'THIRD PARTY listing for a DIFFERENT real employer. For each posting, find the ACTUAL HIRING ' +
+            'EMPLOYER stated in the posting text itself (not the name of the website/board hosting it). ' +
+            'If you cannot find a specific named employer in the page text that is different from the ' +
+            'site/board itself, omit that item — do not guess, and never use the site/board\'s own name as ' +
+            'the employer.\n' +
+            'List up to 10 real, currently-open, INDIVIDUAL job postings, each with its own specific ' +
+            'posting URL (not the same page URL, not a search/category link).\n' +
+            'Return ONLY a JSON array, nothing else. Each item: {"title":"...","company":"the actual hiring employer named in the posting text","location":"...","url":"the exact absolute URL of THAT SPECIFIC posting"}.\n' +
+            'Never invent or guess a URL or a company name — if you cannot find either with confidence, omit that item entirely.\n\n' +
             `Page URL: ${url}\nPage text:\n${text}`,
         }],
         temperature: 0.1,
@@ -636,13 +643,24 @@ async function fetchCustomCareerPage({ url, name }) {
   // rather than an actual specific posting, which looks like a working result but sends the user
   // somewhere useless. Requiring a real, DIFFERENT url is a stronger (if stricter) signal that the AI
   // actually found a specific posting rather than just describing the page it was given.
+  // A job with no specific, named hiring employer (distinct from the board/site itself) gets dropped
+  // too -- confirmed live: Rigzone (an oil & gas INDUSTRY JOB BOARD that hosts OTHER companies'
+  // postings on its own domain) was labeled as the "company" for every single posting, since the old
+  // code always used the discovered site's own name unconditionally rather than what the AI actually
+  // found on the page. A URL-only check can't distinguish "a board publishing third-party postings"
+  // from "a genuine single-employer page" -- requiring a real employer name, different from the
+  // site's own name, catches exactly this case.
   return jobs
-    .filter((j) => j && j.title && j.url && /^https?:\/\//i.test(j.url) && j.url !== url)
+    .filter((j) => {
+      if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
+      const company = String(j.company || '').trim()
+      return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
+    })
     .slice(0, 10)
     .map((j, i) => ({
       id: 'cc_' + safeHost(url) + '_' + i,
       title: String(j.title || ''),
-      company: name,
+      company: String(j.company).trim(),
       location: String(j.location || ''),
       salaryMin: null, salaryMax: null, salaryPredicted: false,
       url: j.url,
