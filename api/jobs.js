@@ -220,7 +220,13 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // Built In is a tech job board with a regional edition per city (builtin.com, builtinnyc, builtinsf,
 // builtinboston, builtinaustin, builtincolorado, builtinchicago, builtinla, builtinseattle, ...); a
 // prefix match covers the whole family rather than chasing city editions one live failure at a time.
-const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
+// The rest of this list (wellfound/angel, otta, theladders, flexjobs, remoteok, weworkremotely,
+// remote.co, virtualvocations, powertofly, hired, vettery, ripplematch, idealist, themuse,
+// efinancialcareers, mediabistro, clearancejobs, joinhandshake, higheredjobs, workatastartup) was
+// added preemptively rather than one live failure at a time: every host added so far has been a
+// well-known multi-employer job board, the exact category this feature exists to skip, so listing
+// the rest of that category up front should cut down future live-diagnose-then-patch rounds.
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*|wellfound|angel|otta|theladders|flexjobs|remoteok|weworkremotely|remote|virtualvocations|powertofly|hired|vettery|ripplematch|idealist|themuse|efinancialcareers|mediabistro|clearancejobs|joinhandshake|higheredjobs|workatastartup)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org|co)$/i
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
