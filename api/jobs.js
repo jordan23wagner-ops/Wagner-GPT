@@ -212,7 +212,11 @@ const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 // linkedin added after a live test surfaced linkedin.com/jobs/search as a "custom careers page" --
 // exactly the site this whole feature exists to skip, and a clear miss not having it listed already.
-const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
+// careercircle added after a live test surfaced its /browse-jobs/category/... listing page as a
+// "custom careers page": it's a job aggregator (like indeed/ziprecruiter), not a single employer's
+// site, so the AI-fallback extraction had no one real posting to describe -- it fabricated entries
+// with an empty description and a "just scraped" timestamp standing in for a real posting date.
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org)$/i
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }

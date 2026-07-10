@@ -57,6 +57,11 @@ globalThis.fetch = async (url, opts) => {
       // LinkedIn's own generic job-search page -- confirmed live to surface as a "custom careers page"
       // before linkedin was added to AGGREGATOR_HOST_RE; must be excluded as a custom-page candidate.
       { url: 'https://www.linkedin.com/jobs/search?keywords=Producer' },
+      // CareerCircle's own browse/category listing page -- confirmed live to surface as a "custom
+      // careers page" before careercircle was added to AGGREGATOR_HOST_RE, producing fabricated
+      // entries (empty description, "just scraped" timestamp standing in for a real posting date)
+      // since a job-board category page has no single real posting for the AI to describe.
+      { url: 'https://www.careercircle.com/browse-jobs/category/manufacturing-and-production/producer' },
       // An INDUSTRY JOB BOARD (not a single employer) that hosts other companies' individual postings
       // on its own domain -- confirmed live via Rigzone (an oil & gas job board). Its host isn't a
       // known aggregator, so it becomes a custom-page candidate; the fix under test is rejecting it
@@ -98,6 +103,19 @@ globalThis.fetch = async (url, opts) => {
   // so the test can prove exclusion (not just an unrelated fetch failure) is what keeps it out.
   if (u.includes('r.jina.ai/https://www.linkedin.com/jobs/search')) {
     return { ok: true, text: async () => 'LinkedIn Jobs\n\nProducer — search results' }
+  }
+  // Should never actually be requested if careercircle.com is correctly excluded as a candidate --
+  // present so the test can prove exclusion (not just an unrelated fetch failure) is what keeps it
+  // out, and reproduces the exact live bug (a fabricated no-description/no-real-date entry) if the
+  // exclusion regresses.
+  if (u.includes('r.jina.ai/https://www.careercircle.com/browse-jobs/category')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>CareerCircle — Producer jobs</body></html>' }
+    return { ok: true, text: async () => 'CareerCircle Jobs\n\nProducer — apply at https://www.careercircle.com/job/1' }
+  }
+  if (u.includes('api.groq.com') && body.includes('careercircle.com')) {
+    return json({ choices: [{ message: { content:
+      '[{"title":"Producer","company":"Careercircle","location":"","url":"https://www.careercircle.com/job/1"}]'
+    } }] })
   }
   // The industry-job-board page: markup names the site itself as if it were the employer (the
   // real-world Rigzone shape) -- must be rejected since "company" equals the board's own name.
@@ -236,6 +254,7 @@ async function run() {
   assert(res3.statusCode === 200, 'direct-scraper search status 200, got ' + res3.statusCode)
   const bySource = (src) => out3.results.filter((r) => r.source === src)
   assert(!out3.results.some((r) => r.company === 'Linkedin' || /linkedin\.com/i.test(r.url)), 'linkedin.com is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" (linkedin.com/jobs/search) before this fix')
+  assert(!out3.results.some((r) => /careercircle\.com/i.test(r.url)), 'careercircle.com is excluded as a custom-page candidate entirely -- confirmed live its /browse-jobs/category page surfaced as a fake "custom careers page" producing empty-description, fabricated-timestamp entries before this fix')
   assert(bySource('workday').some((r) => r.title === 'Senior Producer' && r.company === 'Acme'), 'Workday CXS job normalized correctly, tenant/site extracted from a locale-prefixed discovered URL')
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
