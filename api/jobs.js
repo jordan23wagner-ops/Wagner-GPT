@@ -650,12 +650,22 @@ async function fetchCustomCareerPage({ url, name }) {
   // found on the page. A URL-only check can't distinguish "a board publishing third-party postings"
   // from "a genuine single-employer page" -- requiring a real employer name, different from the
   // site's own name, catches exactly this case.
-  return jobs
-    .filter((j) => {
-      if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
-      const company = String(j.company || '').trim()
-      return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
-    })
+  const candidates = jobs.filter((j) => {
+    if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
+    const company = String(j.company || '').trim()
+    return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
+  })
+  // If the SAME url is claimed by more than one entry, the AI is describing several different
+  // companies off of one shared page rather than distinct individual postings -- confirmed live:
+  // Rigzone entries that named several genuinely different real employers (NES Fircroft, SBM
+  // Offshore, Vestas, Baker Hughes) all traced back to near-identical URLs with no per-posting
+  // date/ID, unlike a confirmed-good batch where every URL carried a distinct slug. A real posting
+  // never shares its apply URL with a DIFFERENT company's posting, so any url claimed more than once
+  // is treated as unreliable and every entry using it is dropped, not just the duplicates.
+  const urlCounts = new Map()
+  for (const j of candidates) urlCounts.set(j.url, (urlCounts.get(j.url) || 0) + 1)
+  return candidates
+    .filter((j) => urlCounts.get(j.url) === 1)
     .slice(0, 10)
     .map((j, i) => ({
       id: 'cc_' + safeHost(url) + '_' + i,
