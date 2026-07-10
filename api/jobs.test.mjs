@@ -64,6 +64,9 @@ globalThis.fetch = async (url, opts) => {
       // Fircroft, SBM Offshore, Vestas, Baker Hughes) all tracing back to the same generic URL
       // pattern with no per-posting date/ID, unlike a confirmed-good batch's distinct slugs.
       { url: 'https://industryboardexample.com/jobs-listing' },
+      // A real company's own careers page with schema.org/JobPosting JSON-LD markup embedded --
+      // must resolve via the free structured-data path WITHOUT ever calling Jina or Groq at all.
+      { url: 'https://realcompany.example/careers/opening-1' },
     ] } })
   }
   if (u.includes('wday/cxs/acme/Acme_Careers/jobs')) {
@@ -97,6 +100,26 @@ globalThis.fetch = async (url, opts) => {
   }
   if (u.includes('r.jina.ai/https://industryboardexample.com/jobs-listing')) {
     return { ok: true, text: async () => 'Industry Board Example — Process Operations Manager roles\n\nNES Corp — apply here\nSBM Corp — apply here' }
+  }
+  // A real company's own careers page with schema.org/JobPosting JSON-LD embedded -- fetched as
+  // PLAIN html (no r.jina.ai/ prefix), matching fetchRawHtml's real call. Deliberately has NO
+  // corresponding r.jina.ai or api.groq.com mock, since a correct implementation should resolve this
+  // entirely from structured data and never need either.
+  if (u === 'https://realcompany.example/careers/opening-1') {
+    return {
+      ok: true,
+      text: async () => '<html><head><script type="application/ld+json">' +
+        JSON.stringify({
+          '@context': 'https://schema.org', '@type': 'JobPosting',
+          title: 'Live Events Producer', // must contain "producer" to pass this test's own title filter (search titles: 'Producer')
+          hiringOrganization: { '@type': 'Organization', name: 'Real Company Inc.' },
+          jobLocation: { '@type': 'Place', address: { addressLocality: 'Austin', addressRegion: 'TX', addressCountry: 'US' } },
+          datePosted: '2026-07-01', validThrough: '2026-12-31', employmentType: 'FULL_TIME',
+          description: 'Produce live events for Real Company.',
+          url: 'https://realcompany.example/careers/opening-1-detail',
+        }) +
+        '</script></head><body>Careers at Real Company</body></html>',
+    }
   }
   if (u.includes('api.groq.com')) {
     if (body.includes('jobboardexample.com')) {
@@ -190,7 +213,13 @@ async function run() {
   assert(!bySource('custom').some((r) => r.title === 'Studio Overview'), 'a job with no confirmed specific posting url is dropped entirely, never falls back to the generic source page url (confirmed live: this previously surfaced linkedin.com/jobs/search and a Rigzone listings page as if they were real postings)')
   assert(!out3.results.some((r) => r.company === 'Jobboardexample'), 'a job whose "company" is just the board/site\'s own name (not a real distinct employer) is dropped -- confirmed live: Rigzone, an oil & gas industry job board hosting OTHER companies\' postings, was labeled as the "company" for every single posting it surfaced')
   assert(!out3.results.some((r) => r.company === 'NES Corp' || r.company === 'SBM Corp'), 'two DIFFERENT real-looking companies sharing the exact same posting url are both dropped, not deduped to one -- confirmed live: real distinct Rigzone employer names (NES Fircroft, SBM Offshore, Vestas, Baker Hughes) all traced back to near-identical URLs with no per-posting date/ID, the signature of one shared listing page rather than distinct postings')
-  assert(out3.sources.custom === 1, 'sources.custom reports only the one job with both a real posting url and a real distinct employer name, got ' + out3.sources.custom)
+  const structuredJob = bySource('custom').find((r) => r.company === 'Real Company Inc.')
+  assert(!!structuredJob, 'a company career page with schema.org/JobPosting JSON-LD resolves via the free structured-data path -- no r.jina.ai or api.groq.com mock exists for this URL, so this only passes if fetchStructuredJobPostings actually worked')
+  assert(structuredJob && structuredJob.url === 'https://realcompany.example/careers/opening-1-detail', 'structured-data job URL comes from the JSON-LD "url" field, not the discovered page URL')
+  assert(structuredJob && structuredJob.created === '2026-07-01', 'structured-data job uses the REAL datePosted from JSON-LD, not a "just scraped" timestamp -- got ' + (structuredJob && structuredJob.created))
+  assert(structuredJob && structuredJob.description.includes('Produce live events'), 'structured-data job carries a REAL description from JSON-LD -- AI/Jina extraction never populates this field at all')
+  assert(structuredJob && structuredJob.location === 'Austin, TX, US', 'structured-data job location built from JSON-LD address fields, got ' + (structuredJob && structuredJob.location))
+  assert(out3.sources.custom === 2, 'sources.custom reports the AI-extracted job plus the structured-data job, got ' + out3.sources.custom)
   assert(out3.sources.discovered >= 3, 'sources.discovered counts the workday+smartrecruiters+recruitee jobs, got ' + out3.sources.discovered)
   console.log('\nDirect-scraper sources:', JSON.stringify(out3.sources))
   console.log('Direct-scraper results:')

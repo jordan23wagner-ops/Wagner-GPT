@@ -525,9 +525,11 @@ function boardsFromUrls(urls) {
 
 // A discovered URL that ISN'T on any known ATS platform but still looks like a company's own careers
 // page (career/job in the path, not an aggregator) -- this is the genuinely-custom-site case
-// (a "Sony.com/careers" with no public JSON API at all), handled by Jina+AI extraction rather than a
-// structured fetcher. One candidate per hostname, so one company's page isn't sampled multiple times.
-function customCareerPageCandidates(urls, cap = 3) {
+// (a "Sony.com/careers" with no public JSON API at all), handled by structured schema.org data first
+// and Jina+AI extraction as a fallback. One candidate per hostname, so one company's page isn't
+// sampled multiple times. cap raised from 3: checking one more candidate is cheap on average now
+// that most real career pages resolve via free structured-data parsing, not a paid AI call each time.
+function customCareerPageCandidates(urls, cap = 4) {
   const seen = new Set()
   const out = []
   for (const u of urls) {
@@ -578,7 +580,128 @@ async function discoverBoards(query) {
 // Fetch a custom company careers page (no known ATS) via the keyless Jina reader, then one Groq call
 // to extract postings into the same normalized shape every other source uses. Best-effort: any
 // failure (unreachable page, no GROQ_KEY, malformed AI output) returns an empty list, never throws.
-async function fetchCustomCareerPage({ url, name }) {
+// Shared validation/dedupe for BOTH extraction paths below (structured data and AI fallback) -- same
+// safety net either way, since a bad candidate can come from either source:
+//  - title/company/url all required; url must be absolute and DIFFERENT from the source page (a job
+//    without its own confirmed posting url previously fell back to the source page's url, silently
+//    pointing "Apply" at a generic job-board/category hub -- e.g. a Ross Stores careers category
+//    page, a Rigzone listings page -- rather than an actual specific posting).
+//  - company must be a real name, different from the discovered site's own name (confirmed live:
+//    Rigzone, an oil & gas INDUSTRY JOB BOARD that hosts OTHER companies' postings on its own domain,
+//    was labeled as the "company" for every posting when the old code used the site's own name
+//    unconditionally).
+//  - a url claimed by more than one DIFFERENT company is dropped entirely, not deduped to one --
+//    confirmed live: several genuinely different real employer names (NES Fircroft, SBM Offshore,
+//    Vestas, Baker Hughes) all traced back to near-identical URLs with no per-posting date/ID, the
+//    signature of one shared search/listing page rather than distinct postings. A real job posting
+//    never shares its exact apply url with a different company's posting.
+function finalizeCustomJobCandidates(raw, { url, name, scrapedAt }) {
+  const candidates = raw.filter((j) => {
+    if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
+    const company = String(j.company || '').trim()
+    return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
+  })
+  const urlCounts = new Map()
+  for (const j of candidates) urlCounts.set(j.url, (urlCounts.get(j.url) || 0) + 1)
+  return candidates
+    .filter((j) => urlCounts.get(j.url) === 1)
+    .slice(0, 10)
+    .map((j, i) => ({
+      id: 'cc_' + safeHost(url) + '_' + i,
+      title: String(j.title || ''),
+      company: String(j.company).trim(),
+      location: String(j.location || ''),
+      salaryMin: j.salaryMin || null, salaryMax: j.salaryMax || null, salaryPredicted: false,
+      url: j.url,
+      category: '', categoryTag: '', contractTime: String(j.contractTime || ''),
+      description: String(j.description || ''),
+      // created prefers a REAL posting date (schema.org's datePosted) over "just scraped now" -- an
+      // empty/missing date parses to NaN in the results sort, which treats it as the OLDEST possible
+      // posting, so a custom job with no date always lost the freshness tiebreak against hundreds of
+      // dated ATS listings and got silently truncated by the results cap, confirmed live. "Just
+      // scraped" is still a far more honest fallback than "oldest thing that exists" for the (rarer,
+      // now that structured data is tried first) case where no real date is available at all.
+      created: j.created || scrapedAt,
+      source: 'custom',
+    }))
+}
+
+// ── schema.org/JobPosting structured data (JSON-LD) -- tried FIRST, before any AI guessing ────────
+// Most ATS platforms and a growing number of individual company career pages embed this markup
+// specifically so Google indexes them for "Google for Jobs". When present it's authoritative: the
+// real hiring employer, real posting/expiry dates, and a real description come straight from the
+// page's own structured data -- no AI extraction, no hallucination risk, no cost. Needs the page's
+// RAW html (Jina's plain-text reader strips <script> tags entirely, which is exactly where this
+// markup lives), so this uses a plain fetch instead of the Jina reader.
+async function fetchRawHtml(pageUrl) {
+  try {
+    const r = await fetch(pageUrl, { headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(8000) })
+    if (!r.ok) return ''
+    return await r.text()
+  } catch { return '' }
+}
+function extractJsonLdJobPostings(html) {
+  const out = []
+  const scriptRe = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  let m
+  while ((m = scriptRe.exec(html))) {
+    let parsed
+    try { parsed = JSON.parse(m[1]) } catch { continue }
+    const nodes = Array.isArray(parsed) ? parsed : (Array.isArray(parsed && parsed['@graph']) ? parsed['@graph'] : [parsed])
+    for (const node of nodes) {
+      if (!node) continue
+      const type = node['@type']
+      if (type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'))) out.push(node)
+    }
+  }
+  return out
+}
+function jsonLdOrgName(hiringOrganization) {
+  if (!hiringOrganization) return ''
+  if (typeof hiringOrganization === 'string') return hiringOrganization
+  return String(hiringOrganization.name || '')
+}
+function jsonLdLocationText(node) {
+  const loc = Array.isArray(node.jobLocation) ? node.jobLocation[0] : node.jobLocation
+  const addr = loc && loc.address
+  if (addr) {
+    const parts = [addr.addressLocality, addr.addressRegion, addr.addressCountry].filter(Boolean)
+    if (parts.length) return parts.join(', ')
+  }
+  if (node.jobLocationType === 'TELECOMMUTE' || node.applicantLocationRequirements) return 'Remote'
+  return ''
+}
+async function fetchStructuredJobPostings({ url, name }) {
+  const html = await fetchRawHtml(url)
+  if (!html) return []
+  const nodes = extractJsonLdJobPostings(html)
+  if (!nodes.length) return []
+  const now = Date.now()
+  const raw = nodes
+    // Expired postings shouldn't surface at all -- validThrough is exactly the freshness signal the
+    // AI-extraction path can never reliably have, since it can't be trusted to find a real date.
+    .filter((n) => !n.validThrough || isNaN(Date.parse(n.validThrough)) || Date.parse(n.validThrough) >= now)
+    .map((n) => {
+      const sal = n.baseSalary && n.baseSalary.value
+      const directUrl = typeof n.url === 'string' && /^https?:\/\//i.test(n.url) ? n.url
+        : (typeof n.mainEntityOfPage === 'string' && /^https?:\/\//i.test(n.mainEntityOfPage) ? n.mainEntityOfPage : '')
+      return {
+        title: String(n.title || ''),
+        company: jsonLdOrgName(n.hiringOrganization),
+        location: jsonLdLocationText(n),
+        salaryMin: sal ? (sal.minValue || sal.value || null) : null,
+        salaryMax: sal ? (sal.maxValue || sal.value || null) : null,
+        url: directUrl,
+        contractTime: n.employmentType || '',
+        description: cleanText(typeof n.description === 'string' ? n.description : '').slice(0, 2000),
+        created: n.datePosted && !isNaN(Date.parse(n.datePosted)) ? n.datePosted : '',
+      }
+    })
+  return finalizeCustomJobCandidates(raw, { url, name, scrapedAt: new Date().toISOString() })
+}
+
+// ── AI extraction fallback -- only reached when the page has no usable structured data at all ────
+async function fetchCustomCareerPageViaAi({ url, name }) {
   if (!GROQ_KEY) return []
   let text = ''
   try {
@@ -629,56 +752,17 @@ async function fetchCustomCareerPage({ url, name }) {
     if (match) jobs = JSON.parse(match[0])
   } catch { return [] }
   if (!Array.isArray(jobs)) return []
-  // created is deliberately "now" rather than empty -- confirmed live: an empty created date parses
-  // to NaN in the results sort, which treats it as the OLDEST possible posting, so a custom-scraped
-  // job always lost the freshness tiebreak against hundreds of dated ATS listings and got silently
-  // truncated by the results cap regardless of whether it matched the search's own title/remote
-  // filters. We don't actually know the real posting date (the AI extraction has no reliable way to
-  // find it from arbitrary page text), but "just scraped" is a far more honest proxy than "oldest
-  // thing that exists," and lets these jobs compete fairly for a spot instead of never surfacing.
-  const scrapedAt = new Date().toISOString()
-  // A job without its OWN confirmed posting URL gets dropped entirely rather than falling back to
-  // the source page's URL -- confirmed live: that fallback silently pointed "Apply" at a generic
-  // job-board/category hub page (e.g. a Ross Stores careers category page, a Rigzone listings page)
-  // rather than an actual specific posting, which looks like a working result but sends the user
-  // somewhere useless. Requiring a real, DIFFERENT url is a stronger (if stricter) signal that the AI
-  // actually found a specific posting rather than just describing the page it was given.
-  // A job with no specific, named hiring employer (distinct from the board/site itself) gets dropped
-  // too -- confirmed live: Rigzone (an oil & gas INDUSTRY JOB BOARD that hosts OTHER companies'
-  // postings on its own domain) was labeled as the "company" for every single posting, since the old
-  // code always used the discovered site's own name unconditionally rather than what the AI actually
-  // found on the page. A URL-only check can't distinguish "a board publishing third-party postings"
-  // from "a genuine single-employer page" -- requiring a real employer name, different from the
-  // site's own name, catches exactly this case.
-  const candidates = jobs.filter((j) => {
-    if (!j || !j.title || !j.url || !/^https?:\/\//i.test(j.url) || j.url === url) return false
-    const company = String(j.company || '').trim()
-    return !!company && company.toLowerCase() !== String(name || '').toLowerCase()
-  })
-  // If the SAME url is claimed by more than one entry, the AI is describing several different
-  // companies off of one shared page rather than distinct individual postings -- confirmed live:
-  // Rigzone entries that named several genuinely different real employers (NES Fircroft, SBM
-  // Offshore, Vestas, Baker Hughes) all traced back to near-identical URLs with no per-posting
-  // date/ID, unlike a confirmed-good batch where every URL carried a distinct slug. A real posting
-  // never shares its apply URL with a DIFFERENT company's posting, so any url claimed more than once
-  // is treated as unreliable and every entry using it is dropped, not just the duplicates.
-  const urlCounts = new Map()
-  for (const j of candidates) urlCounts.set(j.url, (urlCounts.get(j.url) || 0) + 1)
-  return candidates
-    .filter((j) => urlCounts.get(j.url) === 1)
-    .slice(0, 10)
-    .map((j, i) => ({
-      id: 'cc_' + safeHost(url) + '_' + i,
-      title: String(j.title || ''),
-      company: String(j.company).trim(),
-      location: String(j.location || ''),
-      salaryMin: null, salaryMax: null, salaryPredicted: false,
-      url: j.url,
-      category: '', categoryTag: '', contractTime: '',
-      description: '',
-      created: scrapedAt,
-      source: 'custom',
-    }))
+  return finalizeCustomJobCandidates(jobs, { url, name, scrapedAt: new Date().toISOString() })
+}
+
+// Entry point used by the search handler: try structured data first (free, authoritative, no AI
+// involved at all), and only reach for the AI-extraction fallback when the page has none.
+async function fetchCustomCareerPage({ url, name }) {
+  try {
+    const structured = await fetchStructuredJobPostings({ url, name })
+    if (structured.length) return structured
+  } catch { /* fall through to AI extraction */ }
+  return fetchCustomCareerPageViaAi({ url, name })
 }
 
 // ── Adzuna source ────────────────────────────────────────────────────────────────────────────────
