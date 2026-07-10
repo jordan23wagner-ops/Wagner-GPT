@@ -200,8 +200,12 @@ async function fetchUnclassifiedBatch(limit) {
 // were coming back with zero classifications (a full-batch parse failure), most likely because one
 // row's messy Common-Crawl-derived text (stray quotes, control characters) threw off the model's
 // output for the WHOLE batch, not just that one row.
-function sanitizeForPrompt(s) {
-  return String(s || '').replace(/["\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+// maxLen tightened from a flat 200 to field-appropriate caps (60 for company_name, 50 for
+// sample_titles) after confirmed-live evidence the whole classify run was going to take ~5-9 days on
+// Groq's free 100K-tokens/day quota -- a real company name is essentially never near 200 chars, so
+// that cap was pure wasted tokens on every single one of ~13,500 companies needing classification.
+function sanitizeForPrompt(s, maxLen) {
+  return String(s || '').replace(/["\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLen)
 }
 
 // TEMPORARY diagnostic logging (see the classify:0 investigation) -- callGroqClassify previously
@@ -209,15 +213,17 @@ function sanitizeForPrompt(s) {
 // response (rate limit, auth, quota), and an unparseable-but-200 response apart from the console.
 // Remove once the root cause of the classified:0 streak is confirmed and fixed.
 async function callGroqClassify(rows) {
-  const listing = rows.map((r, i) => `${i}. company_name="${sanitizeForPrompt(r.company_name)}" sample_titles="${sanitizeForPrompt(r.sample_titles)}"`).join('\n')
+  const listing = rows.map((r, i) => `${i}. "${sanitizeForPrompt(r.company_name, 60)}" (${sanitizeForPrompt(r.sample_titles, 50)})`).join('\n')
+  // Trimmed from a more verbose version after confirmed-live evidence the classify phase would take
+  // ~5-9 days on Groq's free 100K-tokens/day quota -- every token here is paid ~450 times (once per
+  // batch of ~30 companies, across ~450 batches for the current backlog), so shaving the fixed
+  // instruction cost compounds.
   const prompt =
-    `Classify each numbered company below into EXACTLY ONE of these industries: ${INDUSTRIES.join(' | ')}\n` +
-    'Also clean up company_name if it looks like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes") -- ' +
-    'keep it unchanged if it already reads like a real proper company name.\n' +
-    'If you genuinely cannot tell which industry fits from the name/titles given, use "Software / IT" as the ' +
-    'default -- never omit an item, every input line needs exactly one output item in the same order.\n' +
-    'Return ONLY a JSON array, nothing else, one object per line above IN THE SAME ORDER. Each item: ' +
-    '{"industry":"...","company_name":"..."}.\n\n' + listing
+    `Industries: ${INDUSTRIES.join('|')}\n` +
+    'For each numbered company: pick exactly one industry from the list. Clean up the name if it looks ' +
+    'like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes"), else keep it as-is. If unsure, use ' +
+    '"Software / IT". Reply with ONLY a JSON array, same order, one item per line: ' +
+    '{"industry":"...","company_name":"..."}\n\n' + listing
   let r
   try {
     r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -330,7 +336,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, action, ...result })
     }
     if (action === 'classify') {
-      const limit = Math.min(100, Math.max(1, parseInt(params.limit, 10) || 30))
+      const limit = Math.min(150, Math.max(1, parseInt(params.limit, 10) || 50))
       const maxMs = Math.min(55000, Math.max(1000, parseInt(params.maxMs, 10) || 50000))
       const result = await runClassify(limit, maxMs)
       return res.status(200).json({ ok: true, action, ...result })

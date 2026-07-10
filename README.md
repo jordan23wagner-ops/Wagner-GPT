@@ -143,8 +143,13 @@ browser-extension powers a web page can't have). Three sub-tabs:
     non-commercial use only, which Wagner-GPT as a personal tool satisfies), live-validates each one
     (via the same `fetchGreenhouse`/`fetchLever`/`fetchAshby`/`fetchWorkday` functions used for real
     search — most raw candidates turn out dead or junk, which validation filters out), and classifies
-    survivors into an industry with one batched Groq call per ~30 companies. Results land in a new
-    Supabase table (`ats_board_registry`, see `supabase-ats-board-registry-schema.sql`), which
+    survivors into an industry with one batched Groq call per ~50 companies. Note: classifying the
+    full validated backlog (confirmed live, ~13,500 companies from one run of the raw dataset) costs
+    more tokens than Groq's free tier's 100K-tokens/day quota covers in one day — expect classify to
+    naturally spread across several days as the daily quota refills, which is fine given the
+    self-draining design (already-classified rows just stop showing up in future batches, no manual
+    tracking needed). Results land in a new Supabase table (`ats_board_registry`, see
+    `supabase-ats-board-registry-schema.sql`), which
     `api/jobs-crawl.js` then crawls alongside the hand-curated seed (capped at 50 registry boards per
     industry per crawl — see the comment in `jobs-crawl.js` for why, and raise it once a live crawl is
     confirmed stable at the current cap).
@@ -169,7 +174,7 @@ browser-extension powers a web page can't have). Three sub-tabs:
 
     # Phase 2: classify every validated company into an industry
     do {
-      $body = @{ action = "classify"; limit = 30 } | ConvertTo-Json
+      $body = @{ action = "classify"; limit = 50 } | ConvertTo-Json
       $resp = Invoke-RestMethod -Uri $base -Method Post -Headers $headers -Body $body
       Write-Host "classify: processed=$($resp.processed) classified=$($resp.classified) done=$($resp.done)"
     } while (-not $resp.done)
