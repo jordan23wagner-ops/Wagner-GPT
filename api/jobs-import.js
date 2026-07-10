@@ -204,6 +204,10 @@ function sanitizeForPrompt(s) {
   return String(s || '').replace(/["\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
 }
 
+// TEMPORARY diagnostic logging (see the classify:0 investigation) -- callGroqClassify previously
+// swallowed every failure into a bare `null` with no way to tell a network error, a Groq error
+// response (rate limit, auth, quota), and an unparseable-but-200 response apart from the console.
+// Remove once the root cause of the classified:0 streak is confirmed and fixed.
 async function callGroqClassify(rows) {
   const listing = rows.map((r, i) => `${i}. company_name="${sanitizeForPrompt(r.company_name)}" sample_titles="${sanitizeForPrompt(r.sample_titles)}"`).join('\n')
   const prompt =
@@ -214,9 +218,9 @@ async function callGroqClassify(rows) {
     'default -- never omit an item, every input line needs exactly one output item in the same order.\n' +
     'Return ONLY a JSON array, nothing else, one object per line above IN THE SAME ORDER. Each item: ' +
     '{"industry":"...","company_name":"..."}.\n\n' + listing
-  let data
+  let r
   try {
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -226,15 +230,34 @@ async function callGroqClassify(rows) {
       }),
       signal: AbortSignal.timeout(25000),
     })
-    data = r.ok ? await r.json() : null
-  } catch { return null }
+  } catch (e) {
+    console.log('[classify] groq fetch threw', rows.length, 'rows', (e && e.message) || e)
+    return null
+  }
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    console.log('[classify] groq non-ok', r.status, rows.length, 'rows', errText.slice(0, 500))
+    return null
+  }
+  const data = await r.json().catch(() => null)
   const content = data?.choices?.[0]?.message?.content || ''
+  const finishReason = data?.choices?.[0]?.finish_reason
   try {
     const match = content.match(/\[[\s\S]*\]/)
-    if (!match) return null
+    if (!match) {
+      console.log('[classify] no json array in response', rows.length, 'rows finish_reason=' + finishReason, 'content:', content.slice(0, 300))
+      return null
+    }
     const parsed = JSON.parse(match[0])
-    return Array.isArray(parsed) ? parsed : null
-  } catch { return null }
+    if (!Array.isArray(parsed)) {
+      console.log('[classify] parsed but not an array', rows.length, 'rows', typeof parsed)
+      return null
+    }
+    return parsed
+  } catch (e) {
+    console.log('[classify] JSON.parse threw', rows.length, 'rows finish_reason=' + finishReason, 'error:', (e && e.message) || e, 'content:', content.slice(0, 300))
+    return null
+  }
 }
 
 // One batched Groq call classifies + cleans up names for many rows at once (cheap: this is a coarse
