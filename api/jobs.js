@@ -633,12 +633,20 @@ function finalizeCustomJobCandidates(raw, { url, name, scrapedAt }) {
 // page's own structured data -- no AI extraction, no hallucination risk, no cost. Needs the page's
 // RAW html (Jina's plain-text reader strips <script> tags entirely, which is exactly where this
 // markup lives), so this uses a plain fetch instead of the Jina reader.
+// TEMPORARY diagnostic logging (remove once the "structured data never fires" question is settled):
+// confirmed live that custom-page results still show every sign of the AI fallback (empty
+// description, identical "now" timestamps) even after this path was added -- meaning either the raw
+// fetch is being blocked (bot detection), or the site only injects JobPosting JSON-LD via client-side
+// JS that a plain server-side fetch can never see (common on modern SPA career sites). These logs
+// (visible in Vercel's own Logs tab) distinguish the two without guessing.
 async function fetchRawHtml(pageUrl) {
   try {
     const r = await fetch(pageUrl, { headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(8000) })
-    if (!r.ok) return ''
-    return await r.text()
-  } catch { return '' }
+    if (!r.ok) { console.log('[structured-data] raw fetch failed', pageUrl, 'status', r.status); return '' }
+    const html = await r.text()
+    console.log('[structured-data] raw fetch ok', pageUrl, 'bytes', html.length, 'has ld+json script tag:', /application\/ld\+json/i.test(html))
+    return html
+  } catch (e) { console.log('[structured-data] raw fetch threw', pageUrl, (e && e.message) || e); return '' }
 }
 function extractJsonLdJobPostings(html) {
   const out = []
@@ -675,6 +683,7 @@ async function fetchStructuredJobPostings({ url, name }) {
   const html = await fetchRawHtml(url)
   if (!html) return []
   const nodes = extractJsonLdJobPostings(html)
+  console.log('[structured-data] JobPosting nodes found', url, nodes.length)
   if (!nodes.length) return []
   const now = Date.now()
   const raw = nodes
