@@ -5,7 +5,7 @@
 // time, so env vars must be set BEFORE the import, not after).
 process.env.GROQ_KEY = 'test-groq-key'
 
-const { default: handler } = await import('./jobs-import.js')
+const { default: handler } = await import('../api/jobs-import.js')
 
 const upsertedBatches = [] // capture every POST body sent to ats_board_registry, across all calls
 

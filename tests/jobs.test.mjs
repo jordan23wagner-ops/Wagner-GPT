@@ -19,8 +19,8 @@ process.env.USAJOBS_EMAIL = 'test@example.com'
 delete process.env.TAVILY_KEY
 delete process.env.TAVILY
 
-const { default: handler } = await import('./jobs.js')
-const { default: crawlHandler } = await import('./jobs-crawl.js')
+const { default: handler } = await import('../api/jobs.js')
+const { default: crawlHandler } = await import('../api/jobs-crawl.js')
 
 globalThis.fetch = async (url, opts) => {
   const u = String(url)
