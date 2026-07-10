@@ -996,7 +996,14 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
       method: 'POST',
       headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
+        // Item #4 of the "3 to 8" roadmap: bumped from llama-3.1-8b-instant. This extraction task
+        // (find the real hiring employer, reject job-board/FAQ/category pages, never invent a URL)
+        // needs more careful instruction-following than an 8B model reliably gives -- confirmed live
+        // this session, the 8B model repeatedly returned FAQ headings and category nav links as if
+        // they were postings (see finalizeCustomJobCandidates' anchor-fragment fix) despite the
+        // prompt explicitly forbidding it. llama-3.3-70b-versatile is already used for a similar
+        // extraction/ranking task in api/deep-research.js, so this isn't an unverified model choice.
+        model: 'llama-3.3-70b-versatile',
         messages: [{
           role: 'user',
           content:
