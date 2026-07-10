@@ -239,7 +239,7 @@ async function fetchJson(url, { ms = 8000, headers } = {}) {
   } catch { return null }
 }
 
-function slugName(slug) {
+export function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
@@ -696,7 +696,7 @@ async function fetchWorkday({ tenant, dataCenter, site, name }) {
   })).filter((j) => j.url)
 }
 
-const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, workday: fetchWorkday }
+export const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, workday: fetchWorkday }
 
 export async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {

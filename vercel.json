@@ -5,6 +5,7 @@
     "api/deep-research.js": { "maxDuration": 60 },
     "api/jobs.js": { "maxDuration": 60 },
     "api/jobs-crawl.js": { "maxDuration": 60 },
+    "api/jobs-import.js": { "maxDuration": 60 },
     "api/transcribe.js": { "maxDuration": 30 }
   },
   "crons": [

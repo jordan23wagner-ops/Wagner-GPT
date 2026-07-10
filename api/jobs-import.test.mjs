@@ -1,0 +1,172 @@
+// Mocked-logic test for api/jobs-import.js — stubs global fetch, drives the handler, asserts the
+// import (validate) and classify batches, resumability, junk-filtering, and CRON_SECRET gate. No live
+// network. Mirrors jobs.test.mjs's conventions (see that file's header comment for why the dynamic
+// import is required — GROQ_KEY is a module-level const in jobs-import.js, evaluated once at import
+// time, so env vars must be set BEFORE the import, not after).
+process.env.GROQ_KEY = 'test-groq-key'
+
+const { default: handler } = await import('./jobs-import.js')
+
+const upsertedBatches = [] // capture every POST body sent to ats_board_registry, across all calls
+
+globalThis.fetch = async (url, opts) => {
+  const u = String(url)
+  const method = (opts && opts.method) || 'GET'
+  const body = (opts && opts.body) || ''
+  const json = (obj) => ({ ok: true, json: async () => obj, text: async () => JSON.stringify(obj) })
+
+  // The four raw dataset files. A small, deliberately mixed fixture:
+  //  - greenhouse: one real-looking slug (validates, returns jobs), one purely-numeric junk slug
+  //    (must be filtered BEFORE any live request is made -- no mock exists for it, so if the junk
+  //    filter regresses, the test would either hang on an unmocked branch or hit the catch-all).
+  //  - lever: one real-looking slug that validates, one that returns empty (a live but "dead" board).
+  //  - ashby: one slug whose board API returns a real org `name` -- proves that enrichment flows
+  //    through to company_name instead of falling back to a slug-derived title-case.
+  //  - workday: one well-formed "tenant|dc|site" entry, one malformed entry (only two parts) that
+  //    must be skipped during parsing, and one with a numeric tenant (junk, filtered pre-validation).
+  if (u.includes('raw.githubusercontent.com') && u.includes('greenhouse_companies.json')) {
+    return json(['realcompany-inc', '48291058'])
+  }
+  if (u.includes('raw.githubusercontent.com') && u.includes('lever_companies.json')) {
+    return json(['activecompany', 'deadcompany'])
+  }
+  if (u.includes('raw.githubusercontent.com') && u.includes('ashby_companies.json')) {
+    return json(['ashbyco'])
+  }
+  if (u.includes('raw.githubusercontent.com') && u.includes('workday_companies.json')) {
+    return json(['acme|wd1|acme_careers', 'malformed|wd2', '99887766|wd3|numeric_tenant'])
+  }
+
+  if (u.includes('boards-api.greenhouse.io') && u.includes('realcompany-inc')) {
+    return json({ jobs: [
+      { id: 1, title: 'Software Engineer', absolute_url: 'https://boards.greenhouse.io/realcompany-inc/jobs/1', location: { name: 'Remote' }, content: 'Build things', updated_at: '2026-07-01' },
+      { id: 2, title: 'Staff Engineer', absolute_url: 'https://boards.greenhouse.io/realcompany-inc/jobs/2', location: { name: 'NYC' }, content: 'Build more things', updated_at: '2026-07-01' },
+    ] })
+  }
+  if (u.includes('api.lever.co') && u.includes('activecompany')) {
+    return json([
+      { id: 'a', text: 'Product Manager', hostedUrl: 'https://jobs.lever.co/activecompany/a', categories: { location: 'Remote' }, descriptionPlain: 'Ship products', createdAt: 1719800000000 },
+    ])
+  }
+  if (u.includes('api.lever.co') && u.includes('deadcompany')) {
+    return json([]) // live board, zero postings -- must end up 'dead', not 'validated'
+  }
+  if (u.includes('api.ashbyhq.com') && u.includes('ashbyco')) {
+    return json({ name: 'Ashby Co Real Name', jobs: [
+      { id: 'z', title: 'Recruiter', jobUrl: 'https://jobs.ashbyhq.com/ashbyco/z', location: 'Remote', employmentType: 'FullTime', descriptionPlain: 'Hire people', publishedAt: '2026-06-01' },
+    ] })
+  }
+  if (u.includes('acme.wd1.myworkdayjobs.com')) {
+    return json({ jobPostings: [
+      { title: 'Ops Manager', locationsText: 'Austin, TX', externalPath: '/job/Ops_R1', postedOn: '2026-06-15', timeType: 'Full time' },
+    ] })
+  }
+
+  // ats_board_registry: POST (upsert, both import and classify use this) and GET (classify's
+  // unclassified-batch query).
+  if (u.includes('ats_board_registry') && method === 'POST') {
+    upsertedBatches.push(JSON.parse(body))
+    return { ok: true, json: async () => ([]) }
+  }
+  if (u.includes('ats_board_registry') && u.includes('status=eq.validated')) {
+    return json([
+      { id: 'greenhouse:realcompany-inc', ats: 'greenhouse', company_name: 'Realcompany Inc', sample_titles: 'Software Engineer, Staff Engineer' },
+      { id: 'lever:activecompany', ats: 'lever', company_name: 'Activecompany', sample_titles: 'Product Manager' },
+    ])
+  }
+
+  if (u.includes('api.groq.com')) {
+    return json({ choices: [{ message: { content:
+      '[{"industry":"Software / IT","company_name":"Real Company Inc."},' +
+      '{"industry":"Product Management","company_name":"Active Company"}]'
+    } }] })
+  }
+
+  return { ok: false, json: async () => ({}), text: async () => '' }
+}
+
+function mockRes() {
+  return {
+    statusCode: 0, body: null,
+    status(c) { this.statusCode = c; return this },
+    json(o) { this.body = o; return this },
+    end() { return this },
+  }
+}
+
+async function run() {
+  const fails = []
+  const assert = (cond, msg) => { if (!cond) fails.push(msg) }
+
+  // ── action:'import' ──
+  const res1 = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'import', offset: 0, limit: 100 } }, res1)
+  assert(res1.statusCode === 200, 'import status 200, got ' + res1.statusCode)
+  const out1 = res1.body
+  // Junk filtering: total usable candidates = 2 greenhouse - 1 junk + 2 lever + 1 ashby + 3 workday - 2 junk(malformed+numeric) = 5
+  assert(out1.total === 5, 'junk (numeric greenhouse slug, malformed workday entry, numeric workday tenant) filtered before slicing -- got total=' + out1.total)
+  assert(out1.processed === 5, 'all 5 usable candidates processed in one batch (well under the limit), got ' + out1.processed)
+  assert(out1.validated === 4, 'realcompany-inc (greenhouse), activecompany (lever), ashbyco (ashby), acme (workday) all validate with real jobs, got validated=' + out1.validated)
+  assert(out1.dead === 1, 'deadcompany (lever, live board but zero postings) must be "dead" not "validated", got dead=' + out1.dead)
+  assert(out1.done === true, 'nextOffset >= total means done, got nextOffset=' + out1.nextOffset + ' total=' + out1.total)
+  // Workday's malformed/numeric entries must never even reach a live fetch -- no mock exists for
+  // them, so if they weren't filtered, upsertedBatches would be missing rows or the call would 404
+  // silently; the strongest direct check is that the workday row that DID validate is present with
+  // correctly-parsed tenant/dataCenter/site.
+  const importBatch = upsertedBatches[0]
+  const wdRow = importBatch.find((r) => r.id === 'workday:acme:wd1:acme_careers')
+  assert(!!wdRow, 'well-formed workday entry (acme|wd1|acme_careers) parsed and validated')
+  assert(wdRow && wdRow.tenant === 'acme' && wdRow.data_center === 'wd1' && wdRow.site === 'acme_careers', 'workday tenant/data_center/site parsed correctly from the pipe-delimited entry')
+  assert(!importBatch.some((r) => r.id && r.id.includes('malformed')), 'malformed workday entry (only 2 of 3 pipe segments) never reaches validation/upsert at all')
+  assert(!importBatch.some((r) => r.slug === '48291058'), 'purely-numeric greenhouse slug (junk) never reaches validation/upsert at all')
+  assert(!importBatch.some((r) => r.tenant === '99887766'), 'purely-numeric workday tenant (junk) never reaches validation/upsert at all')
+  // Company-name enrichment: Ashby's own board name flows through; Greenhouse/Lever fall back to a
+  // slug-derived title-case (those ATS endpoints don't return an org display name at all).
+  const ashbyRow = importBatch.find((r) => r.id === 'ashby:ashbyco')
+  assert(ashbyRow && ashbyRow.company_name === 'Ashby Co Real Name', 'Ashby board\'s own real org name used as company_name, not a slug-derived guess -- got ' + (ashbyRow && ashbyRow.company_name))
+  const ghRow = importBatch.find((r) => r.id === 'greenhouse:realcompany-inc')
+  assert(ghRow && ghRow.company_name === 'Realcompany Inc', 'Greenhouse (no org-name field available) falls back to slug-derived title-case -- got ' + (ghRow && ghRow.company_name))
+  const deadRow = importBatch.find((r) => r.id === 'lever:deadcompany')
+  assert(deadRow && deadRow.status === 'dead' && deadRow.job_count === 0, 'a live board with zero postings is correctly marked dead with job_count 0')
+  assert(ghRow && ghRow.sample_titles === 'Software Engineer, Staff Engineer', 'sample_titles captured from the first few validated jobs, for the later classify step to use -- got "' + (ghRow && ghRow.sample_titles) + '"')
+
+  // Resumability: an offset past the end of the usable list returns done:true with nothing processed.
+  const res2 = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'import', offset: 5, limit: 100 } }, res2)
+  assert(res2.body.processed === 0 && res2.body.done === true, 'offset at/past total returns processed:0, done:true (nothing left to do)')
+
+  // Internal looping: a small sub-batch limit (2) forces the 5-item usable list to take 3 internal
+  // loop rounds within ONE call -- proves runImport actually loops across sub-batches bounded by the
+  // overall deadline, not just processing one sub-batch and returning (which the earlier limit:100
+  // assertions couldn't distinguish, since everything fit in a single sub-batch there).
+  upsertedBatches.length = 0
+  const res2b = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'import', offset: 0, limit: 2, maxMs: 50000 } }, res2b)
+  assert(res2b.body.processed === 5 && res2b.body.done === true, 'a single call with a small sub-batch limit still drains the whole usable list via internal looping, got processed=' + res2b.body.processed + ' done=' + res2b.body.done)
+  assert(upsertedBatches.length === 3, 'limit:2 over 5 usable candidates takes exactly 3 internal sub-batch rounds (2+2+1), each upserting separately, got ' + upsertedBatches.length)
+
+  // ── action:'classify' ──
+  const res3 = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'classify', limit: 30 } }, res3)
+  assert(res3.statusCode === 200, 'classify status 200, got ' + res3.statusCode)
+  assert(res3.body.classified === 2, 'both unclassified rows get an industry assigned from the batched Groq call, got ' + res3.body.classified)
+  const classifyBatch = upsertedBatches.find((b) => b.some((r) => r.status === 'classified'))
+  assert(!!classifyBatch, 'classify step upserts rows with status:"classified"')
+  const ghClassified = classifyBatch && classifyBatch.find((r) => r.id === 'greenhouse:realcompany-inc')
+  assert(ghClassified && ghClassified.industry === 'Software / IT', 'realcompany-inc classified into Software / IT per the mocked Groq response, got ' + (ghClassified && ghClassified.industry))
+  assert(ghClassified && ghClassified.company_name === 'Real Company Inc.', 'classify also cleans up the display name (slug-derived "Realcompany Inc" -> "Real Company Inc.")')
+
+  // ── CRON_SECRET auth gate (same pattern as jobs-crawl.js) ──
+  process.env.CRON_SECRET = 'test-cron-secret'
+  const resUnauth = mockRes()
+  await handler({ method: 'GET', headers: {}, query: { action: 'import' } }, resUnauth)
+  assert(resUnauth.statusCode === 401, 'unauthenticated request rejected once CRON_SECRET is set, got ' + resUnauth.statusCode)
+  const resAuth = mockRes()
+  await handler({ method: 'GET', headers: { authorization: 'Bearer test-cron-secret' }, query: { action: 'import', offset: '0', limit: '100' } }, resAuth)
+  assert(resAuth.statusCode === 200, 'request with the correct bearer token accepted, got ' + resAuth.statusCode)
+  delete process.env.CRON_SECRET
+
+  if (fails.length) { console.error('\nFAILURES:\n - ' + fails.join('\n - ')); process.exit(1) }
+  console.log('ALL ASSERTIONS PASSED')
+}
+run().catch((e) => { console.error(e); process.exit(1) })

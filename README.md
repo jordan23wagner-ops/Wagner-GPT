@@ -134,6 +134,49 @@ browser-extension powers a web page can't have). Three sub-tabs:
     `vercel.json`), re-crawls every `INDUSTRY_BOARDS` industry once a day and upserts the results.
     Run `supabase-job-crawl-schema.sql` to enable it — without it, the Jobs tab works exactly as
     before (falls back to live-fetching), just without the speed-up. See the env var table below.
+  - **Bulk board import** (optional): grows `INDUSTRY_BOARDS`' ~83 hand-curated companies into
+    thousands, without hand-editing code for every new company. `api/jobs-import.js` pulls a public
+    dataset of Greenhouse/Lever/Ashby/Workday company slugs from
+    [Feashliaa/job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) (~28,700 raw
+    candidates, Common-Crawl-derived — licensed
+    [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/), attribution given here;
+    non-commercial use only, which Wagner-GPT as a personal tool satisfies), live-validates each one
+    (via the same `fetchGreenhouse`/`fetchLever`/`fetchAshby`/`fetchWorkday` functions used for real
+    search — most raw candidates turn out dead or junk, which validation filters out), and classifies
+    survivors into an industry with one batched Groq call per ~30 companies. Results land in a new
+    Supabase table (`ats_board_registry`, see `supabase-ats-board-registry-schema.sql`), which
+    `api/jobs-crawl.js` then crawls alongside the hand-curated seed (capped at 50 registry boards per
+    industry per crawl — see the comment in `jobs-crawl.js` for why, and raise it once a live crawl is
+    confirmed stable at the current cap).
+
+    This is a one-time-ish migration, not an ongoing job — it's not on a cron. Each call processes as
+    many candidates as fit in ~50 seconds (bounded by Vercel's 60s ceiling), so the whole ~28,700-item
+    pipeline takes on the order of tens of calls, not hundreds. To run it (PowerShell — adjust `$secret`
+    to your `CRON_SECRET`, or drop the `Authorization` header if you haven't set one):
+
+    ```powershell
+    $base = "https://wagner-gpt.vercel.app/api/jobs-import"
+    $headers = @{ Authorization = "Bearer $secret"; "Content-Type" = "application/json" }
+
+    # Phase 1: validate every candidate live
+    $offset = 0
+    do {
+      $body = @{ action = "import"; offset = $offset; limit = 100 } | ConvertTo-Json
+      $resp = Invoke-RestMethod -Uri $base -Method Post -Headers $headers -Body $body
+      Write-Host "import: processed=$($resp.processed) validated=$($resp.validated) dead=$($resp.dead) nextOffset=$($resp.nextOffset)/$($resp.total) done=$($resp.done)"
+      $offset = $resp.nextOffset
+    } while (-not $resp.done)
+
+    # Phase 2: classify every validated company into an industry
+    do {
+      $body = @{ action = "classify"; limit = 30 } | ConvertTo-Json
+      $resp = Invoke-RestMethod -Uri $base -Method Post -Headers $headers -Body $body
+      Write-Host "classify: processed=$($resp.processed) classified=$($resp.classified) done=$($resp.done)"
+    } while (-not $resp.done)
+    ```
+
+    Without `supabase-ats-board-registry-schema.sql` run first, this simply has nowhere to write —
+    everything else in the Jobs tab keeps working exactly as before.
   Results are merged, deduped (direct link wins over the same job's Adzuna link), filtered by
   title/location/remote, and **ranked by résumé fit** with **Fortune 500 first** and **direct-apply
   before via-Adzuna**. Cards show **✓ direct apply** / **via Adzuna**, **★ Fortune 500**, and
@@ -242,8 +285,8 @@ wife-gpt/
 | `CAREERJET_AFFID` | Optional | Jobs tab: Careerjet aggregator. Free affiliate id at careerjet.com/partners. |
 | `REED_API_KEY` | Optional | Jobs tab: Reed aggregator — **UK jobs only**, only called when the Jobs tab's country is set to United Kingdom. Free at reed.co.uk/developers. |
 | `USAJOBS_API_KEY` + `USAJOBS_EMAIL` | Optional | Jobs tab: USAJobs (US federal jobs, direct source) — **US jobs only**, only called when country is United States. Both must be set (USAJobs requires the exact registered email as the request's User-Agent). Free at developer.usajobs.gov. |
-| `CRON_SECRET` | Recommended | Protects `api/jobs-crawl.js` (the Jobs tab's scheduled ATS-board crawl). Vercel sends this automatically as a bearer token when set. Without it, the crawl endpoint is triggerable by anyone who finds the URL — low-cost abuse (it can't leak data or spend paid-API budget), but still worth setting to any random string. |
-| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Optional | Overrides the Jobs tab crawl cache's Supabase project/key. Defaults to the same project already used by `src/lib/supabase.js` — only set these if you want the crawl cache on a different project. |
+| `CRON_SECRET` | Recommended | Protects `api/jobs-crawl.js` (the Jobs tab's scheduled ATS-board crawl) and `api/jobs-import.js` (the bulk board import — this one runs many outbound requests per call, so setting this is worth doing before triggering it). Vercel sends this automatically as a bearer token to `jobs-crawl.js` when set; you supply it yourself as a header when manually triggering `jobs-import.js`. Without it, either endpoint is triggerable by anyone who finds the URL — low-cost abuse (neither can leak data or spend paid-API budget beyond Groq classification calls), but still worth setting to any random string. |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Optional | Overrides the Jobs tab crawl cache's and bulk-import registry's Supabase project/key. Defaults to the same project already used by `src/lib/supabase.js` — only set these if you want them on a different project. |
 | `GITHUB_TOKEN` | Coding Mode | Fine-grained PAT with Contents: read/write. Lets Coding Mode read and commit to your repos. Server-side only. |
 | `CODING_MODE_PASSWORD` | Coding Mode | A secret you choose to unlock Coding Mode. Without it (or `GITHUB_TOKEN`), Coding Mode is disabled. |
 
