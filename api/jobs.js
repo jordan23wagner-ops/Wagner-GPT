@@ -760,11 +760,12 @@ function boardsFromUrls(urls) {
 // page (career/job in the path, not an aggregator) -- this is the genuinely-custom-site case
 // (a "Sony.com/careers" with no public JSON API at all), handled by structured schema.org data first
 // and Jina+AI extraction as a fallback. One candidate per hostname, so one company's page isn't
-// sampled multiple times. cap raised from 3 then 4: checking one more candidate is cheap on average
-// now that most real career pages resolve via free structured-data parsing, not a paid AI call each
-// time, and now that finalizeCustomJobCandidates rejects same-page-anchor-fragment "postings" for
-// free too (no wasted Groq call turns into a wasted result the way it used to).
-function customCareerPageCandidates(urls, cap = 5) {
+// sampled multiple times. cap raised from 3 then 4 then 5: checking one more candidate is cheap on
+// average now that most real career pages resolve via free structured-data parsing, not a paid Groq
+// call each time, and now that finalizeCustomJobCandidates + fetchCustomCareerPageViaAi's own
+// URL-verification filter reject fabricated "postings" for free too (no wasted Groq call turns into
+// a wasted result the way it used to).
+function customCareerPageCandidates(urls, cap = 6) {
   const seen = new Set()
   const out = []
   for (const u of urls) {
@@ -985,7 +986,15 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
   if (!GROQ_KEY) return []
   let text = ''
   try {
-    const r = await fetch(`https://r.jina.ai/${url}`, { headers: { Accept: 'text/plain', 'X-Return-Format': 'text' }, signal: AbortSignal.timeout(8000) })
+    // 'markdown' (Jina's default reader format), not 'text' -- confirmed live: 'text' mode strips
+    // every link's href entirely, leaving the model with ONLY visible link text (e.g. "NES Fircroft —
+    // apply here") and no real URL to cite. Asked to always return a url per posting anyway, an
+    // upgraded 70B model didn't return fewer fabrications than the old 8B one, it returned MORE
+    // convincing ones -- plausible job titles, real company names, and invented-but-plausible-looking
+    // sequential URLs (rigzone.com/jobs/.../jid-1234567 through jid-1234574) for a page whose own
+    // structured data confirmed zero real JobPosting nodes existed. Markdown preserves `[text](href)`
+    // links, so a real url is actually available to quote instead of invent.
+    const r = await fetch(`https://r.jina.ai/${url}`, { headers: { Accept: 'text/plain', 'X-Return-Format': 'markdown' }, signal: AbortSignal.timeout(8000) })
     if (!r.ok) return []
     text = (await r.text()).slice(0, 6000)
   } catch { return [] }
@@ -1044,7 +1053,20 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
     if (match) jobs = JSON.parse(match[0])
   } catch { return [] }
   if (!Array.isArray(jobs)) return []
-  return finalizeCustomJobCandidates(jobs, { url, name, scrapedAt: new Date().toISOString() })
+  // Deterministic anti-hallucination backstop: a real url must appear VERBATIM somewhere in the
+  // fetched page text, or it was invented -- no amount of prompt instruction ("never invent a url")
+  // reliably stops a model from doing it anyway, confirmed live even on a 70B model, so this doesn't
+  // rely on the model's honesty at all. Matches on the URL's path+query (not scheme/host), so this
+  // still catches a relative link the model correctly resolved to an absolute URL.
+  const verified = jobs.filter((j) => {
+    if (!j || typeof j.url !== 'string') return false
+    try {
+      const u = new URL(j.url, url)
+      const needle = u.pathname + u.search
+      return needle.length > 1 && text.includes(needle)
+    } catch { return false }
+  })
+  return finalizeCustomJobCandidates(verified, { url, name, scrapedAt: new Date().toISOString() })
 }
 
 // Entry point used by the search handler: try structured data first (free, authoritative, no AI

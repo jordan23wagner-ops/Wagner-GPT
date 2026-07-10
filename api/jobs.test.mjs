@@ -137,6 +137,14 @@ globalThis.fetch = async (url, opts) => {
       // page plus an anchor fragment (e.g. #store-manager) -- a different STRING from the source
       // page url but not a different page. Must be rejected entirely, not just deduped to one.
       { url: 'https://careeradviceexample.com/careers/manager' },
+      // The confirmed-live Rigzone shape (found AFTER upgrading to a 70B model): a listing page
+      // whose own structured data has zero real JobPosting nodes, and whose page text just names
+      // companies with no per-posting link at all -- yet the AI fallback invented a plausible,
+      // distinct, sequential-looking fake url per company (rigzone.com/jobs/.../jid-1234567 through
+      // jid-1234574) instead of correctly returning []. Real company names + no shared-URL-collision
+      // meant NEITHER the company-name check nor the duplicate-URL check caught this -- only a
+      // deterministic "does this url actually appear in the source text" check can.
+      { url: 'https://fakeurlexample.com/a-manager-jobs/' },
     ] } })
   }
   if (u.includes('wday/cxs/acme/Acme_Careers/jobs')) {
@@ -196,7 +204,10 @@ globalThis.fetch = async (url, opts) => {
   // real-world Rigzone shape) -- must be rejected since "company" equals the board's own name.
   if (u.includes('r.jina.ai/https://jobboardexample.com/careers/listing-123')) {
     if (returnFormat === 'html') return { ok: true, text: async () => '<html><body>Job Board Example — no structured data here</body></html>' }
-    return { ok: true, text: async () => 'Job Board Example — Listing #123\n\nSenior Analyst posted on Job Board Example' }
+    // The real posting url IS present in the source markdown (unlike the fabricated-url case below),
+    // so this test keeps independently exercising the company-name-matches-board-name rejection --
+    // it isn't just passing because the URL-verification filter short-circuited it first.
+    return { ok: true, text: async () => 'Job Board Example — [Senior Analyst](https://jobboardexample.com/careers/listing-123-detail) posted on Job Board Example' }
   }
   if (u.includes('r.jina.ai/https://industryboardexample.com/jobs-listing')) {
     // Confirmed live (careers.acbsp.org / jobdescription.org): "has ld+json script tag: true" yet
@@ -208,7 +219,10 @@ globalThis.fetch = async (url, opts) => {
       '<script type="application/ld+json">{ this is not valid json </script>' +
       '<script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@type': 'Organization', name: 'Industry Board Example' }) + '</script>' +
       '</head><body>Industry Board Example — no JobPosting markup here</body></html>' }
-    return { ok: true, text: async () => 'Industry Board Example — Process Operations Manager roles\n\nNES Corp — apply here\nSBM Corp — apply here' }
+    // Both companies' links resolve to the SAME real url (present in the source markdown, so the
+    // URL-verification filter doesn't reject them) -- this test keeps independently exercising the
+    // duplicate-URL-across-different-companies rejection, not just the newer URL-verification filter.
+    return { ok: true, text: async () => 'Industry Board Example — [Process Operations Manager roles](https://industryboardexample.com/a-process-operations-manager-jobs/)\n\nNES Corp — apply here\nSBM Corp — apply here' }
   }
   // A real company's own careers page with schema.org/JobPosting JSON-LD embedded -- returned via
   // Jina's html-render format (matching fetchRawHtml's real call, which routes through Jina rather
@@ -259,6 +273,20 @@ globalThis.fetch = async (url, opts) => {
       '{"title":"How To Become A Producer?","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#how-to-become-a-producer"},' +
       '{"title":"Get Producer Jobs Emailed To You","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#get-jobs-emailed"},' +
       '{"title":"Search For Producer Jobs","company":"Career Advice Example","location":"","url":"https://careeradviceexample.com/careers/manager#search-jobs"}]'
+    } }] })
+  }
+  // Rigzone shape: the page names real companies with NO per-posting link at all (plain text, not
+  // even a markdown link) -- there is no real url anywhere for the model to honestly cite.
+  if (u.includes('r.jina.ai/https://fakeurlexample.com/a-manager-jobs/')) {
+    if (returnFormat === 'html') return { ok: true, text: async () => '<html><head><script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@type': 'WebPage' }) + '</script></head><body>Fake URL Example — Manager roles</body></html>' }
+    return { ok: true, text: async () => 'Fake URL Example — Manager roles\n\nAcme Corp — apply here\nGlobex Corp — apply here' }
+  }
+  if (u.includes('api.groq.com') && body.includes('fakeurlexample.com')) {
+    // The model invents a plausible, distinct, sequential-looking url per real company instead of
+    // correctly returning [] -- exactly the confirmed-live Rigzone hallucination, reproduced here.
+    return json({ choices: [{ message: { content:
+      '[{"title":"Warehouse Manager","company":"Acme Corp","location":"Remote","url":"https://fakeurlexample.com/jobs/warehouse-manager-jobs-116/jid-1234567"},' +
+      '{"title":"Plant Manager","company":"Globex Corp","location":"Remote","url":"https://fakeurlexample.com/jobs/plant-manager-jobs-116/jid-1234568"}]'
     } }] })
   }
   if (u.includes('api.groq.com')) {
@@ -371,6 +399,7 @@ async function run() {
   assert(!out3.results.some((r) => /careercircle\.com/i.test(r.url)), 'careercircle.com is excluded as a custom-page candidate entirely -- confirmed live its /browse-jobs/category page surfaced as a fake "custom careers page" producing empty-description, fabricated-timestamp entries before this fix')
   assert(!out3.results.some((r) => /builtincolorado\.com/i.test(r.url)), 'builtincolorado.com (Built In\'s regional tech job board) is excluded as a custom-page candidate entirely -- confirmed live it surfaced as a fake "custom careers page" and fabricated 10 empty-description entries for different real companies before this fix')
   assert(!out3.results.some((r) => /careeradviceexample\.com/i.test(r.url)), 'career-advice-page "postings" that are really FAQ/section headings on the same page (url differing only by a #anchor fragment) are rejected entirely -- confirmed live via ACBSP\'s "What Does A Manufacturing Manager Do?" and Ross\'s "STORE MANAGER" category links, both fabricated as fake jobs before this fix')
+  assert(!out3.results.some((r) => /fakeurlexample\.com/i.test(r.url) || r.company === 'Acme Corp' || r.company === 'Globex Corp'), 'a plausible-looking but entirely FABRICATED url (not present anywhere in the fetched source text) is rejected even when the company name is real/distinct and no other candidate shares that exact url -- confirmed live via Rigzone AFTER upgrading to a 70B model: it invented sequential-looking fake urls (jid-1234567 through jid-1234574) for real companies instead of correctly returning [], which neither the company-name check nor the duplicate-URL check alone could catch')
   assert(bySource('workday').some((r) => r.title === 'Senior Producer' && r.company === 'Acme'), 'Workday CXS job normalized correctly, tenant/site extracted from a locale-prefixed discovered URL')
   assert(bySource('workday').some((r) => r.url.includes('/Acme_Careers/job/Producer_R123')), 'Workday job URL built from base + site + externalPath')
   assert(bySource('smartrecruiters').some((r) => r.company === 'Acme SR'), 'SmartRecruiters board found via broadened (non-ATS-scoped) discovery query')
