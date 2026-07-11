@@ -143,15 +143,12 @@ export default function Jobs() {
 
   useEffect(() => {
     let alive = true
-    // Prefill the search form from the saved Target Profile so the fields already show what you hunt
-    // for. Runs immediately from localStorage, then again if syncDown pulls a newer cloud copy.
-    prefillFromTarget(loadTarget())
     syncDown().then((d) => {
       if (!alive || !d) return
       if (Array.isArray(d.resumes)) setResumes(d.resumes)
       if (Array.isArray(d.tracked)) setTracked(d.tracked)
       if (Array.isArray(d.memory)) setMemory(d.memory)
-      if (d.target && (d.target.titles || d.target.industry)) { setTargetState(d.target); prefillFromTarget(d.target) }
+      // Target Profile prefill lives in SearchView (its own scope), not here.
     })
     waitForExtension().then((p) => { if (alive) { setHasExt(p); setExtVer(extensionVersion()) } })
     // Live fill-status from the extension while it auto-fills application tabs → tracker rows.
@@ -266,6 +263,10 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       body: JSON.stringify({ action: 'categories', country }),
     }).then((r) => r.json()).then((d) => setCategories((d && d.categories) || [])).catch(() => setCategories([]))
   }, [country])
+
+  // Prefill the search form from the saved Target Profile on mount, so the fields already show what
+  // you hunt for. prefillFromTarget is a hoisted function declaration below, so it's callable here.
+  useEffect(() => { prefillFromTarget(loadTarget()) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const resolveCategory = (indName = industry) => {
     const ind = INDUSTRIES.find((i) => i.name === indName)
