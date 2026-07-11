@@ -14,7 +14,7 @@ import {
   newConversation, titleFromMessages,
 } from './lib/conversations'
 import { cacheKey, getCached, setCached, looksLikeImageRequest } from './lib/cache'
-import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT } from './lib/usage'
+import { loadUsage, bumpUsage, IMAGE_DAILY_SOFT_LIMIT, CHAT_DAILY_SOFT_LIMIT, loadQuota, saveQuota } from './lib/usage'
 import { exportWord, exportPdf, exportReplyWord, exportReplyPdf } from './lib/exportChat'
 import { Download, Globe, Mic, MicOff, FileUp, Volume2, Square, Loader2, Copy, Check, RefreshCw, Pencil, Search, BookOpen } from 'lucide-react'
 import renderMarkdown from './lib/renderMarkdown'
@@ -43,6 +43,10 @@ const TOP_INSET = 'calc(env(safe-area-inset-top, 0px) + 0.75rem)'
 const BOTTOM_INSET = 'calc(env(safe-area-inset-bottom, 0px) + 1rem)'
 
 const MODEL_LABELS = { auto: 'Auto', m3: 'MiniMax M3', gemma: 'Gemma 4', gptoss: 'GPT-OSS 120B', qwen: 'Qwen3 Coder' }
+// 'auto'/'m3'/'gemma'/etc above are the app's own route names — the model shown in a "via" tag.
+// PROVIDER_LABELS are the actual backend that served the request, distinct from the model: e.g.
+// GPT-OSS can come from Ollama, Cerebras, Groq, or NIM depending on which fallback tier fired.
+const PROVIDER_LABELS = { ollama: 'Ollama', cerebras: 'Cerebras', groq: 'Groq', gemini: 'Gemini', nim: 'NIM' }
 
 export default function App() {
   // Load conversations once and derive the active id from the SAME instance — a fresh
@@ -63,6 +67,7 @@ export default function App() {
   })
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [usage, setUsage] = useState(loadUsage)
+  const [quota, setQuota] = useState(loadQuota)
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem('theme')
     if (saved) return saved
@@ -640,6 +645,8 @@ export default function App() {
     let streamedText = ''       // text-only content (for caching)
     let producedImage = false   // did this turn generate an image?
     let routedModel = null      // which model the backend actually used
+    let routedProvider = null   // which backend served it (ollama/cerebras/groq/gemini/nim)
+    let routedQuota = null      // that provider's self-reported remaining requests/tokens, if any
     let streamError = null      // terminal error reported by the backend
 
     const ensureAssistant = () => {
@@ -733,7 +740,7 @@ export default function App() {
         if (evt.delta) appendDelta(evt.delta)
         else if (evt.image) setAssistantImage(evt.image, evt.mediaType)
         else if (evt.error) streamError = evt.error
-        else if (evt.done) routedModel = evt.model || null
+        else if (evt.done) { routedModel = evt.model || null; routedProvider = evt.provider || null; routedQuota = evt.quota || null }
       }
 
       while (true) {
@@ -760,14 +767,16 @@ export default function App() {
         }
       } else {
         setLastAttempt(null)
-        // Tag the reply with the model that actually answered (useful in Auto mode).
+        // Tag the reply with the model AND provider that actually answered (useful in Auto mode,
+        // and to see at a glance when a fallback tier fired instead of the primary).
         if (appended && routedModel) {
           setMsgs((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, via: routedModel } : m))
+            prev.map((m) => (m.id === assistantId ? { ...m, via: routedModel, viaProvider: routedProvider } : m))
           )
         }
-        // Usage: one chat request, plus an image if one was generated.
-        setUsage(bumpUsage({ chat: 1, image: producedImage ? 1 : 0 }))
+        // Usage: one chat request, plus an image if one was generated, broken down by provider.
+        setUsage(bumpUsage({ chat: 1, image: producedImage ? 1 : 0, provider: routedProvider }))
+        if (routedProvider && routedQuota) setQuota(saveQuota(routedProvider, routedQuota))
         // Cache plain text answers so identical prompts return instantly next time.
         // Never cache web-search answers — they're time-sensitive.
         if (!producedImage && !(payload.images && payload.images.length) && !webSearch && streamedText.trim()) {
@@ -1313,8 +1322,12 @@ export default function App() {
                       msg.content && <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     )}
                     {msg.role === 'assistant' && (msg.via || msg.cached) && (
-                      <p className={`text-[10px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                        {msg.cached ? 'cached' : `via ${MODEL_LABELS[msg.via] || msg.via}`}
+                      <p className={`text-[10px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}
+                        title={msg.viaProvider && msg.viaProvider !== 'ollama' ? 'Your primary (Ollama) was unavailable — this reply came from a backup provider.' : undefined}>
+                        {msg.cached
+                          ? 'cached'
+                          : `via ${MODEL_LABELS[msg.via] || msg.via}${msg.viaProvider ? ` (${PROVIDER_LABELS[msg.viaProvider] || msg.viaProvider})` : ''}`}
+                        {msg.viaProvider && msg.viaProvider !== 'ollama' && <span className="ml-1 text-amber-500">· fallback</span>}
                       </p>
                     )}
                     {msg.role === 'assistant' && msg.content && msg.content.length > 20 && !loading && (
@@ -1784,6 +1797,44 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                <div className="border-b border-[var(--border)] pb-3">
+                  <span className="text-sm font-medium">Usage today</span>
+                  <p className="text-xs text-[var(--muted)] mt-1">
+                    Chat: {usage.chat}{CHAT_DAILY_SOFT_LIMIT ? ` / ${CHAT_DAILY_SOFT_LIMIT} soft limit` : ''} · Images: {usage.image} / {IMAGE_DAILY_SOFT_LIMIT}
+                  </p>
+                  {Object.keys(usage.byProvider || {}).length > 0 ? (
+                    <div className="mt-2 space-y-1">
+                      {Object.entries(usage.byProvider)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([p, n]) => {
+                          const q = quota[p]
+                          // A quota reading older than ~10 min is stale enough that we say so
+                          // rather than imply it's live — the number is only refreshed when
+                          // that specific provider actually answers a request.
+                          const stale = q && Date.now() - q.at > 10 * 60 * 1000
+                          return (
+                            <div key={p} className="flex items-center justify-between text-xs">
+                              <span>{PROVIDER_LABELS[p] || p}{p !== 'ollama' && <span className="ml-1 text-amber-500">(fallback)</span>}</span>
+                              <span className="text-[var(--muted)] text-right">
+                                {n} request{n === 1 ? '' : 's'}
+                                {q && q.remainingRequests != null && (
+                                  <span title={q.resetRequests ? `Resets in ${q.resetRequests}` : undefined}>
+                                    {' · '}{q.remainingRequests}{q.limitRequests ? `/${q.limitRequests}` : ''} left{stale ? ' (as of earlier)' : ''}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          )
+                        })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-[var(--muted)] italic mt-1">No requests yet today.</p>
+                  )}
+                  <p className="text-[10px] text-[var(--muted)] mt-2">
+                    Request counts are what THIS browser sent — not every provider reports a true
+                    remaining-quota number, so "left" only appears when one actually does.
+                  </p>
+                </div>
                 <div>
                   <label className="text-xs font-semibold text-[var(--muted)]">About you</label>
                   <textarea

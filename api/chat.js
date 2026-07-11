@@ -149,7 +149,7 @@ export default async function handler(req, res) {
       if (!b64) throw new Error(errs.join(' · ') || 'image generation failed')
       res.write(JSON.stringify({ image: b64, mediaType: 'image/jpeg', prompt: genPrompt }) + '\n')
       res.write(JSON.stringify({ delta: '\n\n_An AI re-imagining based on your photo — not a pixel-edit of the original._' }) + '\n')
-      res.write(JSON.stringify({ done: true, provider: 'nim', model: 'vision-gen' }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: 'nim', model: 'vision-gen', quota: null }) + '\n')
     } catch (err) {
       console.error('photo-informed gen failed:', err.message)
       res.write(JSON.stringify({ error: `Couldn't create the image: ${err.message}` }) + '\n')
@@ -247,7 +247,9 @@ export default async function handler(req, res) {
         await runImageTool(toolCall, newMessage, NVIDIA_NIM_KEY, HUGGINGFACE_KEY, res, writeDelta)
       }
       if (searchData) writeDelta(sourcesMarkdown(searchData))
-      res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel }) + '\n')
+      // Ollama Cloud's API doesn't expose rate-limit headers, so quota is always null here —
+      // the frontend shows "no quota data" rather than a fabricated number.
+      res.write(JSON.stringify({ done: true, provider: 'ollama', model: effectiveModel, quota: null }) + '\n')
       return res.end()
     } catch (err) {
       console.error('Ollama failed:', err.message)
@@ -278,13 +280,16 @@ export default async function handler(req, res) {
   for (const fb of textFallbacks) {
     if (!fb.key || !fb.model || state.wroteAny) continue
     try {
+      let quota = null
       if (fb.gemini) {
+        // Gemini's API doesn't expose rate-limit headers either — quota stays null.
         await streamGemini(fullMessages, fb.key, writeDelta)
       } else {
-        await streamOpenAICompatible(fb.url, fullMessages, fb.model, fb.key, writeDelta, fb.name)
+        const r = await streamOpenAICompatible(fb.url, fullMessages, fb.model, fb.key, writeDelta, fb.name)
+        quota = r && r.quota
       }
       if (searchData) writeDelta(sourcesMarkdown(searchData))
-      res.write(JSON.stringify({ done: true, provider: fb.name, model: effectiveModel }) + '\n')
+      res.write(JSON.stringify({ done: true, provider: fb.name, model: effectiveModel, quota }) + '\n')
       return res.end()
     } catch (err) {
       console.error(`${fb.name} failed:`, err.message)
@@ -728,12 +733,26 @@ async function runImageTool(toolCall, fallbackPrompt, nimKey, hfKey, res, onDelt
 // Logging them gives ground-truth headroom visibility in Vercel's function logs, cheaper
 // than building a persisted tracking table for two providers whose limits already
 // self-enforce via the normal 429-and-fall-through path anyway.
+// Returns the parsed quota (or null if this provider didn't send any) AND still logs it —
+// logs remain useful for anyone checking Vercel directly, but the return value is what lets
+// the frontend show real, provider-reported headroom instead of self-tracked guesswork.
 function logRateLimitHeaders(label, response) {
   const h = response.headers
   const reqRemaining = h.get('x-ratelimit-remaining-requests') || h.get('x-ratelimit-remaining-requests-day')
+  const reqLimit = h.get('x-ratelimit-limit-requests') || h.get('x-ratelimit-limit-requests-day')
   const tokRemaining = h.get('x-ratelimit-remaining-tokens') || h.get('x-ratelimit-remaining-tokens-minute')
-  if (reqRemaining != null || tokRemaining != null) {
-    console.log(`[quota] ${label}: requests remaining=${reqRemaining ?? '?'} tokens remaining=${tokRemaining ?? '?'}`)
+  const tokLimit = h.get('x-ratelimit-limit-tokens') || h.get('x-ratelimit-limit-tokens-minute')
+  const resetRequests = h.get('x-ratelimit-reset-requests') || h.get('x-ratelimit-reset-requests-day')
+  const resetTokens = h.get('x-ratelimit-reset-tokens') || h.get('x-ratelimit-reset-tokens-minute')
+  if (reqRemaining == null && tokRemaining == null) return null
+  console.log(`[quota] ${label}: requests remaining=${reqRemaining ?? '?'} tokens remaining=${tokRemaining ?? '?'}`)
+  return {
+    remainingRequests: reqRemaining != null ? Number(reqRemaining) : null,
+    limitRequests: reqLimit != null ? Number(reqLimit) : null,
+    remainingTokens: tokRemaining != null ? Number(tokRemaining) : null,
+    limitTokens: tokLimit != null ? Number(tokLimit) : null,
+    resetRequests: resetRequests || null,
+    resetTokens: resetTokens || null,
   }
 }
 
@@ -759,7 +778,7 @@ async function streamOpenAICompatible(baseUrl, messages, model, apiKey, onDelta,
     },
     body: JSON.stringify({ model, messages: textMessages, temperature: 0.7, max_tokens: 2048, stream: true })
   })
-  logRateLimitHeaders(label, response)
+  const quota = logRateLimitHeaders(label, response)
 
   let got = false
   for await (const line of iterLines(response)) {
@@ -773,6 +792,7 @@ async function streamOpenAICompatible(baseUrl, messages, model, apiKey, onDelta,
     if (piece) { got = true; onDelta(piece) }
   }
   if (!got) throw new Error('empty response')
+  return { quota }
 }
 
 // Brave Search: 2000 free searches/month — primary provider when key is set.
