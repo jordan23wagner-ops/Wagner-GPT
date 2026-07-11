@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
-  Folder, FolderOpen, ChevronRight, ChevronDown, Printer, Download, Target,
+  Folder, FolderOpen, ChevronRight, ChevronDown, Printer, Download, Target, UserRound,
 } from 'lucide-react'
 import { fileToStored } from './lib/resumeParse'
 import { parseDocument } from './lib/parseDocument'
 import {
   loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory, loadProfile,
-  loadTarget, saveTarget, activeResume, syncDown,
+  loadTarget, saveTarget, activeResume, syncDown, PEOPLE, currentPerson, setCurrentPerson,
 } from './lib/jobsStore'
 import {
   aiRank, lexicalRank, quickTailor, matchScore,
@@ -133,7 +133,18 @@ function TabBtn({ id, label, Icon, viewTab, setViewTab }) {
   )
 }
 
+// Outer shell owns only "who is searching". Everything below it (résumés, target, tracker,
+// profile, memory — local state AND the store's namespaced keys) is per-person, so switching
+// remounts JobsInner via `key`: state re-initializes from the new person's keys, the mount
+// syncDown pulls their cloud row, and the résumé/profile sync effect re-pushes THEIR identity to
+// the extension. That remount is the whole isolation mechanism — don't "optimize" it away.
 export default function Jobs() {
+  const [person, setPerson] = useState(currentPerson)
+  const switchPerson = (key) => { setCurrentPerson(key); setPerson(key) }
+  return <JobsInner key={person} person={person} switchPerson={switchPerson} />
+}
+
+function JobsInner({ person, switchPerson }) {
   const [viewTab, setViewTab] = useState('search') // search | resumes | tracker | memory
   const [resumes, setResumes] = useState(loadResumes)
   const [tracked, setTracked] = useState(loadTracked)
@@ -212,7 +223,19 @@ export default function Jobs() {
           <TabBtn id="resumes" label={`Résumés${resumes.length ? ` (${resumes.length})` : ''}`} Icon={FileText} {...tb} />
           <TabBtn id="tracker" label={`Tracker${tracked.length ? ` (${tracked.length})` : ''}`} Icon={Bookmark} {...tb} />
           <TabBtn id="memory" label={`Memory${memory.length ? ` (${memory.length})` : ''}`} Icon={Brain} {...tb} />
-          <span className="ml-auto text-xs text-[var(--muted)] truncate max-w-[40%]">
+          <div className="ml-auto flex items-center gap-1.5" title="Each person has their own résumés, Target Profile, tracker, and autofill profile — switching changes all of them (and what the extension fills with)">
+            <UserRound size={14} className="text-[var(--muted)]" />
+            <span className="text-xs text-[var(--muted)] hidden sm:inline">Searching as</span>
+            <div className="flex rounded-lg overflow-hidden border border-[var(--border)]">
+              {PEOPLE.map((p) => (
+                <button key={p.key} onClick={() => p.key !== person && switchPerson(p.key)}
+                  className={`px-2.5 py-1 text-xs font-medium ${p.key === person ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--text)]'}`}>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <span className="basis-full text-right text-xs text-[var(--muted)] truncate">
             {active ? `Active résumé: ${active.name}` : 'No active résumé — add one for fit ranking'}
           </span>
         </div>
