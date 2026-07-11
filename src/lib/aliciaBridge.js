@@ -26,22 +26,29 @@ export function waitForExtension(timeoutMs = 1200) {
   })
 }
 
-// Register a batch of jobs with the extension for auto-fill. Each job: { url, title, company,
-// resumeText }. The WEB APP opens the posting tabs; the extension fills whichever opened tab matches
-// (following redirects, stopping before Submit). Resolves TRUE only when the extension's background
-// worker actually acknowledges handling it — so the caller can report honestly whether it worked.
+// Hand a batch of jobs (up to 10) to the extension for auto-fill. Each job: { url, title, company,
+// resumeText }. THE EXTENSION opens each posting tab itself (chrome.tabs.create from its privileged
+// background context — not subject to popup-blocking the way page-JS window.open is) and binds the
+// fill session to the exact tab it creates, eliminating the URL-matching race that silently failed
+// on custom-domain postings (confirmed live: Stripe, Databricks). The caller must NOT window.open()
+// these jobs itself when the extension is present — that would open duplicate tabs.
+// Resolves { ok, count, requested, tabIds } — ok/count reflect how many tabs the extension actually
+// opened and bound, not just that the message was received, so the caller can report honestly.
 export function sendApply(jobs, opts = {}) {
   return new Promise((resolve) => {
-    if (!extensionPresent()) { resolve(false); return }
+    if (!extensionPresent()) { resolve({ ok: false, count: 0, requested: jobs.length, tabIds: [] }); return }
     const nonce = 'a' + Math.random().toString(36).slice(2)
     const onMsg = (e) => {
       if (e.source === window && e.data && e.data.source === 'alicia-ext' && e.data.type === 'APPLY_ACK' && e.data.nonce === nonce) {
-        window.removeEventListener('message', onMsg); resolve(!!e.data.ok)
+        window.removeEventListener('message', onMsg)
+        resolve({ ok: !!e.data.ok, count: e.data.count || 0, requested: e.data.requested || jobs.length, tabIds: e.data.tabIds || [] })
       }
     }
     window.addEventListener('message', onMsg)
     window.postMessage({ source: 'wagner-jobs', type: 'ALICIA_APPLY', nonce, jobs, options: opts }, '*')
-    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(false) }, 2500)
+    // Opening up to 10 real tabs takes longer than the old single-window.open path — give the
+    // extension room to finish before giving up on it.
+    setTimeout(() => { window.removeEventListener('message', onMsg); resolve({ ok: false, count: 0, requested: jobs.length, tabIds: [] }) }, 8000)
   })
 }
 

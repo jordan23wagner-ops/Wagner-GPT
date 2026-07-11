@@ -161,6 +161,50 @@ export async function extractConfirmedFacts(history) {
   return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string' && s.trim()).slice(0, 10) : []
 }
 
+// ── Gap memory: has the candidate already told us whether they have a missing skill? ──
+// matchScore's `missing` list names things a posting wants that the résumé doesn't clearly show.
+// Before asking about the SAME gap on every weak-fit job in a batch, check whether it's already
+// resolved: a 'skill'/'fact' memory entry means they DO have it (their tailoring prompt already
+// includes it); a 'gap-declined' entry means they've already said they DON'T, so re-asking would
+// just be badgering. Loose substring overlap, not exact match — "regulatory compliance" should
+// still match a memory entry phrased "I have regulatory compliance experience from my last role".
+function normalizeGap(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim() }
+function gapOverlaps(gapPhrase, memoryText) {
+  const g = normalizeGap(gapPhrase), m = normalizeGap(memoryText)
+  if (!g || !m) return false
+  if (m.includes(g) || g.includes(m)) return true
+  // Word-overlap fallback for short memory notes that paraphrase rather than quote the gap.
+  const gWords = g.split(' ').filter((w) => w.length > 3)
+  if (!gWords.length) return false
+  const hits = gWords.filter((w) => m.includes(w)).length
+  return hits / gWords.length >= 0.6
+}
+// Returns 'confirmed' (candidate has it), 'declined' (candidate confirmed they don't), or null
+// (no memory either way — genuinely unresolved, needs asking).
+export function gapMemoryStatus(gapPhrase, memory) {
+  for (const m of memory || []) {
+    if (!m || !gapOverlaps(gapPhrase, m.text)) continue
+    if (m.kind === 'gap-declined') return 'declined'
+    return 'confirmed'
+  }
+  return null
+}
+// Dedupe missing-keyword phrases across a whole batch of weak-fit jobs down to the ones with NO
+// memory resolution yet — these are what actually needs a human answer, asked once per phrase
+// rather than once per job. Case-insensitive dedup, first-seen casing kept for display.
+export function unresolvedGaps(missingLists, memory) {
+  const seen = new Map() // normalized -> original casing
+  for (const list of missingLists) {
+    for (const phrase of list || []) {
+      const key = normalizeGap(phrase)
+      if (!key || seen.has(key)) continue
+      if (gapMemoryStatus(phrase, memory)) continue // already resolved either way
+      seen.set(key, phrase)
+    }
+  }
+  return Array.from(seen.values())
+}
+
 // ── Post-tailor grounding check: claims in the draft that the source material doesn't support ──
 // The tailoring prompt alone doesn't bind the model; this is the verification step. Returns an
 // array of unsupported-claim strings (empty = clean), or null when the check itself failed —

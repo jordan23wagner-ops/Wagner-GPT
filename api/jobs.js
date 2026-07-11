@@ -248,6 +248,26 @@ export function slugName(slug) {
   return String(slug || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+// Words the Workday bulk-import candidate list turned up as a `site` value for thousands of rows
+// where `tenant` was ALSO bogus (see below) — a generic recruiting-site label, not a company name.
+// Confirmed live via direct registry inspection: real distinguishing signal is gone for these, so
+// showing one of these as if it were the employer would be confidently WRONG, not just imprecise.
+const GENERIC_WORKDAY_SITE_RE = /^(external(careers?(site2?)?)?|ext|careers?(site)?|jobs?|broadbeanexternal|global|corporate(careers)?|earlycareers|gti|externalsite|site|main|default|corp|jobsearch|recruit(ing|ment)?|staffing|talent(community)?|applicants|openings|opportunities|current|portal|\d+)$/i
+// Some fraction of the bulk-imported Workday candidates have a corrupted `tenant` — literally a
+// Workday DATA-CENTER code ("wd1", "wd5", "wd12", ...) rather than the company's real tenant slug,
+// confirmed live: ~6,000 registry rows all showed company_name "Wd1"/"Wd5"/etc, the data-center
+// label mechanically title-cased. `site` is the only field with any chance of holding the real
+// identifier for these; when it's ALSO one of the generic labels above there's genuinely nothing
+// left to derive a name from, and returning null (→ an honest "Unknown employer" upstream) beats
+// guessing wrong. Root cause is in the external bulk-import dataset's own field encoding for this
+// subset, not fixable by re-deriving from data this app already has — flagged, not fully solved.
+export function workdayFallbackName(tenant, site) {
+  if (!/^wd\d+$/i.test(String(tenant || ''))) return slugName(tenant)
+  const s = String(site || '').trim()
+  if (!s || GENERIC_WORKDAY_SITE_RE.test(s.replace(/[-_\s]+/g, ''))) return null
+  return slugName(s)
+}
+
 // Warm-lambda TTL cache. Board contents change hourly at most, but every search used to re-download
 // entire boards (multi-MB JSON for big companies) plus re-run Brave/Tavily discovery — twice the
 // cost for two consecutive searches with tweaked filters. Cached job objects are only ever read or
@@ -692,10 +712,11 @@ async function fetchWorkday({ tenant, dataCenter, site, name }) {
     d = r.ok ? await r.json() : null
   } catch { d = null }
   const jobs = (d && d.jobPostings) || []
+  const companyName = name || workdayFallbackName(tenant, site) || 'Unknown employer (Workday)'
   return jobs.map((j) => ({
     id: 'wd_' + tenant + '_' + site + '_' + (j.bulletFields && j.bulletFields[0] || j.externalPath || Math.random().toString(36).slice(2)),
     title: j.title || '',
-    company: name || slugName(tenant),
+    company: companyName,
     location: j.locationsText || (Array.isArray(j.additionalLocations) ? j.additionalLocations.join(', ') : ''),
     salaryMin: null, salaryMax: null, salaryPredicted: false,
     url: j.externalPath ? `${base}/${site}${j.externalPath}` : '',

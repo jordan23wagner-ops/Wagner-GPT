@@ -29,7 +29,7 @@
 //
 // See README's "Bulk board import" section for how to trigger this.
 
-import { ATS_FETCHERS, slugName, INDUSTRY_BOARDS } from './jobs.js'
+import { ATS_FETCHERS, slugName, workdayFallbackName, INDUSTRY_BOARDS } from './jobs.js'
 
 export const config = { maxDuration: 60 }
 
@@ -159,7 +159,10 @@ function toRegistryRow(v) {
   // over a slug-derived fallback -- reading it off here gets that enrichment for free without
   // special-casing any one ATS.
   const fromJob = jobs.length ? String(jobs[0].company || '').trim() : ''
-  const fallbackName = slugName(v.ats === 'workday' ? v.tenant : v.slug)
+  // A meaningful fraction of the bulk-imported Workday candidates have `tenant` corrupted to a bare
+  // data-center code ("wd1", "wd5", ...) — see workdayFallbackName's own comment. null means neither
+  // tenant nor site carry a recoverable name; 'Unknown employer (Workday)' is honest, not a guess.
+  const fallbackName = v.ats === 'workday' ? (workdayFallbackName(v.tenant, v.site) || 'Unknown employer (Workday)') : slugName(v.slug)
   const sampleTitles = jobs.slice(0, 3).map((j) => j.title).filter(Boolean).join(', ')
   const base = v.ats === 'workday'
     ? { id: v.id, ats: 'workday', slug: null, tenant: v.tenant, data_center: v.dataCenter, site: v.site }
@@ -241,9 +244,13 @@ function classifyPrompt(rows) {
   // batch across ~hundreds of batches for the backlog, so shaving the fixed instruction cost compounds.
   return `Industries: ${INDUSTRIES.join('|')}\n` +
     'For each numbered company: pick exactly one industry from the list. Clean up the name if it looks ' +
-    'like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes"), else keep it as-is. If unsure, use ' +
-    '"Software / IT". Reply with ONLY a JSON array, same order, one item per line: ' +
-    '{"industry":"...","company_name":"..."}\n\n' + listing
+    'like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes"), else keep it as-is. Also watch for ' +
+    'names that are really an ATS TENANT SLUG that got mechanically title-cased, not a real company name ' +
+    '-- short, terse, or spelled-out-digit forms like "Ffive" (really "F5, Inc.") or "Nb" (really ' +
+    '"Neuberger Berman") are common: if the name looks like this AND you recognize the real company from ' +
+    'the job titles/context, use the real name; only keep the title-cased form as a last resort when you ' +
+    'have no better guess. If unsure about industry, use "Software / IT". Reply with ONLY a JSON array, ' +
+    'same order, one item per line: {"industry":"...","company_name":"..."}\n\n' + listing
 }
 
 // One provider attempt. Returns a typed result so the caller can react per-failure-mode (rate_limit

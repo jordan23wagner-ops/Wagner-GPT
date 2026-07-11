@@ -217,22 +217,28 @@ pass); title matching is word-boundary-aware so "AI Engineer" no longer degrades
 "engineer" posting; each person gets a first-run Target Profile seeded automatically (editable, and
 manual saves are never overwritten).
 
-**Prep & Apply (targeted, 1–5 at a time).** Check the jobs you want on the results, then:
-- **Quick tailor & apply** — tailors a résumé to each job from your existing résumés + memory (no
-  invention), scores the fit, and saves each tailored résumé to the bank.
-- **Deep rewrite & apply** — Alicia interviews you once to fill gaps across the batch, asks you to
-  **confirm any new skills into Memory**, rewrites per job, **re-scores, and auto-skips weak fits**
-  (below 50) so effort goes to strong matches.
-- **Apply-time fit gate** — Apply on a job with no tailored résumé first scores your ACTIVE résumé
-  against that posting, shows what the posting wants that the résumé doesn't clearly show, and
-  recommends Apply as-is (fit ≥ 75), Quick Tailor (50–74), or Deep Tailor (< 50) with reasoning.
-  You can always proceed as-is — it recommends, never blocks.
+**Prep & Apply (targeted, 1–10 at a time).** Check the jobs you want on the results, then:
+- **Apply to selected** — the main path. Scores every checked job against your active résumé and
+  decides its own mode automatically: fit ≥ 75 applies as-is, 50–74 gets a Quick Tailor, below 50 is
+  flagged as a weak fit. For weak-fit jobs, missing skills are checked against your confirmed memory
+  first (already said you have it, or already said you don't?) — only genuinely unresolved gaps get
+  asked, **once per gap across the whole batch**, not once per job, on a single plan-confirmation
+  screen before anything runs. Answers persist to memory (confirmed-has or confirmed-lacks), so the
+  same question never comes up again on a future job. One "Run batch" click processes everything and
+  hands every job to the extension, which now opens every tab itself — up to 10 at once, no
+  popup-blocker loss — landing on open, reviewable, **never auto-submitted** tabs.
+- **Quick all / Deep all** — manual overrides that force one shared mode across every selected job
+  (Quick Tailor from your existing résumés + memory, or one shared Deep Tailor interview with
+  auto-skip below 50), for when you want to bypass the automatic per-job decision.
+- **Apply-time fit gate** (single-job Apply button) — scores your ACTIVE résumé against that one
+  posting, shows what it's missing, and recommends Apply as-is / Quick Tailor / Deep Tailor with
+  reasoning. You can always proceed as-is — it recommends, never blocks.
 - **Grounding check** — every tailored draft is audited against its own sources (résumés +
-  confirmed memory); unsupported claims are listed in the review step and that job starts
-  unselected. Deep-rewrite fact confirmation is opt-IN (unchecked by default, verbatim wording).
+  confirmed memory); unsupported claims are listed in review and that job starts unselected.
+  Deep-rewrite fact confirmation is opt-IN (unchecked by default, verbatim wording).
 - **Apply** hands the batch to the Alicia browser extension (detected via `src/lib/aliciaBridge.js`),
-  which opens each posting and auto-fills — stopping before the final Submit (a human always submits).
-  Without the extension it falls back to opening the postings and marking them "applied" in the Tracker.
+  which opens each posting itself and auto-fills — stopping before the final Submit (a human always
+  submits). Without the extension it falls back to opening the postings and marking them "applied."
 
 Storage is local-first (`src/lib/jobsStore.js`); optional cloud sync activates once you run
 `supabase-jobs-schema.sql`. No new npm dependencies or API keys were added — every provider key is one

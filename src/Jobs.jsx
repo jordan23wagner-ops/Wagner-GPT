@@ -13,6 +13,7 @@ import {
 import {
   aiRank, lexicalRank, quickTailor, matchScore, groundingCheck,
   backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
+  unresolvedGaps, gapMemoryStatus,
 } from './lib/jobsAI'
 import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, onFillStatus } from './lib/aliciaBridge'
 import { isFortune500, layoffFlag } from './lib/companyData'
@@ -57,8 +58,9 @@ const DEFAULT_TARGET = {
   // that carries a spec, and saveTargets stamps it on every manual save so user edits stick.
   spec: 'katy-120k-2026-07',
 }
-const MAX_BATCH = 5          // apply 1–5 at a time (targeted, high-quality)
+const MAX_BATCH = 10         // apply 1–10 at a time (targeted, high-quality)
 const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
+const GATE_STRONG = 75       // matches fitColor's green threshold — apply-as-is above this
 
 const uid = (p) => p + Math.random().toString(36).slice(2, 9)
 
@@ -295,6 +297,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [sources, setSources] = useState(null)
   const [selected, setSelected] = useState({}) // id -> true
   const [prep, setPrep] = useState(null)        // { mode, jobs } when the prep modal is open
+  const [bulkPrep, setBulkPrep] = useState(null) // jobs array when the bulk-apply modal is open
   const [target, setTargetState] = useState(() => loadTarget()) // saved Target Profile
   const [targetMsg, setTargetMsg] = useState('')
   const hasTarget = !!(target && (target.titles || target.industry))
@@ -429,7 +432,6 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   // A job with a saved tailored résumé skips the gate (that's what it's for); everything else gets
   // scored, and a weak fit shows what's missing + which tailor mode is worth it. The user can
   // always proceed as-is — the gate recommends, it never blocks.
-  const GATE_STRONG = 75 // matches fitColor's green threshold
   const [gate, setGate] = useState(null) // { job, checking, score, missing, summary }
   const applyOne = (job) => {
     const tr = findTailored(resumes, job)
@@ -444,43 +446,36 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const gateTailor = (mode) => { const j = gate.job; setGate(null); setPrep({ mode, jobs: [j] }) }
 
   // Direct apply for one job (no tailoring): use its existing tailored résumé if present, else the
-  // active résumé. IMPORTANT: this must run synchronously off the click — calling window.open after
-  // an `await` loses the user gesture and the browser silently blocks the tab. So branch on the
-  // (synchronous) hasExt state and never await before opening.
+  // active résumé.
+  //
+  // With the extension present, the EXTENSION opens the tab (chrome.tabs.create from its privileged
+  // background context) and binds the fill session to the exact tab it creates — no popup-block risk
+  // (that only applies to page-JS window.open, not extension APIs) and no URL-matching race. The web
+  // app must NOT also call window.open here, or the job opens twice.
+  //
+  // Without the extension, WE have to open it ourselves, and that must stay synchronous off the
+  // click — window.open after an `await` loses the user gesture and gets silently blocked.
   const applyNow = (job) => {
     const tr = findTailored(resumes, job)
     const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
-    // Register with the extension BEFORE opening the tab: sendApply posts its message synchronously
-    // (only the ACK is awaited), so the extension gets a head start on the tab's first navigation —
-    // window.open used to fire first and the extension's URL registration routinely lost that race
-    // (the tab was already past onBeforeNavigate before the pending URL existed). The extension also
-    // adopts already-open matching tabs at registration time now, so late arrival is covered too.
-    // If the pop-up ends up blocked, the registered URL simply expires (10-min TTL) unused.
-    const ackPromise = (hasExt && job.url)
-      ? sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
-      : null
-    // Open the tab from the web app (synchronous → not popup-blocked). No 'noopener' so window.open
-    // returns a usable value — null means the browser blocked it (then we don't claim "applied").
-    const win = job.url ? window.open(job.url, '_blank') : null
-    if (!win) {
-      setStatus(`Couldn’t open “${job.title}” — your browser blocked the pop-up. Use “View posting” to open it. (Not marked applied.)`)
-      return
-    }
-    if (hasExt && ackPromise) {
-      // Don't claim "applied" until we know Alicia actually got the request — sendApply's `ok` only
-      // means the extension ACKed, but that's the earliest honest signal we have. Marking it
-      // unconditionally here previously left false "✓ applied" rows (MEI, Anduril) when the
-      // extension never even received the job.
+    if (hasExt && job.url) {
       upsertTracked(job, { status: 'saved', resumeId: tr ? tr.id : undefined })
-      setStatus(`Opened “${job.title}” — asking Alicia to auto-fill…`)
-      ackPromise
-        .then((ok) => {
+      setStatus(`Asking Alicia to open and auto-fill “${job.title}”…`)
+      sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
+        .then((res) => {
+          const ok = res && res.ok && res.count > 0
           if (ok) upsertTracked(job, { status: 'applied' })
           setStatus(ok
-            ? `Alicia is auto-filling “${job.title}” — review and click Submit. (On a job description page, it fills once you reach the application form.)`
-            : `Opened “${job.title}” but couldn’t reach the Alicia extension to auto-fill — check the extension version by the indicator above (needs v1.11.1+), reload it, or fill manually. Not marked applied yet — update its status once you have.`)
+            ? `Alicia opened “${job.title}” and is auto-filling — review and click Submit. (On a job description page, it fills once it reaches the application form.)`
+            : `Couldn’t reach the Alicia extension to open “${job.title}” — check the extension version by the indicator above (needs v1.13.37+), reload it, or use “View posting” to open it manually. Not marked applied.`)
         })
     } else {
+      // No extension → we open it, synchronously, off the click.
+      const win = job.url ? window.open(job.url, '_blank') : null
+      if (!win) {
+        setStatus(`Couldn’t open “${job.title}” — your browser blocked the pop-up. Use “View posting” to open it. (Not marked applied.)`)
+        return
+      }
       upsertTracked(job, { status: 'applied', resumeId: tr ? tr.id : undefined })
       setStatus(`Opened “${job.title}” and marked it applied${tr ? ' (tailored résumé is in Résumés).' : '.'}`)
     }
@@ -598,12 +593,18 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           {selectedJobs.length > 0 && <button onClick={clearSel} className="text-xs px-2 py-1 rounded-lg bg-[var(--surface-2)]">Clear</button>}
           <div className="ml-auto flex gap-2">
             <button onClick={() => startPrep('quick')} disabled={!selectedJobs.length}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] disabled:opacity-40" title="Tailor from your existing résumés, then apply">
-              <Sparkles size={14} /> Quick tailor & apply
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--muted)] disabled:opacity-40" title="Force Quick Tailor on every selected job, no per-job decision">
+              <Sparkles size={13} /> Quick all
             </button>
             <button onClick={() => startPrep('deep')} disabled={!selectedJobs.length}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] disabled:opacity-40" title="AI interviews you to fill gaps, rewrites, rescores, drops weak fits">
-              <Wand2 size={14} /> Deep rewrite & apply
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--muted)] disabled:opacity-40" title="Force one shared Deep Tailor interview across every selected job">
+              <Wand2 size={13} /> Deep all
+            </button>
+            <button onClick={() => { if (!selectedJobs.length) { setStatus('Select one or more jobs first (checkbox on each card).'); return } setBulkPrep(selectedJobs.slice(0, MAX_BATCH)) }}
+              disabled={!selectedJobs.length}
+              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] font-semibold disabled:opacity-40"
+              title="Scores each job against your résumé and picks apply-as-is / Quick Tailor per job automatically, then opens every tab hands-off">
+              <Zap size={14} /> Apply to selected
             </button>
           </div>
         </div>
@@ -746,6 +747,13 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           addSavedResume={addSavedResume} upsertTracked={upsertTracked}
           onClose={() => setPrep(null)} />
       )}
+
+      {bulkPrep && (
+        <BulkApplyFlow key={bulkPrep.map((j) => j.id).join(',')} jobs={bulkPrep} resumes={resumes} activeResume={activeResume}
+          memory={memory} setMemory={setMemory} hasExt={hasExt}
+          addSavedResume={addSavedResume} upsertTracked={upsertTracked}
+          onClose={() => setBulkPrep(null)} />
+      )}
     </div>
   )
 }
@@ -882,34 +890,38 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       .map((r) => [r.job.id, !(r.warnings && r.warnings.length)])))
   }, [phase]) // eslint-disable-line
 
-  // Synchronous off the click — open tabs from the web app (no 'noopener', so we can tell which
-  // actually opened), track only those, then let the extension auto-fill the ones it recognizes.
-  // Note: browsers typically allow only the first window.open per click, so batches often open 1 tab
-  // and block the rest — we report that honestly and leave the blocked ones for "View posting".
+  // With the extension present, THE EXTENSION opens every tab (chrome.tabs.create from its
+  // privileged background context) — not subject to the browser's popup-blocker the way repeated
+  // page-JS window.open calls are, so a batch of up to 10 no longer loses tabs 2+ to blocking. The
+  // web app must not also window.open these, or every job opens twice.
   const doApply = () => {
     const chosen = progress.filter((r) => applySel[r.job.id] && r.state === 'done' && r.tailoredText)
     if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
-    const openedRows = []
-    chosen.forEach((r) => { const w = r.job.url ? window.open(r.job.url, '_blank') : null; if (w) openedRows.push(r) })
-    const opened = openedRows.length
-    const blocked = chosen.length - opened
-    const blockedNote = blocked ? ` ${blocked} pop-up(s) were blocked — open those from the Tracker or each card’s “View posting”.` : ''
-    if (!opened) { setApplyMsg(`All ${chosen.length} pop-ups were blocked — nothing marked applied. Open them from “View posting”, or apply one at a time.`); return }
-    const payloadJobs = openedRows.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
+    const payloadJobs = chosen.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText }))
     if (hasExt) {
-      // See applyOne's comment: don't mark "applied" until sendApply confirms Alicia got the request.
-      openedRows.forEach((r) => upsertTracked(r.job, { status: 'saved', resumeId: r.resumeId }))
-      setApplyMsg(`Opened ${opened} tab(s) — asking Alicia to auto-fill…`)
+      chosen.forEach((r) => upsertTracked(r.job, { status: 'saved', resumeId: r.resumeId }))
+      setApplyMsg(`Asking Alicia to open and auto-fill ${chosen.length} job(s)…`)
       sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
-        .then((ok) => {
-          if (ok) openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied' }))
-          setApplyMsg(ok
-            ? `Alicia is auto-filling ${opened} tab(s) — review and click Submit on each.${blockedNote}`
-            : `Opened ${opened} tab(s) but couldn’t reach the Alicia extension — check its version by the indicator (needs v1.11.1+), reload it, or fill manually. Not marked applied yet — update status once you have.${blockedNote}`)
+        .then((res) => {
+          const openedCount = res && res.count || 0
+          const missed = chosen.length - openedCount
+          if (openedCount) chosen.slice(0, openedCount).forEach((r) => upsertTracked(r.job, { status: 'applied' }))
+          setApplyMsg(openedCount
+            ? `Alicia opened and is auto-filling ${openedCount} tab(s) — review and click Submit on each.${missed ? ` ${missed} couldn't be opened — try those individually.` : ''}`
+            : `Couldn’t reach the Alicia extension — check its version by the indicator (needs v1.13.37+), reload it, or apply individually. Not marked applied.`)
         })
     } else {
+      // No extension → we have to open them ourselves, synchronously off the click. Browsers
+      // typically allow only the first window.open per click, so batches often lose tabs 2+ to
+      // popup-blocking — reported honestly rather than silently marked applied.
+      const openedRows = []
+      chosen.forEach((r) => { const w = r.job.url ? window.open(r.job.url, '_blank') : null; if (w) openedRows.push(r) })
+      const opened = openedRows.length
+      const blocked = chosen.length - opened
+      const blockedNote = blocked ? ` ${blocked} pop-up(s) were blocked — open those from the Tracker or each card’s “View posting”.` : ''
+      if (!opened) { setApplyMsg(`All ${chosen.length} pop-ups were blocked — nothing marked applied. Open them from “View posting”, or apply one at a time.`); return }
       openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
-      setApplyMsg(`Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v1.11.1+) for hands-off auto-fill.${blockedNote}`)
+      setApplyMsg(`Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v1.13.37+) for hands-off auto-fill.${blockedNote}`)
     }
   }
 
@@ -1011,6 +1023,229 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         {phase === 'review' && (
           <div className="p-3 border-t border-[var(--border)] space-y-2">
             {!hasExt && <div className="text-xs text-[var(--muted)]">Alicia extension not detected — Apply will open the postings in new tabs for manual filling. Install/enable it for hands-off auto-fill.</div>}
+            {applyMsg && <div className="text-xs text-[var(--text)]">{applyMsg}</div>}
+            <div className="flex gap-2">
+              <button onClick={doApply} className="flex-1 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold flex items-center justify-center gap-1.5">
+                <Zap size={15} /> Apply to {progress.filter((r) => applySel[r.job.id]).length} {hasExt ? 'via extension' : '(open tabs)'}
+              </button>
+              <button onClick={onClose} className="px-3 py-2 rounded-lg bg-[var(--surface-2)] text-sm">Done</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────── Bulk apply (up to 10, per-job auto tailor decision) ───────────────────────────
+// The workflow: search → select up to 10 → this flow scores EACH job against the active résumé and
+// decides its own mode (apply as-is / Quick Tailor / flag as weak) — no per-job clicking. A weak-fit
+// job's missing skills are checked against memory first (has it already been confirmed, either way?)
+// and only genuinely unresolved gaps are asked about, once per gap phrase across the whole batch, not
+// once per job. One "Run batch" click processes everything and hands every job to the extension —
+// which now opens every tab itself — landing on open, reviewable, NEVER auto-submitted tabs.
+function BulkApplyFlow({ jobs, resumes, activeResume, memory, setMemory, hasExt, addSavedResume, upsertTracked, onClose }) {
+  const [phase, setPhase] = useState('scoring') // scoring -> plan -> processing -> review
+  const [plan, setPlan] = useState([])          // [{ job, score, missing, mode }]
+  const [gaps, setGaps] = useState([])          // unresolved gap phrases needing a quick answer
+  const [gapAnswers, setGapAnswers] = useState({}) // phrase -> { has: true|false|null, detail: '' }
+  const [progress, setProgress] = useState([])  // final per-job processing state, same shape as PrepFlow
+  const [applySel, setApplySel] = useState({})
+  const [applyMsg, setApplyMsg] = useState('')
+  const started = useRef(false)
+  const base = (activeResume && activeResume.text) || (resumes[0] && resumes[0].text) || ''
+  const others = resumes.filter((r) => !r.tailoredForJob && (!activeResume || r.id !== activeResume.id)).map((r) => r.text)
+
+  // ── Phase 1: score every job, bucket by fit, find gaps with no memory resolution yet ──
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    ;(async () => {
+      const scored = await Promise.all(jobs.map(async (job) => {
+        const existing = findTailored(resumes, job)
+        if (existing) return { job, score: (existing.tailoredForJob && existing.tailoredForJob.score) || null, missing: [], mode: 'reuse', existing }
+        if (!base) return { job, score: null, missing: [], mode: 'asis' } // nothing to score against
+        try {
+          const m = await matchScore(base, job)
+          const mode = m.score >= GATE_STRONG ? 'asis' : m.score >= APPLY_THRESHOLD ? 'quick' : 'weak'
+          return { job, score: m.score, missing: m.missing || [], mode }
+        } catch { return { job, score: null, missing: [], mode: 'asis' } } // scoring failed — don't block the batch, just don't claim a fit number
+      }))
+      const weakMissing = scored.filter((r) => r.mode === 'weak').map((r) => r.missing)
+      const open = unresolvedGaps(weakMissing, memory)
+      setPlan(scored)
+      setGaps(open)
+      setGapAnswers(Object.fromEntries(open.map((g) => [g, { has: null, detail: '' }])))
+      setPhase('plan')
+    })()
+  }, []) // eslint-disable-line
+
+  const setGapAnswer = (phrase, patch) => setGapAnswers((s) => ({ ...s, [phrase]: { ...s[phrase], ...patch } }))
+
+  // ── Phase 2 -> 3: fold gap answers into memory, then tailor/score every job per its plan ──
+  const runBatch = () => {
+    // Persist fresh answers into memory now — 'skill' for confirmed-has, 'gap-declined' for
+    // confirmed-lacks, so the SAME gap on a future job never gets asked again. Skipped questions
+    // (left unanswered) aren't persisted at all — genuinely unknown stays unknown, not silently 'no'.
+    const fresh = []
+    gaps.forEach((phrase) => {
+      const a = gapAnswers[phrase]
+      if (!a || a.has == null) return
+      if (a.has) fresh.push({ id: uid('m_'), text: a.detail.trim() || phrase, kind: 'skill', confirmedAt: Date.now() })
+      else fresh.push({ id: uid('m_'), text: phrase, kind: 'gap-declined', confirmedAt: Date.now() })
+    })
+    const memAfter = fresh.length ? [...fresh, ...memory] : memory
+    if (fresh.length) setMemory(memAfter)
+    setPhase('processing')
+    ;(async () => {
+      const results = await Promise.all(plan.map(async (p) => {
+        const { job } = p
+        if (p.mode === 'reuse') {
+          let score = p.score
+          if (score == null) { try { score = (await matchScore(p.existing.text, job)).score } catch { /* stays null */ } }
+          return { job, state: 'done', score, tailoredText: p.existing.text, resumeId: p.existing.id, decision: 'ready', reused: true }
+        }
+        if (p.mode === 'asis') return { job, state: 'done', score: p.score, tailoredText: base, resumeId: null, decision: 'ready', asis: true }
+        // 'quick' or 'weak' (weak proceeds through Quick Tailor too, now with any freshly-confirmed
+        // memory — it's just flagged as a weaker fit in review rather than pre-checked).
+        let tailoredText = ''
+        try { tailoredText = await quickTailor(job, { activeText: base, otherTexts: others, memory: memAfter }) }
+        catch { return { job, state: 'error', decision: 'skipped' } }
+        if (!tailoredText || tailoredText.trim().length < 200) return { job, state: 'error', decision: 'skipped' }
+        const [scoreRes, groundRes] = await Promise.allSettled([
+          matchScore(tailoredText, job),
+          groundingCheck(tailoredText, { activeText: base, otherTexts: others, memory: memAfter }),
+        ])
+        const score = scoreRes.status === 'fulfilled' ? scoreRes.value.score : null
+        const warnings = groundRes.status === 'fulfilled' ? groundRes.value : null
+        const name = `Tailored — ${job.company || 'Company'} · ${job.title || 'Role'}`.slice(0, 80)
+        const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company, url: job.url, score })
+        // Weak-fit jobs stay flagged even after tailoring — a Quick Tailor re-emphasis isn't the same
+        // as a genuine Deep Tailor gap-fill, so 'weak' never silently becomes 'ready' just because the
+        // number moved. Only a real quick-fit job gets straight-through 'ready'.
+        const decision = (p.mode === 'weak' || (typeof score === 'number' && score < APPLY_THRESHOLD)) ? 'skipped' : 'ready'
+        return { job, state: 'done', score, resumeId, decision, warnings, wasWeak: p.mode === 'weak' }
+      }))
+      setProgress(results)
+      setApplySel(Object.fromEntries(results.filter((r) => r.decision === 'ready').map((r) => [r.job.id, !(r.warnings && r.warnings.length)])))
+      setPhase('review')
+    })()
+  }
+
+  const doApply = () => {
+    const chosen = progress.filter((r) => applySel[r.job.id] && r.state === 'done')
+    if (!chosen.length) { setApplyMsg('Nothing selected to apply to.'); return }
+    const payloadJobs = chosen.map((r) => ({ url: r.job.url, title: r.job.title, company: r.job.company, resumeText: r.tailoredText || base }))
+    if (hasExt) {
+      chosen.forEach((r) => upsertTracked(r.job, { status: 'saved', resumeId: r.resumeId }))
+      setApplyMsg(`Asking Alicia to open and auto-fill ${chosen.length} job(s)…`)
+      sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
+        .then((res) => {
+          const openedCount = (res && res.count) || 0
+          const missed = chosen.length - openedCount
+          if (openedCount) chosen.slice(0, openedCount).forEach((r) => upsertTracked(r.job, { status: 'applied' }))
+          setApplyMsg(openedCount
+            ? `Alicia opened and is auto-filling ${openedCount} tab(s) — review and click Submit on each.${missed ? ` ${missed} couldn't be opened — try those individually.` : ''}`
+            : `Couldn't reach the Alicia extension — check its version (needs v1.13.37+), reload it, or apply individually. Not marked applied.`)
+        })
+    } else {
+      const openedRows = []
+      chosen.forEach((r) => { const w = r.job.url ? window.open(r.job.url, '_blank') : null; if (w) openedRows.push(r) })
+      const blocked = chosen.length - openedRows.length
+      if (!openedRows.length) { setApplyMsg(`All ${chosen.length} pop-ups were blocked — apply one at a time instead.`); return }
+      openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
+      setApplyMsg(`Opened ${openedRows.length} posting(s) and marked applied.${blocked ? ` ${blocked} pop-up(s) were blocked.` : ''} Install/enable the Alicia extension for hands-off auto-fill.`)
+    }
+  }
+
+  const modeLabel = { asis: 'apply as-is', quick: 'Quick Tailor', weak: 'Quick Tailor (weak fit)', reuse: 'reuse saved résumé' }
+  const askedCount = Object.values(gapAnswers).filter((a) => a.has != null).length
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-2xl max-h-[88vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-3 border-b border-[var(--border)]">
+          <div className="font-semibold text-sm flex items-center gap-2"><Zap size={16} /> Apply to selected · {jobs.length} job{jobs.length > 1 ? 's' : ''}</div>
+          <button onClick={onClose} className="text-[var(--muted)]"><X size={18} /></button>
+        </div>
+
+        <div className="p-4 overflow-auto flex-1 space-y-3">
+          {phase === 'scoring' && (
+            <div className="flex items-center gap-2 text-sm text-[var(--muted)]"><Loader2 size={15} className="animate-spin" /> Checking how well “{activeResume && activeResume.name}” fits each posting…</div>
+          )}
+
+          {phase === 'plan' && (
+            <>
+              <p className="text-xs text-[var(--muted)]">Here's the plan — review it, answer anything below if it applies, then run the batch.</p>
+              <div className="space-y-1.5">
+                {plan.map((p) => (
+                  <div key={p.job.id} className="flex items-center justify-between rounded-lg bg-[var(--surface-2)] px-3 py-2 text-sm">
+                    <div className="min-w-0 flex-1 truncate"><span className="font-medium">{p.job.title}</span> <span className="text-[var(--muted)]">· {p.job.company}</span></div>
+                    <span className="text-xs shrink-0 ml-2 px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{typeof p.score === 'number' ? `Fit ${p.score} · ` : ''}{modeLabel[p.mode]}</span>
+                  </div>
+                ))}
+              </div>
+              {gaps.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-[var(--border)]">
+                  <p className="text-xs text-[var(--muted)]">{gaps.length} weaker-fit job{gaps.length > 1 ? 's ask' : ' asks'} about something not clearly on your résumé — answer only what's true. Skipping a question is fine; it just stays a flagged gap.</p>
+                  {gaps.map((phrase) => (
+                    <div key={phrase} className="rounded-lg border border-[var(--border)] p-2.5 space-y-1.5">
+                      <div className="text-sm">Do you have experience with <b>{phrase}</b>?</div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setGapAnswer(phrase, { has: true })} className={`text-xs px-2.5 py-1 rounded-lg ${gapAnswers[phrase] && gapAnswers[phrase].has === true ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)]'}`}>Yes</button>
+                        <button onClick={() => setGapAnswer(phrase, { has: false })} className={`text-xs px-2.5 py-1 rounded-lg ${gapAnswers[phrase] && gapAnswers[phrase].has === false ? 'bg-[var(--accent)] text-[var(--accent-text)]' : 'bg-[var(--surface-2)]'}`}>No</button>
+                        {gapAnswers[phrase] && gapAnswers[phrase].has === true && (
+                          <input className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs" placeholder="Briefly, in your own words…"
+                            value={gapAnswers[phrase].detail} onChange={(e) => setGapAnswer(phrase, { detail: e.target.value })} />
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <p className="text-[11px] text-[var(--muted)]">{askedCount}/{gaps.length} answered — confirmed answers are saved so future jobs never ask again.</p>
+                </div>
+              )}
+              <button onClick={runBatch} className="w-full mt-2 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold flex items-center justify-center gap-1.5">
+                <Zap size={15} /> Run batch
+              </button>
+            </>
+          )}
+
+          {(phase === 'processing' || phase === 'review') && (
+            <div className="space-y-2">
+              {(phase === 'processing' ? plan : progress).map((r) => (
+                <div key={r.job.id} className="rounded-lg border border-[var(--border)] p-3">
+                  <div className="flex items-center gap-2">
+                    {phase === 'review' && r.state === 'done' && (
+                      <input type="checkbox" checked={!!applySel[r.job.id]} onChange={() => setApplySel((s) => ({ ...s, [r.job.id]: !s[r.job.id] }))} />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium truncate">{r.job.title} <span className="text-[var(--muted)] font-normal">· {r.job.company}</span></div>
+                      <div className="text-xs text-[var(--muted)]">
+                        {phase === 'processing' && `waiting — ${modeLabel[r.mode]}…`}
+                        {phase === 'review' && r.state === 'error' && '⚠️ tailoring failed — skipped'}
+                        {phase === 'review' && r.state === 'done' && (
+                          <>Fit {typeof r.score === 'number' ? r.score : '— (not scored)'} · {r.decision === 'skipped'
+                            ? <span className="text-red-500">{r.wasWeak ? 'weak fit — review before including' : `below ${APPLY_THRESHOLD} — auto-skipped`}</span>
+                            : <span className="text-green-600">ready</span>} · {r.asis ? 'applying as-is' : r.reused ? 'reused saved résumé' : 'tailored résumé saved'}</>
+                        )}
+                      </div>
+                      {phase === 'review' && r.state === 'done' && r.warnings && r.warnings.length > 0 && (
+                        <div className="text-[11px] text-orange-500 mt-0.5">⚠ unsupported claims (unselected — review first): {r.warnings.slice(0, 3).join(' · ')}</div>
+                      )}
+                    </div>
+                    {phase === 'processing' && <Loader2 size={15} className="animate-spin text-[var(--muted)]" />}
+                    {phase === 'review' && r.state === 'done' && (r.decision === 'ready' ? <CheckCircle2 size={16} className="text-green-600" /> : <XCircle size={16} className="text-red-500" />)}
+                  </div>
+                </div>
+              ))}
+              {phase === 'processing' && <p className="text-xs text-[var(--muted)]">Tailoring and scoring your batch…</p>}
+            </div>
+          )}
+        </div>
+
+        {phase === 'review' && (
+          <div className="p-3 border-t border-[var(--border)] space-y-2">
+            {!hasExt && <div className="text-xs text-[var(--muted)]">Alicia extension not detected — Apply will open the postings in new tabs for manual filling.</div>}
             {applyMsg && <div className="text-xs text-[var(--text)]">{applyMsg}</div>}
             <div className="flex gap-2">
               <button onClick={doApply} className="flex-1 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold flex items-center justify-center gap-1.5">

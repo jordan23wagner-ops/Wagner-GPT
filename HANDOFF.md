@@ -4,7 +4,46 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-11 (latest) — Two-person Jobs (Jordan + Alicia), Target Profiles, apply-link + tailoring correctness pass, apply-time fit gate
+## Update 2026-07-11 (latest, second pass) — bulk-apply workflow (up to 10, per-job auto tailor decision + gap memory), driven by fixes from a live 10-job apply test
+
+A live end-to-end test (Claude in Chrome, real résumé, real postings) of the previous update's
+apply pipeline surfaced concrete failures. Root-caused and fixed each with live verification, not
+just logic tests — see Job-Assistant's own HANDOFF (v1.13.37) for the extension-side detail on the
+custom-domain binding fix, the Databricks iframe stall, and the Workday nav-panel tie. Web-app side:
+
+- **`aliciaBridge.js`/`Jobs.jsx`: stopped double-opening tabs.** The extension now opens every
+  applied-to tab itself (`chrome.tabs.create` from its background context — immune to
+  popup-blocking, unlike page-JS `window.open`); the web app must not also open them. `sendApply`
+  now resolves `{ok, count, requested, tabIds}` instead of a bare boolean, so "applied" only marks
+  once the extension confirms it actually opened+bound a tab — fixes the Stripe-class "✓ applied but
+  nothing happened" badge as a side effect. Batch cap raised 5→10.
+- **Workday company-name data quality — much bigger than the two reports.** "Ffive"/"Nb" (now F5,
+  Inc. / Neuberger Berman) were the visible tip; live DB inspection of `ats_board_registry` found
+  ~6,044 rows (out of the full bulk-imported registry) with `tenant` corrupted to a Workday
+  data-center code (`wd1`/`wd5`/`wd12`/...) rather than a real company slug — root cause traced to
+  the external bulk-import dataset's own field encoding for this subset. New `workdayFallbackName()`
+  in `api/jobs.js` recovers a name from `site` when it's not itself a generic recruiting-portal word
+  (external/careers/jobs/etc.); when neither field is recoverable, returns `'Unknown employer
+  (Workday)'` — an honest placeholder, not a confident wrong guess. One-time SQL correction applied
+  to the live registry (5,943 rows got a real name, 101 genuinely unrecoverable ones marked
+  honestly). `classifyPrompt` also strengthened to catch this pattern on future imports.
+- **New: "Apply to selected" bulk workflow**, replacing one-mode-for-the-whole-batch as the primary
+  path. Scores every selected job (up to 10) against the active résumé and picks its own mode: fit
+  ≥ 75 as-is, 50–74 Quick Tailor, < 50 flagged weak. Weak-fit missing skills are checked against
+  confirmed memory first (`jobsAI.js`'s new `gapMemoryStatus`/`unresolvedGaps`) — only genuinely
+  unresolved gaps are asked about, once per gap across the whole batch (not once per job), on a
+  single plan-confirmation screen before anything runs. Answers persist to memory as `'skill'`
+  (confirmed-has) or a new `'gap-declined'` kind (confirmed-lacks), so the same question never comes
+  up again. New `BulkApplyFlow` component in `Jobs.jsx`; "Quick all"/"Deep all" kept as smaller
+  manual-override buttons for forcing one shared mode. Verified live end-to-end against a stubbed
+  dev server: correct per-job mode assignment, deduped gap questions, memory persisted correctly
+  (9→11 entries), and a second batch with identical gaps asked zero questions.
+- Investigated the reported duplicate-listing issue (SpaceX/Neros appearing twice) — could not
+  reproduce on two clean live re-runs, and direct DB inspection shows only one row per posting.
+  `dedupe()`'s composite key looks structurally sound; likely a misread of a long raw text dump
+  during the original test, not a persistent bug. No code change made.
+
+## Update 2026-07-11 — Two-person Jobs (Jordan + Alicia), Target Profiles, apply-link + tailoring correctness pass, apply-time fit gate
 
 Branch `feat/two-person-jobs` (5 commits). Companion extension work: Job-Assistant v1.13.35/36.
 
