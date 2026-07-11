@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Search, Loader2, FileText, FileCheck, Trash2, Star, StarOff, Upload, ExternalLink,
   Plus, Pencil, X, Bookmark, Zap, Wand2, Sparkles, Brain, CheckCircle2, XCircle, Send,
-  Folder, FolderOpen, ChevronRight, ChevronDown, Printer, Download,
+  Folder, FolderOpen, ChevronRight, ChevronDown, Printer, Download, Target,
 } from 'lucide-react'
 import { fileToStored } from './lib/resumeParse'
 import { parseDocument } from './lib/parseDocument'
 import {
   loadResumes, saveResumes, loadTracked, saveTracked, loadMemory, saveMemory, loadProfile,
-  activeResume, syncDown,
+  loadTarget, saveTarget, activeResume, syncDown,
 } from './lib/jobsStore'
 import {
   aiRank, lexicalRank, quickTailor, matchScore,
@@ -143,11 +143,15 @@ export default function Jobs() {
 
   useEffect(() => {
     let alive = true
+    // Prefill the search form from the saved Target Profile so the fields already show what you hunt
+    // for. Runs immediately from localStorage, then again if syncDown pulls a newer cloud copy.
+    prefillFromTarget(loadTarget())
     syncDown().then((d) => {
       if (!alive || !d) return
       if (Array.isArray(d.resumes)) setResumes(d.resumes)
       if (Array.isArray(d.tracked)) setTracked(d.tracked)
       if (Array.isArray(d.memory)) setMemory(d.memory)
+      if (d.target && (d.target.titles || d.target.industry)) { setTargetState(d.target); prefillFromTarget(d.target) }
     })
     waitForExtension().then((p) => { if (alive) { setHasExt(p); setExtVer(extensionVersion()) } })
     // Live fill-status from the extension while it auto-fills application tabs → tracker rows.
@@ -252,6 +256,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [sources, setSources] = useState(null)
   const [selected, setSelected] = useState({}) // id -> true
   const [prep, setPrep] = useState(null)        // { mode, jobs } when the prep modal is open
+  const [target, setTargetState] = useState(() => loadTarget()) // saved Target Profile
+  const [targetMsg, setTargetMsg] = useState('')
+  const hasTarget = !!(target && (target.titles || target.industry))
 
   useEffect(() => {
     fetch('/api/jobs', {
@@ -260,11 +267,38 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     }).then((r) => r.json()).then((d) => setCategories((d && d.categories) || [])).catch(() => setCategories([]))
   }, [country])
 
-  const resolveCategory = () => {
-    const ind = INDUSTRIES.find((i) => i.name === industry)
+  const resolveCategory = (indName = industry) => {
+    const ind = INDUSTRIES.find((i) => i.name === indName)
     if (!ind || !ind.match || !categories.length) return ''
     const hit = categories.find((c) => ind.match.test(c.label))
     return hit ? hit.tag : ''
+  }
+
+  // ── Target Profile: set your roles/industry/salary once, re-run in one click ──
+  const prefillFromTarget = (t) => {
+    if (!t || (!t.titles && !t.industry)) return
+    if (t.titles != null) setTitles(String(t.titles))
+    if (t.industry) setIndustry(t.industry)
+    if (t.salaryMin != null) setSalaryMin(String(t.salaryMin))
+    if (t.location != null) setLocation(String(t.location))
+    setRemote(!!t.remote)
+    setFullTime(t.fullTime !== false) // default full-time on for a saved target unless explicitly false
+    if (t.country) setCountry(t.country)
+  }
+  const saveTargets = () => {
+    const t = { titles: titles.trim(), industry, salaryMin: salaryMin.trim(), remote, fullTime, country, location: location.trim() }
+    saveTarget(t); setTargetState(t)
+    setTargetMsg('✓ Saved as your Target Profile'); setTimeout(() => setTargetMsg(''), 2500)
+  }
+  const runTargets = () => {
+    const t = loadTarget()
+    if (!t || (!t.titles && !t.industry)) return
+    prefillFromTarget(t)
+    doSearch({ params: {
+      titles: String(t.titles || '').trim(), industry: t.industry || industry,
+      where: String(t.location || '').trim(), salaryMin: String(t.salaryMin || '').trim(),
+      remote: !!t.remote, fullTime: t.fullTime !== false, country: t.country || country,
+    } })
   }
 
   const [page, setPage] = useState(1)
@@ -275,13 +309,25 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     setBusy(true)
     if (!append) { setResults([]); setSources(null); setSelected({}) }
     setStatus(append ? 'Loading more…' : 'Searching company boards + aggregators…')
+    // opts.params lets "Run my targets" search with the saved Target Profile values immediately,
+    // without waiting for the setState calls that also mirror them into the form to flush.
+    const P = opts.params || null
+    const q = {
+      titles: P ? P.titles : titles.trim(),
+      industry: P ? P.industry : industry,
+      where: P ? P.where : location.trim(),
+      salaryMin: P ? P.salaryMin : salaryMin.trim(),
+      remote: P ? !!P.remote : remote,
+      fullTime: P ? !!P.fullTime : fullTime,
+      country: P ? P.country : country,
+    }
     try {
       const resp = await fetch('/api/jobs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'search', titles: titles.trim(), industry, category: resolveCategory(),
-          where: location.trim(), salaryMin: salaryMin.trim(), remote, fullTime, country, resultsPerPage: 60,
-          page: pageN,
+          action: 'search', titles: q.titles, industry: q.industry, category: resolveCategory(q.industry),
+          where: q.where, salaryMin: q.salaryMin, remote: q.remote, fullTime: q.fullTime, country: q.country,
+          resultsPerPage: 60, page: pageN,
         }),
       })
       const d = await resp.json()
@@ -378,6 +424,28 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
 
   return (
     <div className="space-y-4">
+      {/* Target Profile: set your roles + industry + salary floor once, re-run in one click */}
+      <div className="rounded-xl border border-[var(--accent)]/40 bg-[var(--surface)] p-3 flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-semibold flex items-center gap-1.5"><Target size={15} className="text-[var(--accent)]" /> Target Profile</span>
+        {hasTarget ? (
+          <>
+            <span className="text-xs text-[var(--muted)] truncate max-w-full sm:max-w-[46ch]">
+              {[target.titles, target.industry, target.salaryMin ? `$${Number(target.salaryMin).toLocaleString()}+` : '', target.remote ? 'Remote' : ''].filter(Boolean).join('  ·  ')}
+            </span>
+            <button onClick={runTargets} disabled={busy}
+              className="ml-auto flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] font-semibold px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 hover:bg-[var(--accent-hover)]">
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />} Run my targets
+            </button>
+            <button onClick={saveTargets} className="text-xs text-[var(--muted)] hover:text-[var(--text)] underline whitespace-nowrap">Update from fields</button>
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-[var(--muted)]">Save your roles + industry + salary floor once, then re-run in one click.</span>
+            <button onClick={saveTargets} className="ml-auto text-sm bg-[var(--accent)] text-[var(--accent-text)] font-semibold px-3 py-1.5 rounded-lg hover:bg-[var(--accent-hover)] whitespace-nowrap">Save current as my targets</button>
+          </>
+        )}
+        {targetMsg && <span className="text-xs text-green-600 basis-full">{targetMsg}</span>}
+      </div>
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div className="sm:col-span-2">
           <label className={lbl}>Job titles (comma-separated)</label>
