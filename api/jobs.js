@@ -305,7 +305,7 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // they're still someone else's aggregator, not any single employer's own site, so they still
 // belong here for the final direct-vs-aggregator labeling. reed added to the same list for the
 // same reason.
-const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*|wellfound|angel|otta|theladders|flexjobs|remoteok|weworkremotely|remote|virtualvocations|powertofly|hired|vettery|ripplematch|idealist|themuse|efinancialcareers|mediabistro|clearancejobs|joinhandshake|higheredjobs|workatastartup|reed)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org|co)$/i
+const AGGREGATOR_HOST_RE = /(^|\.)(adzuna|indeed|glassdoor|ziprecruiter|simplyhired|monster|dice|talent|jooble|neuvoo|jobgether|lensa|whatjobs|appcast|jobrapido|jobcase|careerjet|careerbuilder|snagajob|jobisjob|joblist|getwork|resume-library|linkedin|careercircle|builtin[a-z]*|wellfound|angel|otta|theladders|flexjobs|remoteok|weworkremotely|remote|virtualvocations|powertofly|hired|vettery|ripplematch|idealist|themuse|efinancialcareers|mediabistro|clearancejobs|joinhandshake|higheredjobs|workatastartup|reed|himalayas)\.(com|net|co\.uk|ca|com\.au|de|fr|io|org|co|app|co\.in|co\.jp)$/i
 const PRIVATE_HOST_RE = /^(localhost$|\[?::1\]?$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.)/i
 function safeHost(u) { try { return new URL(u).hostname; } catch { return ''; } }
 function isAdzunaHost(h) { return /(^|\.)adzuna\.[a-z.]+$/i.test(h); }
@@ -344,9 +344,15 @@ function jsearchApplyLink(j) {
   const preferred = direct.find((o) => DIRECT_PUBLISHER_RE.test(o.publisher || '') || ATS_HOST_RE.test((linkOf(o) || '').replace(/^https?:\/\//, '')))
   if (preferred) return { url: linkOf(preferred), direct: true }
   if (direct[0]) return { url: linkOf(direct[0]), direct: true }
-  const primary = pick(j, ['job_apply_link', 'apply_link', 'job_google_link', 'url'])
+  // No job_google_link fallback: it's a google.com/search results page, not a posting — and since
+  // google isn't (and shouldn't be — careers.google.com is a real employer host) in
+  // AGGREGATOR_HOST_RE, the honest host recompute badged it "✓ direct apply". Same for the old
+  // last-resort opts[0] (an unvetted apply option of any aggregator). A row with no acceptable
+  // link gets url:'' and is dropped by the .filter((j) => j.url) below — better no result than an
+  // Apply that opens a search page.
+  const primary = pick(j, ['job_apply_link', 'apply_link'])
   if (primary) return { url: primary, direct: !!(j.job_apply_is_direct || j.apply_is_direct) }
-  return { url: opts[0] ? linkOf(opts[0]) : '', direct: false }
+  return { url: '', direct: false }
 }
 async function jsearchCall(path, params) {
   try {
@@ -1335,6 +1341,12 @@ export default async function handler(req, res) {
       ...boardResults, ...jsearchResults, ...himalayasResults, ...usajobsResults,
       ...bucket.adzuna, ...themuseResults, ...joobleResults, ...careerjetResults, ...reedResults,
     ])
+
+    // Honest host-based direct flag BEFORE ranking too — rank() used to read the sources'
+    // self-reported flags, so a mis-flagged row (e.g. a JSearch link to an aggregator) ranked on
+    // the wrong tier even though the final labeling pass would correct its badge. (The recompute
+    // runs again after the Adzuna resolve pass below, since resolution changes hosts.)
+    merged.forEach((j) => { j.direct = isEmployerHost(safeHost(j.url)) })
 
     // Order: direct links first (company boards / JSearch-direct / Himalayas), Adzuna last;
     // freshest first within each rank so the cap keeps recent postings, not one giant board's tail.

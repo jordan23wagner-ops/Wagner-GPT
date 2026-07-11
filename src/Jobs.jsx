@@ -428,6 +428,15 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const applyOne = (job) => {
     const tr = findTailored(resumes, job)
     const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
+    // Register with the extension BEFORE opening the tab: sendApply posts its message synchronously
+    // (only the ACK is awaited), so the extension gets a head start on the tab's first navigation —
+    // window.open used to fire first and the extension's URL registration routinely lost that race
+    // (the tab was already past onBeforeNavigate before the pending URL existed). The extension also
+    // adopts already-open matching tabs at registration time now, so late arrival is covered too.
+    // If the pop-up ends up blocked, the registered URL simply expires (10-min TTL) unused.
+    const ackPromise = (hasExt && job.url)
+      ? sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
+      : null
     // Open the tab from the web app (synchronous → not popup-blocked). No 'noopener' so window.open
     // returns a usable value — null means the browser blocked it (then we don't claim "applied").
     const win = job.url ? window.open(job.url, '_blank') : null
@@ -435,14 +444,14 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       setStatus(`Couldn’t open “${job.title}” — your browser blocked the pop-up. Use “View posting” to open it. (Not marked applied.)`)
       return
     }
-    if (hasExt) {
+    if (hasExt && ackPromise) {
       // Don't claim "applied" until we know Alicia actually got the request — sendApply's `ok` only
       // means the extension ACKed, but that's the earliest honest signal we have. Marking it
       // unconditionally here previously left false "✓ applied" rows (MEI, Anduril) when the
       // extension never even received the job.
       upsertTracked(job, { status: 'saved', resumeId: tr ? tr.id : undefined })
       setStatus(`Opened “${job.title}” — asking Alicia to auto-fill…`)
-      sendApply([{ url: job.url, title: job.title, company: job.company, resumeText }], { resumeName: tr ? tr.name : (activeResume && activeResume.name) })
+      ackPromise
         .then((ok) => {
           if (ok) upsertTracked(job, { status: 'applied' })
           setStatus(ok
