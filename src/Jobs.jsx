@@ -17,6 +17,7 @@ import {
 } from './lib/jobsAI'
 import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, onFillStatus } from './lib/aliciaBridge'
 import { isFortune500, layoffFlag } from './lib/companyData'
+import { ghostJobRisk } from './lib/ghostJob'
 
 // Industries mirror the backend's INDUSTRY_BOARDS keys (plus "Any"). `name` is sent to /api/jobs as
 // `industry` so the backend can pick company ATS boards; `match` maps onto an Adzuna category label.
@@ -410,10 +411,12 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       list = list.map((j, idx) => {
         const s = byI[idx] || {}
         const age = ageInfo(j.created)
+        const salInfo = salaryInfo(j)
         return {
           ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '',
           _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j),
-          _salInfo: salaryInfo(j), _age: age, _ts: age ? age.ts : 0, // precomputed once — cards used to re-regex every render
+          _salInfo: salInfo, _age: age, _ts: age ? age.ts : 0, // precomputed once — cards used to re-regex every render
+          _ghost: ghostJobRisk(j, age, salInfo),
         }
       })
       const merged = append ? [...results, ...list] : list
@@ -656,6 +659,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                     : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title={j.resolved ? "Resolved to the employer's own posting (skips Adzuna)" : "Apply opens the employer's own posting directly"}>✓ direct apply</span>}
                   {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
                   {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
+                  {j._ghost && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: j._ghost.level === 'high' ? '#7c2d12' : '#78350f', color: '#fed7aa' }} title={`Possible ghost listing — ${j._ghost.reasons.join('; ')}`}>👻 {j._ghost.level === 'high' ? 'likely ghost listing' : 'possible ghost listing'}</span>}
                   {j._age && <span className={`text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] ${j._age.stale ? 'text-orange-500' : 'text-[var(--muted)]'}`} title={`Posted ${j._age.text}${j._age.stale ? ' — may be stale' : ''}`}>🕒 {j._age.text}</span>}
                   {j.source && <span className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted)]">{j.source}</span>}
                   {atsReady && <span className="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}><Zap size={11} /> auto-fill ready</span>}
@@ -663,6 +667,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                   {applied && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#1565c0' }} title={`Already in your tracker: ${trackedRec.status}${trackedRec.savedAt ? ' · ' + fmtDate(trackedRec.savedAt) : ''}`}>✓ {trackedRec.status}</span>}
                 </div>
                 {j._layoff && <div className="text-[11px] text-orange-500 mb-1">⚠ {j.company} — recent layoffs: {j._layoff}</div>}
+                {j._ghost && <div className="text-[11px] text-orange-500 mb-1">👻 {j._ghost.reasons.join(' · ')}</div>}
                 {j._reason && <div className="text-xs italic text-[var(--muted)] mb-1">{j._reason}</div>}
                 {j.description && <div className="text-[13px] text-[var(--muted)] line-clamp-2">{j.description.slice(0, 240)}…</div>}
                 <div className="flex gap-2 mt-2 flex-wrap">

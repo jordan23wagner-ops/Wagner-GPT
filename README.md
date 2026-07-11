@@ -214,7 +214,12 @@ Three sub-tabs:
   Results are merged, deduped (direct link wins over the same job's Adzuna link), filtered by
   title/location/remote, and **ranked by résumé fit** with **Fortune 500 first** and **direct-apply
   before via-Adzuna**. Cards show **✓ direct apply** / **via Adzuna**, **★ Fortune 500**, and
-  **⚠ recent layoffs** badges.
+  **⚠ recent layoffs** badges, plus a **👻 possible/likely ghost listing** badge (`src/lib/ghostJob.js`)
+  from cheap, source-agnostic heuristics — stale posting age, a generic "always hiring"/"talent pool"
+  title, urgency language ("apply now", "immediate hire"), no salary disclosed, or a thin description.
+  Advisory only (never hides a job), with the specific reasons in the badge's tooltip and inline below
+  the card — the goal is catching this before a Quick/Deep Tailor pass gets spent on a dead listing,
+  not filtering results out from under you.
   - **Extend coverage** by adding `{ ats, slug, name }` rows to `INDUSTRY_BOARDS` — no other change.
 - **Résumés** — upload PDF/DOCX/TXT (parsed locally by `src/lib/resumeParse.js`, zero deps) or paste
   text; keep a bank of résumés and mark one **active** (that's what fit-ranking uses).
