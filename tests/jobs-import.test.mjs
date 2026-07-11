@@ -4,12 +4,17 @@
 // import is required — GROQ_KEY is a module-level const in jobs-import.js, evaluated once at import
 // time, so env vars must be set BEFORE the import, not after).
 process.env.GROQ_KEY = 'test-groq-key'
+// Cerebras set too so the multi-provider fallback is exercised: it's the FIRST provider in
+// CLASSIFY_PROVIDERS, and the mock below always rate-limits it, so every classify must fall through
+// to Groq's separate quota to succeed -- exactly the behavior that fixes the single-provider stall.
+process.env.CEREBRAS_KEY = 'test-cerebras-key'
 
 const { default: handler } = await import('../api/jobs-import.js')
 
 const upsertedBatches = [] // capture every POST body sent to ats_board_registry, across all calls
 let classifyTestPhase = 'default' // 'poison'/'ratelimit' switch the registry-GET/Groq mocks for the tests below
 let rateLimitCallCount = 0
+let cerebrasCallCount = 0 // proves the primary provider is actually attempted before falling through
 const groqCallBodies = [] // every Groq request body sent during the 'ratelimit' phase, to prove no bisection occurred
 
 globalThis.fetch = async (url, opts) => {
@@ -97,6 +102,14 @@ globalThis.fetch = async (url, opts) => {
       { id: 'greenhouse:realcompany-inc', ats: 'greenhouse', company_name: 'Realcompany Inc', sample_titles: 'Software Engineer, Staff Engineer' },
       { id: 'lever:activecompany', ats: 'lever', company_name: 'Activecompany', sample_titles: 'Product Manager' },
     ])
+  }
+
+  // Cerebras is the primary classify provider. It always rate-limits here, so every classify must
+  // fall through to Groq's separate quota -- exercising the multi-provider fallback on every classify
+  // test below (default/poison/ratelimit all still pass because Groq answers after the fallthrough).
+  if (u.includes('api.cerebras.ai')) {
+    cerebrasCallCount++
+    return { ok: false, status: 429, json: async () => ({}), text: async () => JSON.stringify({ error: { message: 'Rate limit reached (tokens per day)', code: 'rate_limit_exceeded' } }) }
   }
 
   if (u.includes('api.groq.com') && classifyTestPhase === 'poison') {
@@ -199,10 +212,14 @@ async function run() {
   assert(upsertedBatches.length === 3, 'limit:2 over 5 usable candidates takes exactly 3 internal sub-batch rounds (2+2+1), each upserting separately, got ' + upsertedBatches.length)
 
   // ── action:'classify' ──
+  cerebrasCallCount = 0
   const res3 = mockRes()
   await handler({ method: 'POST', headers: {}, body: { action: 'classify', limit: 30 } }, res3)
   assert(res3.statusCode === 200, 'classify status 200, got ' + res3.statusCode)
-  assert(res3.body.classified === 2, 'both unclassified rows get an industry assigned from the batched Groq call, got ' + res3.body.classified)
+  assert(res3.body.classified === 2, 'both unclassified rows get an industry assigned, got ' + res3.body.classified)
+  // Multi-provider fallback: Cerebras (primary) rate-limited every time, so this only succeeds if the
+  // classifier fell through to Groq's separate quota -- the exact fix for the single-provider stall.
+  assert(cerebrasCallCount > 0, 'the primary provider (Cerebras) was actually attempted before falling through, got cerebrasCallCount=' + cerebrasCallCount)
   assert(res3.body.upserted === true, 'classify upsert actually SUCCEEDS (upserted:true) -- confirmed live it was silently 400ing because the payload omitted the NOT NULL `ats` column, so classified:N was reported while 0 rows ever persisted')
   const classifyBatch = upsertedBatches.find((b) => b.some((r) => r.status === 'classified'))
   assert(!!classifyBatch, 'classify step upserts rows with status:"classified"')

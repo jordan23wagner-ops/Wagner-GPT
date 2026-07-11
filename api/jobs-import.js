@@ -36,7 +36,25 @@ export const config = { maxDuration: 60 }
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mfzzcrsgslkpvzvtveao.supabase.co'
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_7-pjVrDnXLzAAjxXawBpWw_mCVTSR-Z'
 const GROQ_KEY = process.env.GROQ_KEY || process.env.Groq || process.env.GROQ
+const CEREBRAS_KEY = process.env.CEREBRAS_KEY
+const NVIDIA_NIM_KEY = process.env.NVIDIA_NIM_KEY
 const INDUSTRIES = Object.keys(INDUSTRY_BOARDS)
+
+// Classify fans across every free LLM provider the app already has a key for -- each has its OWN
+// separate free daily-token quota, so falling through them multiplies effective free capacity ~3x
+// instead of hammering one pool to exhaustion (confirmed live: Groq alone hit its daily cap and
+// stalled the whole run for a day). Same providers + OpenAI-compatible /chat/completions shape the
+// chat feature already uses (see api/chat.js's textFallbacks). Cerebras is primary because its
+// gpt-oss-120b is an exact match for what classify was already using and its own quota is untouched
+// by this run; groq second (same model, its own pool); NIM last (llama-3.3-70b, a different but
+// capable model, on yet another pool). Order matters only for which pool drains first -- any that
+// still has budget will answer. Providers with no key are skipped automatically.
+const CLASSIFY_PROVIDERS = [
+  { name: 'cerebras', key: CEREBRAS_KEY, model: 'gpt-oss-120b', url: 'https://api.cerebras.ai/v1/chat/completions' },
+  { name: 'groq', key: GROQ_KEY, model: 'openai/gpt-oss-120b', url: 'https://api.groq.com/openai/v1/chat/completions' },
+  { name: 'nim', key: NVIDIA_NIM_KEY, model: 'meta/llama-3.3-70b-instruct', url: 'https://integrate.api.nvidia.com/v1/chat/completions' },
+]
+const HAVE_ANY_CLASSIFY_PROVIDER = CLASSIFY_PROVIDERS.some((p) => !!p.key)
 
 const DATASET_BASE = 'https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data'
 const DATASET_FILES = [
@@ -216,57 +234,43 @@ function sanitizeForPrompt(s, maxLen) {
   return String(s || '').replace(/["\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLen)
 }
 
-// TEMPORARY diagnostic logging (see the classify:0 investigation) -- callGroqClassify previously
-// swallowed every failure into a bare `null` with no way to tell a network error, a Groq error
-// response (rate limit, auth, quota), and an unparseable-but-200 response apart from the console.
-// Remove once the root cause of the classified:0 streak is confirmed and fixed.
-async function callGroqClassify(rows) {
+function classifyPrompt(rows) {
   const listing = rows.map((r, i) => `${i}. "${sanitizeForPrompt(r.company_name, 60)}" (${sanitizeForPrompt(r.sample_titles, 50)})`).join('\n')
   // Trimmed from a more verbose version after confirmed-live evidence the classify phase would take
-  // ~5-9 days on Groq's free 100K-tokens/day quota -- every token here is paid ~450 times (once per
-  // batch of ~30 companies, across ~450 batches for the current backlog), so shaving the fixed
-  // instruction cost compounds.
-  const prompt =
-    `Industries: ${INDUSTRIES.join('|')}\n` +
+  // ~5-9 days on a single provider's free daily-token quota -- every token here is paid once per
+  // batch across ~hundreds of batches for the backlog, so shaving the fixed instruction cost compounds.
+  return `Industries: ${INDUSTRIES.join('|')}\n` +
     'For each numbered company: pick exactly one industry from the list. Clean up the name if it looks ' +
     'like a raw url slug (e.g. "baker-hughes-inc" -> "Baker Hughes"), else keep it as-is. If unsure, use ' +
     '"Software / IT". Reply with ONLY a JSON array, same order, one item per line: ' +
     '{"industry":"...","company_name":"..."}\n\n' + listing
+}
+
+// One provider attempt. Returns a typed result so the caller can react per-failure-mode (rate_limit
+// -> try a different provider's separate quota; parse_error -> bisect; error -> try next provider).
+// TEMPORARY [classify] diagnostic logging stays until a live run confirms the multi-provider path
+// drains cleanly. All three providers are OpenAI-compatible /chat/completions (same request shape).
+async function callProviderClassify(provider, prompt, rowCount) {
   let r
   try {
-    r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    r = await fetch(provider.url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${provider.key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        // Switched from llama-3.3-70b-versatile after confirmed live: Groq's free tier caps that
-        // model at 100K tokens/day, and it's the SAME model/quota pool fetchCustomCareerPageViaAi
-        // (in jobs.js) uses for live search -- classify was starving live search of its own daily
-        // budget. gpt-oss-120b gets 200K tokens/day on a SEPARATE pool, and is already a proven Groq
-        // model id in this codebase (api/chat.js's 'gptoss' route), not a guess. Unverified: its exact
-        // JSON-formatting style for this task, since it's never been used here for structured
-        // array-extraction before (only open-ended chat) -- if the [classify] diagnostic logs show a
-        // formatting mismatch (e.g. markdown-fenced output) rather than a clean JSON array, that's the
-        // first thing to adjust, not the token/quota math above.
-        model: 'openai/gpt-oss-120b',
+        model: provider.model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1, max_tokens: 4000, stream: false,
       }),
       signal: AbortSignal.timeout(25000),
     })
   } catch (e) {
-    console.log('[classify] groq fetch threw', rows.length, 'rows', (e && e.message) || e)
+    console.log('[classify]', provider.name, 'fetch threw', rowCount, 'rows', (e && e.message) || e)
     return { ok: false, reason: 'error' }
   }
   if (!r.ok) {
     const errText = await r.text().catch(() => '')
-    // Confirmed live: gpt-oss-120b's free tier hits a per-MINUTE token limit (TPM), not the old
-    // per-day one -- it resets in ~20-30s, not an hour. Distinguishing this from other failures
-    // matters because the right response is completely different (see classifyBatch below): a
-    // short wait + retry the SAME batch, not bisect it into smaller pieces. Bisecting a rate-limited
-    // batch just means MORE separate requests competing for the same limited per-minute budget,
-    // which can make the rate limit worse, not better.
-    const isRateLimit = r.status === 429 || /rate.?limit/i.test(errText)
-    console.log('[classify] groq non-ok', r.status, rows.length, 'rows', isRateLimit ? '(rate limit)' : '', errText.slice(0, 500))
+    const isRateLimit = r.status === 429 || /rate.?limit|quota/i.test(errText)
+    console.log('[classify]', provider.name, 'non-ok', r.status, rowCount, 'rows', isRateLimit ? '(rate limit)' : '', errText.slice(0, 300))
     return { ok: false, reason: isRateLimit ? 'rate_limit' : 'error' }
   }
   const data = await r.json().catch(() => null)
@@ -275,46 +279,62 @@ async function callGroqClassify(rows) {
   try {
     const match = content.match(/\[[\s\S]*\]/)
     if (!match) {
-      console.log('[classify] no json array in response', rows.length, 'rows finish_reason=' + finishReason, 'content:', content.slice(0, 300))
+      console.log('[classify]', provider.name, 'no json array', rowCount, 'rows finish_reason=' + finishReason, 'content:', content.slice(0, 300))
       return { ok: false, reason: 'parse_error' }
     }
     const parsed = JSON.parse(match[0])
     if (!Array.isArray(parsed)) {
-      console.log('[classify] parsed but not an array', rows.length, 'rows', typeof parsed)
+      console.log('[classify]', provider.name, 'not an array', rowCount, 'rows', typeof parsed)
       return { ok: false, reason: 'parse_error' }
     }
     return { ok: true, parsed }
   } catch (e) {
-    console.log('[classify] JSON.parse threw', rows.length, 'rows finish_reason=' + finishReason, 'error:', (e && e.message) || e, 'content:', content.slice(0, 300))
+    console.log('[classify]', provider.name, 'JSON.parse threw', rowCount, 'rows finish_reason=' + finishReason, 'error:', (e && e.message) || e, 'content:', content.slice(0, 300))
     return { ok: false, reason: 'parse_error' }
   }
 }
 
+// Try each configured provider in order until one answers. A rate_limit/error on one falls straight
+// through to the next -- they're SEPARATE quota pools, so a different provider is far more likely to
+// succeed right now than waiting on the same one. A parse_error returns immediately (don't waste other
+// providers on the same poisoned batch -- let classifyBatch bisect it). Only if EVERY provider is
+// rate-limited does this return rate_limit (then classifyBatch's backoff gives one more full sweep).
+async function callLLMClassify(rows) {
+  const prompt = classifyPrompt(rows)
+  let sawRateLimit = false
+  for (const provider of CLASSIFY_PROVIDERS) {
+    if (!provider.key) continue
+    const result = await callProviderClassify(provider, prompt, rows.length)
+    if (result.ok) return result
+    if (result.reason === 'parse_error') return result
+    if (result.reason === 'rate_limit') sawRateLimit = true
+    // rate_limit or error -> fall through to the next provider's separate quota
+  }
+  return { ok: false, reason: sawRateLimit ? 'rate_limit' : 'error' }
+}
+
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
-// One batched Groq call classifies + cleans up names for many rows at once (cheap: this is a coarse
-// "which of 11 buckets" categorization, not the extraction-quality-critical work fetchCustomCareerPage
-// does). Positional: classified[i] corresponds to rows[i]. If the model drops/reorders items (returns
-// a shorter array, or something unparseable), the mismatched rows just come back with industry:null
-// here, get filtered out below, and stay 'validated' -- eligible for a later classify batch rather
-// than being incorrectly tagged. A wrong-industry classification is a minor quality issue (unlike a
-// fabricated job posting), so this doesn't need the same hardened defenses as fetchCustomCareerPage.
+// Classifies + cleans up names for a batch at once (cheap: this is a coarse "which of 11 buckets"
+// categorization, not the extraction-quality-critical work fetchCustomCareerPage does). Positional:
+// classified[i] corresponds to rows[i]. A row the model drops/mis-formats comes back industry:null,
+// gets filtered out below, and stays 'validated' -- eligible for a later batch rather than being
+// mistagged. A wrong-industry classification is a minor quality issue (unlike a fabricated job
+// posting), so this doesn't need fetchCustomCareerPage's hardened defenses.
 //
-// Two different failure modes get two different responses:
-//   - rate_limit: short fixed backoff, then retry the SAME batch size once. Confirmed live this is a
-//     fast-resetting per-minute limit, not the old per-day one -- bisecting here would just add MORE
-//     requests competing for the same limited per-minute budget. If the retry also fails, give up for
-//     this call (leave 'validated' for a future one) rather than looping indefinitely on one batch.
+// callLLMClassify already fans across every provider's separate quota, so a rate_limit here means
+// ALL of them are momentarily rate-limited. Two failure modes, two responses:
+//   - rate_limit (every provider): one short backoff + one more full sweep across all providers. If
+//     that also fails, give up for this call (leave 'validated' for a future one) rather than looping.
 //   - parse_error/error: bisect. Confirmed live that a single row's messy data can poison an entire
-//     batch's JSON output, silently discarding every other classification in it. Splitting isolates
-//     whichever row(s) are actually the problem to their own single-row batch instead of discarding
-//     everything.
+//     batch's JSON output, discarding every other classification in it. Splitting isolates the bad
+//     row(s) to their own single-row batch instead of discarding everything.
 async function classifyBatch(rows) {
-  if (!rows.length || !GROQ_KEY) return []
-  let result = await callGroqClassify(rows)
+  if (!rows.length || !HAVE_ANY_CLASSIFY_PROVIDER) return []
+  let result = await callLLMClassify(rows)
   if (!result.ok && result.reason === 'rate_limit') {
     await sleep(2500)
-    result = await callGroqClassify(rows)
+    result = await callLLMClassify(rows)
   }
   if (!result.ok) {
     if (result.reason === 'rate_limit' || rows.length === 1) return [] // still rate-limited after one retry, or isolated down to one row and it STILL fails -- leave 'validated' for a later attempt
