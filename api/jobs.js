@@ -4,7 +4,8 @@
 // from several sources and returns ONE unified result shape so callers stay source-agnostic:
 //   1. Adzuna              — broad aggregator (needs ADZUNA_APP_ID / ADZUNA_APP_KEY).
 //   2. Company ATS boards  — public JSON from Greenhouse / Lever / Ashby / Workable / SmartRecruiters
-//                            / Recruitee / Workday career pages, selected per industry from
+//                            / Recruitee / Workday career pages (plus iCIMS / Taleo via HTML
+//                            parsing — those two have no public JSON), selected per industry from
 //                            INDUSTRY_BOARDS (this is the "jobs from company sites in your industry"
 //                            ask — these ARE the companies' own career sites, just via their public
 //                            JSON endpoints). Workday in particular is how most large enterprises
@@ -693,6 +694,101 @@ async function fetchRecruitee({ slug, name }) {
   })).filter((j) => j.url)
 }
 
+// iCIMS career sites are HTML only, no public JSON — the visible careers page embeds an iframe
+// with the actual listings; hitting that iframe URL directly skips the wrapper. Each posting is a
+// `<li class="iCIMS_JobCardItem">` block; live-verified against careers-peraton.icims.com. One page
+// (25 jobs) is enough for search-result purposes, matching every other fetcher's single-call shape.
+async function fetchIcims({ slug, name }) {
+  if (!slug) return []
+  const isUrl = /^https?:\/\//i.test(slug)
+  const base = isUrl ? String(slug).replace(/\/$/, '') : `https://careers-${encodeURIComponent(slug)}.icims.com`
+  let html = ''
+  try {
+    const r = await fetch(`${base}/jobs/search?ss=1&pr=0&in_iframe=1`, {
+      headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000),
+    })
+    html = r.ok ? await r.text() : ''
+  } catch { html = '' }
+  if (!html) return []
+  const cardRe = /<li[^>]+class="[^"]*iCIMS_JobCardItem[^"]*"[^>]*>([\s\S]*?)<\/li>/gi
+  const anchorRe = /<a[^>]+href="(https?:\/\/[^"]*?\/jobs\/(\d+)\/[^"]*?\/job[^"]*)"[^>]*class="[^"]*iCIMS_Anchor[^"]*"[^>]*>/i
+  const h3Re = /<h3[^>]*>([\s\S]*?)<\/h3>/i
+  const locationRe = /Job Locations\s*<\/span>\s*<span[^>]*>\s*([^<]*?)\s*<\/span>/i
+  const dateRe = /<span[^>]+title="(\d{1,2}\/\d{1,2}\/\d{4}[^"]*)"/i
+  const companyName = name || (isUrl ? '' : slugName(slug)) || 'Unknown employer'
+  const out = []
+  let m
+  while ((m = cardRe.exec(html))) {
+    const body = m[1]
+    const a = anchorRe.exec(body)
+    if (!a) continue
+    const h3 = h3Re.exec(body)
+    const title = h3 ? cleanText(h3[1]) : ''
+    if (!title) continue
+    const locM = locationRe.exec(body)
+    const dateM = dateRe.exec(body)
+    out.push({
+      id: 'ic_' + (isUrl ? base : slug) + '_' + a[2],
+      title,
+      company: companyName,
+      location: locM ? cleanText(locM[1]) : '',
+      salaryMin: null, salaryMax: null, salaryPredicted: false,
+      url: a[1],
+      category: '', categoryTag: '',
+      contractTime: '',
+      description: '',
+      created: dateM ? dateM[1] : '',
+      source: 'icims',
+    })
+  }
+  return out
+}
+
+// Oracle Taleo Business Edition (TBE) — the legacy account-gated ATS autofill.js already has an
+// accountGateAdapter for. There's no universal slug lookup (regional shard + per-tenant instance +
+// cws ID all vary), so the candidate IS the full search-results URL, not a bare slug — matches the
+// ats_board_registry `slug` column already storing whatever this ATS's fetcher expects as input.
+// Live-verified against phe.tbe.taleo.net (Agios Pharmaceuticals).
+async function fetchTaleo({ slug, name }) {
+  const url = String(slug || '')
+  if (!/tbe\.taleo\.net/i.test(url)) return []
+  let html = ''
+  try {
+    const r = await fetch(url, {
+      headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000),
+    })
+    html = r.ok ? await r.text() : ''
+  } catch { html = '' }
+  if (!html) return []
+  const linkRe = /<a[^>]+href="([^"]*viewRequisition[^"]*\brid=(\d+)[^"]*)"[^>]*class="(?:[^"]*\s)?viewJobLink(?:\s[^"]*)?"[^>]*>([\s\S]*?)<\/a>/gi
+  let origin = ''
+  try { origin = new URL(url).origin } catch { origin = '' }
+  const companyName = name || 'Unknown employer (Taleo)'
+  const out = []
+  let m
+  while ((m = linkRe.exec(html))) {
+    const href = m[1], rid = m[2], title = cleanText(m[3])
+    if (!title) continue
+    const absUrl = (/^https?:\/\//i.test(href) ? href : (origin + (href.startsWith('/') ? '' : '/') + href)).replace(/&amp;/g, '&')
+    out.push({
+      id: 'ta_' + rid + '_' + url,
+      title,
+      company: companyName,
+      location: '',
+      salaryMin: null, salaryMax: null, salaryPredicted: false,
+      url: absUrl,
+      category: '', categoryTag: '',
+      contractTime: '',
+      description: '',
+      created: '',
+      source: 'taleo',
+    })
+  }
+  return out
+}
+
 // Workday's CXS API — the job-board backend for the vast majority of large enterprises (the
 // "Sony-sized companies" case Greenhouse/Lever/Ashby don't reach, since those skew tech-startup).
 // The request/response shape is IDENTICAL across every Workday tenant; the only per-company unknowns
@@ -728,7 +824,7 @@ async function fetchWorkday({ tenant, dataCenter, site, name }) {
   })).filter((j) => j.url)
 }
 
-export const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, workday: fetchWorkday }
+export const ATS_FETCHERS = { greenhouse: fetchGreenhouse, lever: fetchLever, ashby: fetchAshby, workable: fetchWorkable, smartrecruiters: fetchSmartRecruiters, recruitee: fetchRecruitee, icims: fetchIcims, taleo: fetchTaleo, workday: fetchWorkday }
 
 export async function fetchBoards(boards) {
   const settled = await Promise.allSettled(boards.map((b) => {

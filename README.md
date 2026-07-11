@@ -144,15 +144,21 @@ Three sub-tabs:
     Run `supabase-job-crawl-schema.sql` to enable it — without it, the Jobs tab works exactly as
     before (falls back to live-fetching), just without the speed-up. See the env var table below.
   - **Bulk board import** (optional): grows `INDUSTRY_BOARDS`' ~83 hand-curated companies into
-    thousands, without hand-editing code for every new company. `api/jobs-import.js` pulls a public
-    dataset of Greenhouse/Lever/Ashby/Workday company slugs from
-    [Feashliaa/job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) (~28,700 raw
-    candidates, Common-Crawl-derived — licensed
+    thousands, without hand-editing code for every new company. `api/jobs-import.js` pulls candidate
+    company lists from two public datasets:
+    [Feashliaa/job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) — Greenhouse/
+    Lever/Ashby/Workday slugs (~28,700 raw candidates, Common-Crawl-derived — licensed
     [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/), attribution given here;
-    non-commercial use only, which Wagner-GPT as a personal tool satisfies), live-validates each one
-    (via the same `fetchGreenhouse`/`fetchLever`/`fetchAshby`/`fetchWorkday` functions used for real
-    search — most raw candidates turn out dead or junk, which validation filters out), and classifies
-    survivors into an industry with one batched LLM call per ~50 companies. Classify fans across every
+    non-commercial use only, which Wagner-GPT as a personal tool satisfies), and
+    [kalil0321/ats-scrapers](https://github.com/kalil0321/ats-scrapers) (aka "jobhive") — Workable/
+    SmartRecruiters/Recruitee/iCIMS/Taleo name+slug CSVs (~8,900 raw candidates, MIT licensed). The
+    second dataset closes a gap the first one didn't: `autofill.js` has always been able to fill out
+    applications on those five platforms, but nothing ever discovered postings on them until this
+    source was added. Every candidate, from either dataset, is live-validated (via the same
+    `fetchGreenhouse`/`fetchLever`/`fetchAshby`/`fetchWorkday`/`fetchWorkable`/`fetchSmartRecruiters`/
+    `fetchRecruitee`/`fetchIcims`/`fetchTaleo` functions used for real search — most raw candidates
+    turn out dead or junk, which validation filters out), and classifies survivors into an industry
+    with one batched LLM call per ~50 companies. Classify fans across every
     free LLM provider the app has a key for (**Cerebras → Groq → NIM**, the same OpenAI-compatible
     providers the chat feature uses) — each has its own separate free daily-token quota, so a
     rate-limit on one falls straight through to the next, multiplying effective free capacity ~3x.

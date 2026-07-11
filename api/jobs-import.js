@@ -4,13 +4,20 @@
 // one-time-ish growth path that discovers NEW boards from a public dataset, validates each one live,
 // and classifies survivors into the app's industries -- see supabase-ats-board-registry-schema.sql.
 //
-// Source dataset: Feashliaa/job-board-aggregator (github.com/Feashliaa/job-board-aggregator),
-// data/*_companies.json -- Common-Crawl-derived slug lists for Greenhouse/Lever/Ashby/Workday,
-// ~28,700 raw candidates combined. Licensed CC BY-NC 4.0 (attribution required; non-commercial use
-// only -- fine for Wagner-GPT, a personal non-commercial tool). Most raw candidates will turn out
-// dead (a Common Crawl snapshot isn't a liveness check) or junk (numeric/test slugs) -- that's
-// exactly what live validation below is for; nothing reaches ats_board_registry as "validated"
-// without a real, current job count from the real ATS API.
+// Two source datasets, merged into one candidate list:
+//   Feashliaa/job-board-aggregator (github.com/Feashliaa/job-board-aggregator), data/*_companies.json
+//   -- Common-Crawl-derived slug lists for Greenhouse/Lever/Ashby/Workday, ~28,700 raw candidates.
+//   Licensed CC BY-NC 4.0 (attribution required; non-commercial use only -- fine for Wagner-GPT, a
+//   personal non-commercial tool).
+//   kalil0321/ats-scrapers (github.com/kalil0321/ats-scrapers, aka "jobhive"), ats-companies/*.csv
+//   -- company name/slug/url lists for Workable, SmartRecruiters, Recruitee, iCIMS, and Taleo, the
+//   five ATS platforms autofill.js already knows how to fill but this app had zero discovery source
+//   for. MIT licensed. Unlike Feashliaa's slug-only lists, these CSVs carry a real company name per
+//   row (see `seedName` below), so classify's LLM guess-the-real-name pass isn't the only source of
+//   truth for these five.
+// Most raw candidates will turn out dead (neither dataset is a liveness check) or junk (numeric/test
+// slugs) -- that's exactly what live validation below is for; nothing reaches ats_board_registry as
+// "validated" without a real, current job count from the real ATS API.
 //
 // Two actions, both resumable AND internally looping across many sub-batches per call (bounded by an
 // overall wall-clock deadline, not a fixed sub-batch count) -- ~28,700 candidates at ~100/sub-batch
@@ -64,6 +71,19 @@ const DATASET_FILES = [
   { ats: 'workday', file: 'workday_companies.json' },
 ]
 
+// kalil0321/ats-scrapers ships one CSV per ATS under ats-companies/, header `name,slug,url`. Taleo is
+// the one exception: it has no reusable slug (regional shard + per-tenant instance + cws ID all vary
+// with no lookup), so its "slug" column IS the full search-results URL -- fetchTaleo in api/jobs.js
+// expects exactly that.
+const CSV_DATASET_BASE = 'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies'
+const CSV_DATASET_FILES = [
+  { ats: 'workable', file: 'workable.csv' },
+  { ats: 'smartrecruiters', file: 'smartrecruiters.csv' },
+  { ats: 'recruitee', file: 'recruitee.csv' },
+  { ats: 'icims', file: 'icims.csv' },
+  { ats: 'taleo', file: 'taleo.csv' },
+]
+
 async function fetchJsonUrl(url, ms = 10000) {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(ms) })
@@ -72,10 +92,58 @@ async function fetchJsonUrl(url, ms = 10000) {
   } catch { return null }
 }
 
-// Fixed order (greenhouse, lever, ashby, workday) so an {offset,limit} slice addresses the same
-// candidates across calls within one import run -- the raw dataset files don't change mid-run.
+// Minimal quoted-field CSV line parser -- these datasets are name/slug/url only, never containing an
+// embedded newline inside a field, so a per-line parse (not a full multi-line CSV state machine) is
+// enough. Handles quoted fields with embedded commas (e.g. `"48Forty Solutions, LLC",48forty,...`).
+function parseCsvLine(line) {
+  const out = []
+  let cur = '', inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQuotes) {
+      if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = false } }
+      else cur += c
+    } else if (c === '"') inQuotes = true
+    else if (c === ',') { out.push(cur); cur = '' }
+    else cur += c
+  }
+  out.push(cur)
+  return out
+}
+
+async function fetchCsvUrl(url, ms = 12000) {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(ms) })
+    if (!r.ok) return []
+    const text = await r.text()
+    const lines = text.split(/\r?\n/).filter(Boolean)
+    lines.shift() // header: name,slug,url
+    return lines.map(parseCsvLine)
+  } catch { return [] }
+}
+
+async function loadCsvCandidates() {
+  const lists = await Promise.all(CSV_DATASET_FILES.map((d) => fetchCsvUrl(`${CSV_DATASET_BASE}/${d.file}`)))
+  const out = []
+  CSV_DATASET_FILES.forEach((d, i) => {
+    for (const row of lists[i]) {
+      const slug = String(row[1] || '').trim()
+      if (!slug) continue
+      const seedName = String(row[0] || '').trim()
+      out.push({ ats: d.ats, slug, id: `${d.ats}:${slug}`, seedName })
+    }
+  })
+  return out
+}
+
+// Fixed order (greenhouse, lever, ashby, workday, then the CSV platforms) so an {offset,limit} slice
+// addresses the same candidates across calls within one import run -- the source files don't change
+// mid-run.
 async function loadCandidates() {
-  const lists = await Promise.all(DATASET_FILES.map((d) => fetchJsonUrl(`${DATASET_BASE}/${d.file}`)))
+  const [lists, csvCandidates] = await Promise.all([
+    Promise.all(DATASET_FILES.map((d) => fetchJsonUrl(`${DATASET_BASE}/${d.file}`))),
+    loadCsvCandidates(),
+  ])
   const out = []
   DATASET_FILES.forEach((d, i) => {
     const arr = Array.isArray(lists[i]) ? lists[i] : []
@@ -93,6 +161,7 @@ async function loadCandidates() {
       }
     }
   })
+  out.push(...csvCandidates)
   return out
 }
 
@@ -162,7 +231,11 @@ function toRegistryRow(v) {
   // A meaningful fraction of the bulk-imported Workday candidates have `tenant` corrupted to a bare
   // data-center code ("wd1", "wd5", ...) — see workdayFallbackName's own comment. null means neither
   // tenant nor site carry a recoverable name; 'Unknown employer (Workday)' is honest, not a guess.
-  const fallbackName = v.ats === 'workday' ? (workdayFallbackName(v.tenant, v.site) || 'Unknown employer (Workday)') : slugName(v.slug)
+  // The CSV-sourced platforms (workable/smartrecruiters/recruitee/icims/taleo) carry a real company
+  // name per row (`seedName`) — prefer it over deriving one from `slug`, which for Taleo is a full
+  // URL, not a name-shaped string at all.
+  const fallbackName = v.ats === 'workday' ? (workdayFallbackName(v.tenant, v.site) || 'Unknown employer (Workday)')
+    : v.seedName || (v.ats === 'taleo' ? 'Unknown employer (Taleo)' : slugName(v.slug))
   const sampleTitles = jobs.slice(0, 3).map((j) => j.title).filter(Boolean).join(', ')
   const base = v.ats === 'workday'
     ? { id: v.id, ats: 'workday', slug: null, tenant: v.tenant, data_center: v.dataCenter, site: v.site }

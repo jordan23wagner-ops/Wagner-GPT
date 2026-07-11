@@ -4,7 +4,35 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-11 (latest, second pass) — bulk-apply workflow (up to 10, per-job auto tailor decision + gap memory), driven by fixes from a live 10-job apply test
+## Update 2026-07-11 (latest, third pass) — five new ATS platforms discoverable (Workable, SmartRecruiters, Recruitee, iCIMS, Taleo)
+
+A gap audit (research across job-data APIs, open-source ATS repos, and the agentic auto-apply
+landscape — see the artifact from that conversation for the full writeup) found that `autofill.js`
+already had working fill logic for Workable, SmartRecruiters, Recruitee, iCIMS, and Taleo, but
+`ats_board_registry` had **zero companies** on any of them — the fetchers existed, nothing ever fed
+them a company to try. Fixed:
+
+- **New source dataset**: [kalil0321/ats-scrapers](https://github.com/kalil0321/ats-scrapers) (aka
+  "jobhive", MIT licensed) ships a name/slug/url CSV per ATS platform. `api/jobs-import.js` now loads
+  it alongside the existing Feashliaa JSON dataset — see its updated header comment for the split.
+- **New fetchers**: `fetchIcims` and `fetchTaleo` in `api/jobs.js`, added to `ATS_FETCHERS`. Neither
+  platform has a public JSON API (both are HTML-only), so both parse the listing page's markup
+  directly — iCIMS's `<li class="iCIMS_JobCardItem">` cards, Taleo's `viewJobLink` anchors. No
+  per-job detail-page fetch (matches every other fetcher's single-call-per-company shape). Live-
+  verified pre-merge against `careers-peraton.icims.com` and `phe.tbe.taleo.net` (Agios
+  Pharmaceuticals) — both returned real, current (7/10/2026) postings.
+- **Live-validated all 8,879 CSV candidates** via a local script reusing the real production
+  fetchers (not a reimplementation) before merging — 2,752 came back with real open jobs right now,
+  6,127 dead (no jobs at last check, same as any other bulk-imported source — a company list isn't a
+  currently-hiring list). Per platform: workable 594, smartrecruiters 953, recruitee 117, icims 963,
+  taleo 125. Company names come from the CSV's own `name` column (`seedName`) when the ATS's own
+  API/HTML doesn't supply one, which is a real name straight from the source instead of a
+  slug-derived guess — sidesteps the Ffive/Nb-style mangling problem for these rows entirely.
+- Newly-validated rows land as `status:'validated'` with no `industry` yet; the existing daily
+  classify cron (`/api/jobs-import?action=classify`) picks them up automatically over the next day
+  or so, same as the original Feashliaa import.
+
+## Update 2026-07-11 (second pass) — bulk-apply workflow (up to 10, per-job auto tailor decision + gap memory), driven by fixes from a live 10-job apply test
 
 A live end-to-end test (Claude in Chrome, real résumé, real postings) of the previous update's
 apply pipeline surfaced concrete failures. Root-caused and fixed each with live verification, not
