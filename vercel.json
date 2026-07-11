@@ -9,7 +9,8 @@
     "api/transcribe.js": { "maxDuration": 30 }
   },
   "crons": [
-    { "path": "/api/jobs-crawl", "schedule": "0 6 * * *" }
+    { "path": "/api/jobs-crawl", "schedule": "0 6 * * *" },
+    { "path": "/api/jobs-import?action=classify", "schedule": "0 7 * * *" }
   ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/:path*" },

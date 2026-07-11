@@ -157,10 +157,15 @@ browser-extension powers a web page can't have). Three sub-tabs:
     industry per crawl — see the comment in `jobs-crawl.js` for why, and raise it once a live crawl is
     confirmed stable at the current cap).
 
-    This is a one-time-ish migration, not an ongoing job — it's not on a cron. Each call processes as
-    many candidates as fit in ~50 seconds (bounded by Vercel's 60s ceiling), so the whole ~28,700-item
-    pipeline takes on the order of tens of calls, not hundreds. To run it (PowerShell — adjust `$secret`
-    to your `CRON_SECRET`, or drop the `Authorization` header if you haven't set one):
+    The **classify** phase runs automatically: a daily Vercel Cron hits
+    `/api/jobs-import?action=classify` (see `vercel.json`), draining the validated backlog a chunk per
+    day with no manual triggering — the self-draining design means it just stops doing work once
+    everything's classified. The **import** (validate) phase is still manual (it's a one-time-ish
+    migration seeded from the external dataset). Each call processes as many candidates as fit in ~50
+    seconds (Vercel's 60s ceiling), so the full ~28,700-item import takes tens of calls, not hundreds.
+    To run the import (PowerShell — adjust `$secret` to your `CRON_SECRET`, or drop the `Authorization`
+    header if you haven't set one; you can also kick classify with `action="classify"` to go faster
+    than the daily cron):
 
     ```powershell
     $base = "https://wagner-gpt.vercel.app/api/jobs-import"
