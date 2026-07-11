@@ -599,7 +599,14 @@ const BLUEDOOR_BASE = 'https://api.bluedoor.sh/job-postings'
 async function fetchBluedoor(what, where, remote, country) {
   if (country && country !== 'us' && country !== 'ca') return [] // US/Canada coverage only
   const params = new URLSearchParams({ limit: '50', include: 'description', status: 'active' })
-  if (what) params.set('title', what)
+  // `title` is AND-tokenized (every word must appear in the job's title) -- live-confirmed the
+  // comma-joined multi-title string this app otherwise passes upstream (e.g. "Project Manager,
+  // Program Manager, Technical Program Manager, ...") matches ZERO postings here, unlike Jooble/
+  // JSearch's more lenient keyword search. Query on the first title only; the app's own filterJob
+  // still narrows the final result set against the FULL title list afterward, same as `where` below
+  // already does for multi-alternative locations.
+  const firstTitle = String(what || '').split(',')[0].trim()
+  if (firstTitle) params.set('title', firstTitle)
   if (where) params.set('location_text', where)
   if (remote) params.set('workplace_type', 'remote')
   const d = await fetchJson(`${BLUEDOOR_BASE}/v1/jobs/search?${params.toString()}`, { ms: 8000 })
