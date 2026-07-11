@@ -11,7 +11,7 @@ import {
   loadTarget, saveTarget, activeResume, syncDown, PEOPLE, currentPerson, setCurrentPerson,
 } from './lib/jobsStore'
 import {
-  aiRank, lexicalRank, quickTailor, matchScore,
+  aiRank, lexicalRank, quickTailor, matchScore, groundingCheck,
   backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
 } from './lib/jobsAI'
 import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, onFillStatus } from './lib/aliciaBridge'
@@ -397,8 +397,11 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       const resume = (activeResume && activeResume.text) || ''
       setStatus(`Found ${list.length}${append ? ' more' : ''} — ranking by fit…`)
       let scores
-      if (aiFit && resume) { try { scores = await aiRank(list, resume) } catch { scores = lexicalRank(list, resume) } }
-      else scores = lexicalRank(list, resume)
+      let rankNote = ''
+      if (aiFit && resume) {
+        try { scores = await aiRank(list, resume) }
+        catch { scores = lexicalRank(list, resume); rankNote = ' (keyword ranking — the AI rater was unavailable)' }
+      } else scores = lexicalRank(list, resume)
       const byI = {}
       scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
       list = list.map((j, idx) => {
@@ -414,18 +417,37 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
       setResults(merged)
       setPage(pageN)
       const f500n = merged.filter((j) => j._f500).length
-      setStatus(`Showing ${merged.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.`)
+      setStatus(`Showing ${merged.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.${rankNote}`)
     } catch (err) {
       setStatus('Search failed: ' + ((err && err.message) || 'unknown') + '.')
     } finally { setBusy(false) }
   }
 
   const [applyingId, setApplyingId] = useState(null)
+  // ── Apply-time tailoring gate ─────────────────────────────────────────────
+  // Before an autofill session starts, check how well the CURRENT active résumé fits this posting.
+  // A job with a saved tailored résumé skips the gate (that's what it's for); everything else gets
+  // scored, and a weak fit shows what's missing + which tailor mode is worth it. The user can
+  // always proceed as-is — the gate recommends, it never blocks.
+  const GATE_STRONG = 75 // matches fitColor's green threshold
+  const [gate, setGate] = useState(null) // { job, checking, score, missing, summary }
+  const applyOne = (job) => {
+    const tr = findTailored(resumes, job)
+    // Already tailored for this job, or no active résumé to score against → no gate to run.
+    if (tr || !(activeResume && activeResume.text)) { applyNow(job); return }
+    setGate({ job, checking: true })
+    matchScore(activeResume.text, job)
+      .then((m) => setGate((g) => (g && g.job.id === job.id ? { job, checking: false, score: m.score, missing: m.missing, summary: m.summary } : g)))
+      .catch(() => setGate((g) => (g && g.job.id === job.id ? { job, checking: false, score: null, missing: [], summary: '' } : g)))
+  }
+  const gateApplyAsIs = () => { const j = gate.job; setGate(null); applyNow(j) }
+  const gateTailor = (mode) => { const j = gate.job; setGate(null); setPrep({ mode, jobs: [j] }) }
+
   // Direct apply for one job (no tailoring): use its existing tailored résumé if present, else the
   // active résumé. IMPORTANT: this must run synchronously off the click — calling window.open after
   // an `await` loses the user gesture and the browser silently blocks the tab. So branch on the
   // (synchronous) hasExt state and never await before opening.
-  const applyOne = (job) => {
+  const applyNow = (job) => {
     const tr = findTailored(resumes, job)
     const resumeText = (tr && tr.text) || (activeResume && activeResume.text) || ''
     // Register with the extension BEFORE opening the tab: sendApply posts its message synchronously
@@ -638,7 +660,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                 <div className="flex gap-2 mt-2 flex-wrap">
                   <button onClick={() => applyOne(j)} disabled={applyingId === j.id}
                     className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] font-semibold hover:bg-[var(--accent-hover)] disabled:opacity-50"
-                    title={tailored ? 'Apply with the tailored résumé already saved for this job' : 'Apply with your active résumé (no edits)'}>
+                    title={tailored ? 'Apply with the tailored résumé already saved for this job' : 'Checks how well your active résumé fits this job first, then applies (recommending Quick/Deep Tailor if the fit is weak)'}>
                     {applyingId === j.id ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Apply
                   </button>
                   <a href={j.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-2)] text-[var(--text)] hover:opacity-80"><ExternalLink size={13} /> View posting</a>
@@ -655,6 +677,68 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           </button>
         )}
       </div>
+
+      {/* Apply-time tailoring gate: fit check + recommendation before the autofill session starts */}
+      {gate && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setGate(null)}>
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl w-full max-w-md flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-3 border-b border-[var(--border)]">
+              <div className="font-semibold text-sm flex items-center gap-2"><Zap size={15} /> Fit check — {gate.job.title}</div>
+              <button onClick={() => setGate(null)} className="text-[var(--muted)]"><X size={18} /></button>
+            </div>
+            <div className="p-4 space-y-3 text-sm">
+              {gate.checking ? (
+                <div className="flex items-center gap-2 text-[var(--muted)]"><Loader2 size={15} className="animate-spin" /> Checking how well “{activeResume && activeResume.name}” fits this posting…</div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 shrink-0 rounded-lg flex items-center justify-center font-bold text-white text-sm"
+                      style={{ background: typeof gate.score === 'number' ? fitColor(gate.score) : 'var(--surface-2)' }}>
+                      {typeof gate.score === 'number' ? gate.score : '—'}
+                    </div>
+                    <div className="text-xs text-[var(--muted)]">
+                      {typeof gate.score !== 'number' && 'Couldn’t score this fit (AI rater unavailable) — your call.'}
+                      {typeof gate.score === 'number' && gate.score >= GATE_STRONG && `Your active résumé is already a strong fit — applying as-is is reasonable.`}
+                      {typeof gate.score === 'number' && gate.score < GATE_STRONG && gate.score >= APPLY_THRESHOLD && 'Decent fit with gaps — a Quick Tailor re-emphasizes what you already have toward this posting (fast, no questions).'}
+                      {typeof gate.score === 'number' && gate.score < APPLY_THRESHOLD && 'Weak fit as-written. Deep Tailor is worth it here: it interviews you for real experience the résumé doesn’t show — Quick Tailor can only re-shuffle what’s already on the page.'}
+                    </div>
+                  </div>
+                  {gate.summary && <div className="text-xs italic text-[var(--muted)]">{gate.summary}</div>}
+                  {gate.missing && gate.missing.length > 0 && (
+                    <div className="text-xs">
+                      <span className="text-[var(--muted)]">The posting wants, but your résumé doesn’t clearly show: </span>
+                      <span className="text-orange-500">{gate.missing.slice(0, 8).join(' · ')}</span>
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-2 pt-1">
+                    {typeof gate.score === 'number' && gate.score < APPLY_THRESHOLD && (
+                      <button onClick={() => gateTailor('deep')} className="w-full px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] font-semibold flex items-center justify-center gap-1.5"><Wand2 size={14} /> Deep Tailor & apply (recommended)</button>
+                    )}
+                    {typeof gate.score === 'number' && gate.score < GATE_STRONG && gate.score >= APPLY_THRESHOLD && (
+                      <button onClick={() => gateTailor('quick')} className="w-full px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] font-semibold flex items-center justify-center gap-1.5"><Sparkles size={14} /> Quick Tailor & apply (recommended)</button>
+                    )}
+                    <div className="flex gap-2">
+                      {(typeof gate.score !== 'number' || gate.score >= GATE_STRONG) ? (
+                        <>
+                          <button onClick={gateApplyAsIs} className="flex-1 px-3 py-2 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-sm font-semibold">Apply as-is{typeof gate.score === 'number' ? ' (recommended)' : ''}</button>
+                          <button onClick={() => gateTailor('quick')} className="px-3 py-2 rounded-lg bg-[var(--surface-2)] text-sm flex items-center gap-1"><Sparkles size={13} /> Quick Tailor</button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={gateApplyAsIs} className="flex-1 px-3 py-2 rounded-lg bg-[var(--surface-2)] text-sm">Apply as-is anyway</button>
+                          <button onClick={() => gateTailor(gate.score < APPLY_THRESHOLD ? 'quick' : 'deep')} className="px-3 py-2 rounded-lg bg-[var(--surface-2)] text-sm flex items-center gap-1">
+                            {gate.score < APPLY_THRESHOLD ? <><Sparkles size={13} /> Quick instead</> : <><Wand2 size={13} /> Deep instead</>}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {prep && (
         <PrepFlow mode={prep.mode} jobs={prep.jobs} resumes={resumes} activeResume={activeResume}
@@ -716,7 +800,10 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       const extracted = await extractConfirmedFacts(h)
       const fresh = extracted.filter((f) => !memory.some((m) => m.text.toLowerCase() === f.toLowerCase()))
       if (fresh.length) {
-        setFacts(fresh); setFactSel(Object.fromEntries(fresh.map((f) => [f, true]))); setPhase('confirm')
+        // Opt-IN, not opt-out: these are the AI's paraphrases of what the user said, and a
+        // default-checked list + one "Confirm" click used to launder embellishments straight into
+        // "confirmed truth" that every future tailor call treats as fact.
+        setFacts(fresh); setFactSel(Object.fromEntries(fresh.map((f) => [f, false]))); setPhase('confirm')
       } else { setPhase('process') }
     } catch { setPhase('process') } finally { setThinking(false) }
   }
@@ -732,9 +819,11 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
     if (phase !== 'process') return
     let cancelled = false
     ;(async () => {
-      const mem = mode === 'deep'
-        ? [...facts.filter((f) => factSel[f]).map((f) => ({ text: f })), ...memory]
-        : memory
+      // Confirmed facts + saved memory, deduped by text — the same fact used to appear twice in
+      // the prompt (once from the just-confirmed list, once after confirmFacts saved it).
+      const seenMem = new Set()
+      const mem = (mode === 'deep' ? [...facts.filter((f) => factSel[f]).map((f) => ({ text: f })), ...memory] : memory)
+        .filter((m) => { const k = ((m && m.text) || '').toLowerCase(); if (!k || seenMem.has(k)) return false; seenMem.add(k); return true })
       const rows = jobs.map((j) => ({ job: j, state: 'pending', score: null, tailoredText: '', resumeId: null, decision: null }))
       setProgress(rows.map((r) => ({ ...r })))
       // Process the batch in parallel — 5 jobs tailor + score at once, not one-by-one.
@@ -745,8 +834,10 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         // and reuse its saved score too, instead of a fresh AI call for a number we already computed.
         const existing = mode === 'quick' ? findTailored(resumes, job) : null
         if (existing) {
-          let score = (existing.tailoredForJob && existing.tailoredForJob.score) || job._score || 70
-          if (!(existing.tailoredForJob && existing.tailoredForJob.score)) { try { score = (await matchScore(existing.text, job)).score } catch { /* */ } }
+          // Saved score, else a fresh rescore, else null — never the search-time lexical score or
+          // a hardcoded 70 (both showed a "Fit" number that was never computed for this résumé).
+          let score = (existing.tailoredForJob && typeof existing.tailoredForJob.score === 'number') ? existing.tailoredForJob.score : null
+          if (score == null) { try { score = (await matchScore(existing.text, job)).score } catch { /* stays null */ } }
           set({ state: 'done', score, tailoredText: existing.text, resumeId: existing.id, decision: 'ready', reused: true })
           return
         }
@@ -757,13 +848,24 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
         if (!tailoredText || tailoredText.trim().length < 200) { set({ state: 'error', decision: 'skipped' }); return } // backend hiccup — never save/apply an empty résumé
         if (cancelled) return
         set({ state: 'scoring', tailoredText })
-        let score = 60
-        try { score = (await matchScore(tailoredText, job)).score } catch { /* keep default */ }
+        // Score + grounding-check in parallel: the prompt alone doesn't stop invention, so every
+        // tailored draft is audited against its own sources. warnings: [] = clean, strings =
+        // unsupported claims (shown in review + that job starts unselected), null = check failed
+        // (shown as "not verified", job still selectable).
+        let score = null
+        let warnings = null
+        const [scoreRes, groundRes] = await Promise.allSettled([
+          matchScore(tailoredText, job),
+          groundingCheck(tailoredText, { activeText: base, otherTexts: others, memory: mem }),
+        ])
+        if (scoreRes.status === 'fulfilled') score = scoreRes.value.score
+        if (groundRes.status === 'fulfilled') warnings = groundRes.value
         const name = `Tailored — ${job.company || 'Company'} · ${job.title || 'Role'}`.slice(0, 80)
         const resumeId = addSavedResume(name, tailoredText, { title: job.title, company: job.company, url: job.url, score })
-        // Auto-skip weak fits only for deep rewrite (per the chosen behavior).
-        const decision = (mode === 'deep' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
-        set({ state: 'done', score, resumeId, decision })
+        // Auto-skip weak fits only for deep rewrite (per the chosen behavior); an unscored job is
+        // NOT auto-skipped (null used to read as 50 and sneak past this line).
+        const decision = (mode === 'deep' && typeof score === 'number' && score < APPLY_THRESHOLD) ? 'skipped' : 'ready'
+        set({ state: 'done', score, resumeId, decision, warnings })
       }))
       if (!cancelled) setPhase('review')
     })()
@@ -774,7 +876,10 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
   const [applySel, setApplySel] = useState({})
   useEffect(() => {
     if (phase !== 'review') return
-    setApplySel(Object.fromEntries(progress.filter((r) => r.decision === 'ready').map((r) => [r.job.id, true])))
+    // Jobs whose draft has unsupported claims start UNSELECTED — the user reviews the flagged
+    // lines (or the résumé itself) and opts in deliberately. Clean and not-verified start selected.
+    setApplySel(Object.fromEntries(progress.filter((r) => r.decision === 'ready')
+      .map((r) => [r.job.id, !(r.warnings && r.warnings.length)])))
   }, [phase]) // eslint-disable-line
 
   // Synchronous off the click — open tabs from the web app (no 'noopener', so we can tell which
@@ -851,7 +956,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
           {phase === 'confirm' && (
             <>
               <p className="text-sm font-medium">Add these to your memory?</p>
-              <p className="text-xs text-[var(--muted)]">You mentioned things not clearly on your résumé. Confirm the true ones — Alicia will use them when tailoring now and in the future, and never invent beyond them.</p>
+              <p className="text-xs text-[var(--muted)]">These are Alicia's summaries of what you said — check ONLY the ones that are accurate as written (they start unchecked on purpose). Checked facts become permanent tailoring material, so fix anything overstated before confirming.</p>
               <div className="space-y-1.5">
                 {facts.map((f) => (
                   <label key={f} className="flex items-center gap-2 text-sm rounded-lg bg-[var(--surface-2)] px-3 py-2 cursor-pointer">
@@ -879,11 +984,19 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
                         {r.state === 'scoring' && '📊 scoring fit…'}
                         {r.state === 'error' && '⚠️ tailoring failed — skipped'}
                         {r.state === 'done' && (
-                          <>Fit {r.score} · {r.decision === 'skipped'
+                          <>Fit {typeof r.score === 'number' ? r.score : '— (not scored)'} · {r.decision === 'skipped'
                             ? <span className="text-red-500">below {APPLY_THRESHOLD} — auto-skipped</span>
                             : <span className="text-green-600">ready</span>} · {r.reused ? 'reused saved résumé' : 'tailored résumé saved'}</>
                         )}
                       </div>
+                      {r.state === 'done' && !r.reused && r.warnings === null && (
+                        <div className="text-[11px] text-[var(--muted)] mt-0.5">grounding check unavailable — review the résumé yourself before applying</div>
+                      )}
+                      {r.state === 'done' && r.warnings && r.warnings.length > 0 && (
+                        <div className="text-[11px] text-orange-500 mt-0.5">
+                          ⚠ unsupported claims found (unselected — review the saved résumé first): {r.warnings.slice(0, 3).join(' · ')}{r.warnings.length > 3 ? ` · +${r.warnings.length - 3} more` : ''}
+                        </div>
+                      )}
                     </div>
                     {(r.state === 'tailoring' || r.state === 'scoring') && <Loader2 size={15} className="animate-spin text-[var(--muted)]" />}
                     {r.state === 'done' && (r.decision === 'ready' ? <CheckCircle2 size={16} className="text-green-600" /> : <XCircle size={16} className="text-red-500" />)}

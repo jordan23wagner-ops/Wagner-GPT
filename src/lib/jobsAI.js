@@ -53,13 +53,19 @@ function tryJson(raw, kind) {
 }
 
 // ── Ranking ──
+// Short tokens that carry real job-matching signal. The generic length filter (>3) exists to drop
+// stopwords, but it also dropped exactly the acronyms this matching lives on — "SQL", "AWS", "AI",
+// "QA", "PMP" — so an AI/BI/QA-heavy job ranked on its filler words only. Exact-token match (not
+// substring), so admitting these adds no noise.
+const SHORT_SIGNAL = new Set(['ai', 'ml', 'bi', 'ux', 'ui', 'qa', 'pm', 'hr', 'it', 'pmp', 'pmo', 'sql', 'aws', 'gcp', 'api', 'erp', 'crm', 'sap', 'etl', 'sre', 'csm'])
+const signalTok = (w) => w.length > 3 || SHORT_SIGNAL.has(w)
 export function lexicalRank(results, resume) {
   // Score = fraction of the JOB's vocabulary covered by the résumé. (The old résumé-side denominator
   // saturated every job at the 95 cap once the résumé was long, making the fallback ranking useless.)
-  const resumeToks = new Set((resume || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 3))
+  const resumeToks = new Set((resume || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(signalTok))
   return results.map((j) => {
     const jobToks = new Set(((j.title || '') + ' ' + (j.description || '') + ' ' + (j.category || ''))
-      .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 3))
+      .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(signalTok))
     if (!resumeToks.size || !jobToks.size) return { i: 0, score: 50, reason: '' }
     let hits = 0
     jobToks.forEach((w) => { if (resumeToks.has(w)) hits++ })
@@ -89,7 +95,10 @@ export async function matchScore(resumeText, job) {
     (job.description || '').slice(0, 2500) + '\n\nRÉSUMÉ:\n' + (resumeText || '').slice(0, 6000)
   const obj = tryJson(await backendText(sys, user), 'object') || {}
   return {
-    score: typeof obj.score === 'number' ? Math.max(0, Math.min(100, obj.score)) : 50,
+    // null, NOT 50, when the model returned nothing usable: 50 sat exactly on the deep-rewrite
+    // pass threshold, so a parse failure silently counted as a passing score. Callers must treat
+    // null as "not scored" (show —, don't auto-skip, don't auto-select).
+    score: typeof obj.score === 'number' ? Math.max(0, Math.min(100, obj.score)) : null,
     matched: Array.isArray(obj.matched) ? obj.matched.slice(0, 12) : [],
     missing: Array.isArray(obj.missing) ? obj.missing.slice(0, 12) : [],
     summary: obj.summary || '',
@@ -106,7 +115,10 @@ function memoryBlock(memory) {
 // ── Quick tailor: one call, using the active résumé + other saved résumés + confirmed memory ──
 export async function quickTailor(job, { activeText, otherTexts = [], memory = [] }) {
   const sys = 'You tailor a résumé to a specific job. Rules:\n' +
-    '1. Use ONLY facts present in the candidate material (their résumés + confirmed facts below). NEVER invent employers, titles, dates, degrees, or skills.\n' +
+    // Closed-world rule, not an enumerated blocklist: the old "never invent employers/titles/dates/
+    // degrees/skills" list left the most commonly fabricated content — metrics, team sizes, scope,
+    // achievement framing — technically permitted.
+    '1. Use ONLY facts explicitly stated in the candidate material (their résumés + confirmed facts below). Do not add, infer, estimate, or embellish ANYTHING that is not there: no employers, titles, dates, degrees, certifications, or skills — and no numbers, percentages, dollar amounts, metrics, team sizes, budgets, scope, or achievements the material does not state. If the material gives no metric for something, do not state one.\n' +
     '2. Re-order, re-word, and re-emphasize existing experience toward this job\'s requirements. You may pull relevant details from the secondary résumés if present.\n' +
     '3. Keep it truthful, ATS-friendly, and one cohesive résumé. Output ONLY the full tailored résumé text — no preamble, no commentary.'
   // Hard cap: the caller filters out tailored résumés, but never let the prompt grow unboundedly —
@@ -141,8 +153,28 @@ export function deepIntro(baseResume, jobs) {
 export async function extractConfirmedFacts(history) {
   const convo = history.filter((m) => m.role !== 'system').map((m) => `${m.role}: ${m.content}`).join('\n')
   const sys = 'From this interview, extract concrete skills, tools, or accomplishments the CANDIDATE stated ' +
-    'they actually have (not things the assistant guessed). Respond ONLY with a strict JSON array of short ' +
-    'strings (max 10), no prose: ["Python","Led a 5-person team",...]. Empty array if nothing concrete.'
+    'they actually have (not things the assistant guessed). Stay as close to the candidate\'s own wording ' +
+    'as possible — never upgrade, quantify, or embellish what they said ("helped on a team project" must ' +
+    'NOT become "led a team"; do not add numbers they did not say). Respond ONLY with a strict JSON array ' +
+    'of short strings (max 10), no prose: ["Python","Helped deliver a team project",...]. Empty array if nothing concrete.'
   const arr = tryJson(await backendText(sys, convo), 'array')
   return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string' && s.trim()).slice(0, 10) : []
+}
+
+// ── Post-tailor grounding check: claims in the draft that the source material doesn't support ──
+// The tailoring prompt alone doesn't bind the model; this is the verification step. Returns an
+// array of unsupported-claim strings (empty = clean), or null when the check itself failed —
+// callers must show "not verified" for null, never treat it as clean.
+export async function groundingCheck(draft, { activeText, otherTexts = [], memory = [] }) {
+  const sys = 'You are a strict résumé fact auditor. Compare the DRAFT against the SOURCES. List every ' +
+    'specific claim in the DRAFT that the SOURCES do not support: invented or altered employers, titles, ' +
+    'dates, degrees, certifications, or skills, and any number, percentage, metric, team size, budget, or ' +
+    'scope not present in the SOURCES. Rewording, reordering, or summarizing content that IS in the ' +
+    'sources is fine and must NOT be listed. Respond ONLY with a strict JSON array of short strings ' +
+    '(max 10), no prose. Empty array [] if everything is supported.'
+  const sources = [activeText || '', ...otherTexts.filter(Boolean).slice(0, 2), ...(memory || []).map((m) => (m && m.text) || '')]
+    .filter(Boolean).join('\n\n--- source break ---\n\n')
+  const user = 'SOURCES:\n' + sources.slice(0, 9000) + '\n\nDRAFT:\n' + (draft || '').slice(0, 6000)
+  const arr = tryJson(await backendText(sys, user), 'array')
+  return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string' && s.trim()).slice(0, 10) : null
 }
