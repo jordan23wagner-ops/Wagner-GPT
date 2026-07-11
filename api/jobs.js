@@ -1099,7 +1099,12 @@ async function fetchAdzuna(body, country) {
   if (body.remote) what = (what + ' remote').trim()
   if (what) params.set('what', what)
   if (body.whatExclude) params.set('what_exclude', String(body.whatExclude))
-  if (body.where) params.set('where', String(body.where))
+  if (body.where) {
+    params.set('where', String(body.where))
+    // Adzuna's default radius is tiny (~5km) — a suburb search like "Katy, TX" would miss the
+    // rest of its own metro. 40km ≈ a normal hybrid-commute radius; overridable via body.distance.
+    params.set('distance', String(parseInt(body.distance, 10) || 40))
+  }
   const sMin = parseInt(body.salaryMin, 10); if (sMin > 0) params.set('salary_min', String(sMin))
   const sMax = parseInt(body.salaryMax, 10); if (sMax > 0) params.set('salary_max', String(sMax))
   if (body.category) params.set('category', String(body.category))
@@ -1133,17 +1138,21 @@ function tokenizeTitles(titles) {
     .toLowerCase()
     .split(/[,/|]+/).map((s) => s.trim()).filter(Boolean)
     .flatMap((phrase) => {
-      const words = phrase.split(/\s+/).filter((w) => w.length > 2)
-      return words.length ? [{ phrase, words }] : []
+      // Keep 2-letter tokens: dropping them turned "AI Engineer" into just ["engineer"], which
+      // matched EVERY engineering posting. "ai", "it", "qa", "bi", "ux" are real title words.
+      const words = phrase.split(/\s+/).filter((w) => w.length >= 2)
+      return words.length ? [{ phrase, words: words.map((w) => new RegExp('\\b' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b')) }] : []
     })
 }
 
 // Keep a job if any requested title phrase overlaps its title (all significant words of at least one
-// phrase are present, OR the whole phrase is a substring). Empty title filter keeps everything.
+// phrase are present as WHOLE words, OR the whole phrase is a substring). Word-boundary matching
+// matters for the short tokens: bare .includes('ai') matched "Maintenance", "Trainer", etc.
+// Empty title filter keeps everything.
 function titleMatches(jobTitle, terms) {
   if (!terms.length) return true
   const t = String(jobTitle || '').toLowerCase()
-  return terms.some(({ phrase, words }) => t.includes(phrase) || words.every((w) => t.includes(w)))
+  return terms.some(({ phrase, words }) => t.includes(phrase) || words.every((re) => re.test(t)))
 }
 
 function looksRemote(job) {
@@ -1184,6 +1193,13 @@ export default async function handler(req, res) {
 
   const body = req.body || {}
   const country = (String(body.country || 'us').toLowerCase().replace(/[^a-z]/g, '')) || 'us'
+  // `where` accepts pipe-separated alternatives ("Katy, TX|Cypress|Sugar Land|Houston") so
+  // "remote preferred, hybrid near home OK" is expressible: the LOCAL substring filter accepts a
+  // job matching ANY alternative, while the geo-aware upstream APIs (Adzuna/Jooble/etc, which
+  // radius-search a single place) get only the FIRST segment. Must run before the fetch tasks are
+  // created — they read body.where. No '|' → exactly the old single-substring behavior.
+  const whereAlts = String(body.where || '').toLowerCase().split('|').map((s) => s.trim()).filter(Boolean)
+  if (whereAlts.length > 1) body.where = String(body.where).split('|')[0].trim()
 
   try {
     // ── categories (Adzuna) ──
@@ -1274,15 +1290,14 @@ export default async function handler(req, res) {
     // filters server-side via its API params; the direct sources ranked FIRST must honor them too).
     const terms = tokenizeTitles(titles)
     const wantRemote = !!body.remote
-    const where = String(body.where || '').trim().toLowerCase()
     const salaryFloor = parseInt(body.salaryMin, 10) || 0
     const wantFullTime = !!body.fullTime
     const filterJob = (j) => {
       if (!titleMatches(j.title, terms)) return false
       if (wantRemote && !looksRemote(j)) return false
-      if (where && !wantRemote) {
+      if (whereAlts.length && !wantRemote) {
         const loc = (j.location || '').toLowerCase()
-        if (loc && !loc.includes(where) && !looksRemote(j)) return false
+        if (loc && !whereAlts.some((w) => loc.includes(w)) && !looksRemote(j)) return false
       }
       // Salary floor drops only postings whose KNOWN top-of-range is below it — most direct boards
       // don't publish salary, and those stay in rather than vanishing silently.

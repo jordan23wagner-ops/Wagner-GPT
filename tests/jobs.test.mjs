@@ -402,6 +402,23 @@ async function run() {
   assert(resAll.body.results.some((r) => r.company === 'OilCo') && resAll.body.results.some((r) => r.company === 'MedCo'), 'Any-industry search returns jobs from DIFFERENT industries at once (OilCo + MedCo), via the cross-industry cache read')
   assert(resAll.body.sources && resAll.body.sources.atsFromCache === true, 'Any-industry search reports atsFromCache on the cross-industry cache hit')
 
+  // Title word-boundary test: "AI Engineer" must NOT degrade to bare "engineer" (2-letter tokens
+  // used to be dropped, so every engineering posting matched the leftover ["engineer"]).
+  const resAi = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'AI Engineer', industry: 'AI / Machine Learning', country: 'us' } }, resAi)
+  assert(resAi.statusCode === 200, 'AI Engineer search status 200, got ' + resAi.statusCode)
+  assert(!resAi.body.results.some((r) => r.title === 'Staff Backend Engineer'), '"AI Engineer" does not match "Staff Backend Engineer" (word-boundary matching, 2-letter "ai" token kept)')
+
+  // where-alternatives test: pipe-separated locations accept a job matching ANY alternative from a
+  // direct source, remote jobs still pass, and a single (pipe-less) where keeps the old behavior.
+  const resWhere = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Project Manager, Program Manager', industry: 'Any industry', where: 'Katy, TX|Houston', country: 'us' } }, resWhere)
+  assert(resWhere.body.results.some((r) => r.company === 'OilCo'), 'where alternatives: Houston board job kept by "Katy, TX|Houston"')
+  assert(resWhere.body.results.some((r) => r.company === 'MedCo'), 'where alternatives: remote job still passes the location filter')
+  const resWhereSingle = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Project Manager, Program Manager', industry: 'Any industry', where: 'Katy, TX', country: 'us' } }, resWhereSingle)
+  assert(!resWhereSingle.body.results.some((r) => r.company === 'OilCo'), 'plain "Katy, TX" still drops the Houston job (no pipes → old single-substring behavior)')
+
   // Direct-company-site scraper test: Workday (enterprise ATS) + SmartRecruiters/Recruitee found via
   // broadened discovery + a genuinely custom (no known ATS) careers page via Jina+Groq extraction.
   // (BRAVE_KEY/GROQ_KEY are already set at the top of this file, before jobs.js was imported.)

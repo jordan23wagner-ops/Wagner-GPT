@@ -38,6 +38,25 @@ const COUNTRIES = [
   { v: 'ca', label: 'Canada' }, { v: 'au', label: 'Australia' },
 ]
 const ATS_HOST_RE = /(^|\.)(myworkdayjobs|myworkdaysite|workday|greenhouse|lever|icims|ashbyhq|smartrecruiters|brassring|jobvite|taleo|workable|bamboohr|zohorecruit)\.(com|io|co|net)/i
+
+// First-run Target Profile, seeded once per person so "Run my targets" works out of the box —
+// fully editable afterwards ("Update from fields" overwrites it). Both people hunt the same spec:
+// PM/program/BA/AI-engineer roles, $120k+ BASE (bonus doesn't count), any industry, full-time.
+// `location` uses pipe alternatives (see api/jobs.js): the first segment goes to the geo-searching
+// APIs, and a hybrid posting labeled with ANY Katy-area alternative passes the filter. `remote`
+// stays FALSE on purpose — the filter keeps remote postings regardless (looksRemote), while
+// checking it would EXCLUDE the acceptable hybrid-near-Katy jobs.
+const DEFAULT_TARGET = {
+  titles: 'Project Manager, Program Manager, Technical Program Manager, IT Project Manager, Product Manager, Business Analyst, AI Engineer',
+  industry: 'Any industry',
+  salaryMin: '120000',
+  location: 'Katy, TX|Cypress|Sugar Land|Houston',
+  remote: false, fullTime: true, country: 'us',
+  // Presence of `spec` means "saved on or after the 2026-07 targeting spec" — the one-time seeding
+  // below replaces spec-less targets (the pre-switcher $90k-era one included) but NEVER a target
+  // that carries a spec, and saveTargets stamps it on every manual save so user edits stick.
+  spec: 'katy-120k-2026-07',
+}
 const MAX_BATCH = 5          // apply 1–5 at a time (targeted, high-quality)
 const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
 
@@ -288,8 +307,14 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   }, [country])
 
   // Prefill the search form from the saved Target Profile on mount, so the fields already show what
-  // you hunt for. prefillFromTarget is a hoisted function declaration below, so it's callable here.
-  useEffect(() => { prefillFromTarget(loadTarget()) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // you hunt for. If this person has never saved a target, seed the shared default first so "Run my
+  // targets" works from the very first open. prefillFromTarget is a hoisted function declaration
+  // below, so it's callable here.
+  useEffect(() => {
+    let t = loadTarget()
+    if (!t || (!t.titles && !t.industry) || !t.spec) { t = { ...DEFAULT_TARGET }; saveTarget(t); setTargetState(t) }
+    prefillFromTarget(t)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const resolveCategory = (indName = industry) => {
     const ind = INDUSTRIES.find((i) => i.name === indName)
@@ -315,7 +340,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
     if (t.country) setCountry(t.country)
   }
   const saveTargets = () => {
-    const t = { titles: titles.trim(), industry, salaryMin: salaryMin.trim(), remote, fullTime, country, location: location.trim() }
+    const t = { titles: titles.trim(), industry, salaryMin: salaryMin.trim(), remote, fullTime, country, location: location.trim(), spec: DEFAULT_TARGET.spec }
     saveTarget(t); setTargetState(t)
     setTargetMsg('✓ Saved as your Target Profile'); setTimeout(() => setTargetMsg(''), 2500)
   }
@@ -488,7 +513,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
         </div>
         <div><label className={lbl}>Location</label>
           <input className={field} value={location} onChange={(e) => setLocation(e.target.value)}
-            placeholder="City, state, or ZIP (blank = anywhere)" onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
+            placeholder="City, state, or ZIP — use | between alternatives (blank = anywhere)"
+            title="Pipe-separated alternatives accepted, e.g. Katy, TX|Cypress|Houston — a job matching any of them (or any remote job) passes"
+            onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
         </div>
         <div><label className={lbl}>Minimum salary (USD/yr)</label>
           <input className={field} type="number" value={salaryMin} onChange={(e) => setSalaryMin(e.target.value)} placeholder="e.g. 90000" />
