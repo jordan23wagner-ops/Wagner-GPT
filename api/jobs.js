@@ -595,6 +595,21 @@ async function fetchUsaJobs(what, where) {
 // here needs. Live-verified: apply_url resolves to the real employer/ATS posting, not bluedoor
 // itself. Two calls per search: the job search, then a batch org lookup to resolve org_id (an opaque
 // UUID in the search response) to a real company name.
+// bluedoor's own org_id-lookup `normalization_status`/`confidence` fields turned out NOT to be a
+// usable signal -- live-tested a real batch of 7 org_ids and every one came back 'candidate',
+// including perfectly fine names ("Cottonholdings", "Academy") alongside genuinely mangled
+// ATS-hostname ones ("Emit Fa Ca3 Oraclecloud Com CX 2001"). Detect the mangled ones directly
+// instead: they all carry a giveaway -- a known ATS/HR-platform token, a title-cased ".com"
+// fragment ("... Com CX"), a raw hex/UUID-looking string, or implausible length for a company name.
+const ATS_HOSTNAME_JUNK_RE = /\b(oraclecloud|ultipro|myworkday|workday|icims|taleo|successfactors|smartrecruiters|greenhouse|bamboohr|jazzhr|breezy|cornerstone|jobvite|paylocity|paycom|ceridian|dayforce|kronos)\b/i
+function looksLikeAtsHostnameJunk(name) {
+  if (!name) return true
+  if (ATS_HOSTNAME_JUNK_RE.test(name)) return true
+  if (/\bCom\b/.test(name)) return true // title-cased ".com" fragment, e.g. "... Ultipro Com ..."
+  if (/^[A-Z0-9]{16,}$/.test(name.replace(/\s+/g, ''))) return true // raw hex/UUID-looking string
+  if (name.length > 45) return true // far longer than any real company name -- almost certainly a URL slug
+  return false
+}
 const BLUEDOOR_BASE = 'https://api.bluedoor.sh/job-postings'
 async function fetchBluedoor(what, where, remote, country) {
   if (country && country !== 'us' && country !== 'ca') return [] // US/Canada coverage only
@@ -626,7 +641,11 @@ async function fetchBluedoor(what, where, remote, country) {
         const bd = await r.json()
         for (const row of (bd && bd.data) || []) {
           const orgId = row.input && row.input.org_id
-          if (orgId && row.data) orgNames[orgId] = row.data.display_name || row.data.canonical_name || ''
+          const name = row.data && (row.data.display_name || row.data.canonical_name || '')
+          // An honest 'Company undisclosed' (the existing UI fallback for an empty company) beats
+          // showing a mangled ATS hostname as if it were the real employer -- same call already
+          // made for Workday's tenant-derived names (see workdayFallbackName).
+          if (orgId && name && !looksLikeAtsHostnameJunk(name)) orgNames[orgId] = name
         }
       }
     } catch { /* best-effort -- jobs still return with an empty company on lookup failure */ }
