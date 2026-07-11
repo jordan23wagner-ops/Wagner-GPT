@@ -123,8 +123,16 @@ async function upsertRegistryRows(rows) {
       body: JSON.stringify(rows),
       signal: AbortSignal.timeout(15000),
     })
+    // TEMPORARY: surface the real PostgREST error body. Added after a silent upsert failure went
+    // undiagnosed for a full run -- classify upserts were 400ing (a NOT NULL violation on `ats`,
+    // which the classify payload omitted) but upserted:false told us nothing about WHY. Remove once
+    // a live run confirms classify persists cleanly.
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '')
+      console.log('[upsert] non-ok', r.status, rows.length, 'rows', errText.slice(0, 400))
+    }
     return { ok: r.ok }
-  } catch { return { ok: false } }
+  } catch (e) { console.log('[upsert] threw', (e && e.message) || e); return { ok: false } }
 }
 
 function toRegistryRow(v) {
@@ -320,7 +328,11 @@ async function classifyBatch(rows) {
       const p = parsed[i]
       const industry = p && INDUSTRIES.includes(p.industry) ? p.industry : null
       const company_name = (p && String(p.company_name || '').trim()) || r.company_name
-      return { id: r.id, industry, company_name }
+      // ats MUST be carried through: it's a NOT NULL column with no default, and the merge-duplicates
+      // upsert's INSERT half fails a NOT NULL violation (which ON CONFLICT does NOT rescue) if it's
+      // omitted -- confirmed live, this silently no-op'd the ENTIRE classify phase (upserted:false,
+      // 0 rows ever persisted) until fixed. fetchUnclassifiedBatch already selects it.
+      return { id: r.id, ats: r.ats, industry, company_name }
     })
     .filter((r) => !!r.industry)
 }
@@ -335,7 +347,7 @@ async function runClassify(limit, overallDeadlineMs) {
     const rows = await fetchUnclassifiedBatch(limit)
     if (!rows.length) return { processed, classified: classifiedCount, upserted: allOk, done: true }
     const classified = await classifyBatch(rows)
-    const updates = classified.map((c) => ({ id: c.id, industry: c.industry, company_name: c.company_name, status: 'classified', checked_at: new Date().toISOString() }))
+    const updates = classified.map((c) => ({ id: c.id, ats: c.ats, industry: c.industry, company_name: c.company_name, status: 'classified', checked_at: new Date().toISOString() }))
     const { ok } = await upsertRegistryRows(updates)
     allOk = allOk && ok
     processed += rows.length

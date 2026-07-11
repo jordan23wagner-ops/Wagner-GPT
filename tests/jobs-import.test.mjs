@@ -68,7 +68,16 @@ globalThis.fetch = async (url, opts) => {
   // ats_board_registry: POST (upsert, both import and classify use this) and GET (classify's
   // unclassified-batch query).
   if (u.includes('ats_board_registry') && method === 'POST') {
-    upsertedBatches.push(JSON.parse(body))
+    const parsedBody = JSON.parse(body)
+    upsertedBatches.push(parsedBody)
+    // Simulate the real schema's NOT NULL constraint on `ats`: the merge-duplicates upsert's INSERT
+    // half rejects any row missing a non-null `ats` (ON CONFLICT does NOT rescue a NOT NULL
+    // violation). This is what makes the test catch the confirmed-live bug where the classify payload
+    // omitted `ats` and every classify upsert silently 400'd -- without this, the mock would return
+    // ok:true for a payload the real DB would reject.
+    if (parsedBody.some((row) => !row.ats)) {
+      return { ok: false, status: 400, json: async () => ({}), text: async () => JSON.stringify({ code: '23502', message: 'null value in column "ats" violates not-null constraint' }) }
+    }
     return { ok: true, json: async () => ([]) }
   }
   if (u.includes('ats_board_registry') && u.includes('status=eq.validated')) {
@@ -194,9 +203,12 @@ async function run() {
   await handler({ method: 'POST', headers: {}, body: { action: 'classify', limit: 30 } }, res3)
   assert(res3.statusCode === 200, 'classify status 200, got ' + res3.statusCode)
   assert(res3.body.classified === 2, 'both unclassified rows get an industry assigned from the batched Groq call, got ' + res3.body.classified)
+  assert(res3.body.upserted === true, 'classify upsert actually SUCCEEDS (upserted:true) -- confirmed live it was silently 400ing because the payload omitted the NOT NULL `ats` column, so classified:N was reported while 0 rows ever persisted')
   const classifyBatch = upsertedBatches.find((b) => b.some((r) => r.status === 'classified'))
   assert(!!classifyBatch, 'classify step upserts rows with status:"classified"')
+  assert(classifyBatch && classifyBatch.every((r) => !!r.ats), 'every classify upsert row carries `ats` (a NOT NULL, no-default column) -- omitting it made the whole merge-duplicates upsert fail a NOT NULL violation, silently no-op\'ing the entire classify phase')
   const ghClassified = classifyBatch && classifyBatch.find((r) => r.id === 'greenhouse:realcompany-inc')
+  assert(ghClassified && ghClassified.ats === 'greenhouse', 'classify preserves the original ats value from the fetched row, got ' + (ghClassified && ghClassified.ats))
   assert(ghClassified && ghClassified.industry === 'Software / IT', 'realcompany-inc classified into Software / IT per the mocked Groq response, got ' + (ghClassified && ghClassified.industry))
   assert(ghClassified && ghClassified.company_name === 'Real Company Inc.', 'classify also cleans up the display name (slug-derived "Realcompany Inc" -> "Real Company Inc.")')
 
