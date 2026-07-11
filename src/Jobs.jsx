@@ -275,7 +275,12 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   }
 
   // ── Target Profile: set your roles/industry/salary once, re-run in one click ──
-  const prefillFromTarget = (t) => {
+  // A hoisted function declaration (NOT a const arrow) on purpose: the mount effect above calls it,
+  // and that effect sits before this line AND before an early return in this component. A const would
+  // be in the temporal dead zone when the effect fires on first mount -> "prefillFromTarget is not
+  // defined" crash (confirmed live). Function declarations hoist to the top of the component scope,
+  // so this is callable from anywhere regardless of render path.
+  function prefillFromTarget(t) {
     if (!t || (!t.titles && !t.industry)) return
     if (t.titles != null) setTitles(String(t.titles))
     if (t.industry) setIndustry(t.industry)
