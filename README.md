@@ -107,7 +107,16 @@ A farming economy where you grow plants, harvest them for coins, and expand your
 
 A job-search + application workspace, ported from the *Alicia AI* Chrome extension so it can be
 managed here in one web app (the extension stays only for on-page application autofill, which needs
-browser-extension powers a web page can't have). Three sub-tabs:
+browser-extension powers a web page can't have).
+
+**Two people, one app:** a "Searching as: Jordan / Alicia" switcher scopes EVERYTHING per person —
+résumé bank, Target Profile, tracker, contact/EEO profile, and memory (localStorage keys
+`jobs.<person>.*`, one `job_data` cloud row each: Jordan = row 1, Alicia = row 2). The selected
+person is device-local and never synced, so each laptop stays on its owner; switching re-syncs that
+person's résumé/profile to the extension so autofill fills with the right identity. Pre-switcher
+data migrates to Jordan once, automatically.
+
+Three sub-tabs:
 
 - **Search** — pulls jobs from sources that give a **direct employer/ATS apply link** wherever
   possible (so Apply opens the real posting, not an aggregator page). The `/api/jobs` function fans
@@ -202,12 +211,25 @@ browser-extension powers a web page can't have). Three sub-tabs:
 - **Memory** — skills/facts Alicia has learned about you. Used when tailoring; she never claims
   anything that isn't here or in your résumé.
 
+Search niceties: the Location field takes pipe-separated alternatives ("Katy, TX|Cypress|Houston" —
+geo-searching APIs get the first segment, the local filter accepts any of them, remote jobs always
+pass); title matching is word-boundary-aware so "AI Engineer" no longer degrades to every
+"engineer" posting; each person gets a first-run Target Profile seeded automatically (editable, and
+manual saves are never overwritten).
+
 **Prep & Apply (targeted, 1–5 at a time).** Check the jobs you want on the results, then:
 - **Quick tailor & apply** — tailors a résumé to each job from your existing résumés + memory (no
   invention), scores the fit, and saves each tailored résumé to the bank.
 - **Deep rewrite & apply** — Alicia interviews you once to fill gaps across the batch, asks you to
   **confirm any new skills into Memory**, rewrites per job, **re-scores, and auto-skips weak fits**
   (below 50) so effort goes to strong matches.
+- **Apply-time fit gate** — Apply on a job with no tailored résumé first scores your ACTIVE résumé
+  against that posting, shows what the posting wants that the résumé doesn't clearly show, and
+  recommends Apply as-is (fit ≥ 75), Quick Tailor (50–74), or Deep Tailor (< 50) with reasoning.
+  You can always proceed as-is — it recommends, never blocks.
+- **Grounding check** — every tailored draft is audited against its own sources (résumés +
+  confirmed memory); unsupported claims are listed in the review step and that job starts
+  unselected. Deep-rewrite fact confirmation is opt-IN (unchecked by default, verbatim wording).
 - **Apply** hands the batch to the Alicia browser extension (detected via `src/lib/aliciaBridge.js`),
   which opens each posting and auto-fills — stopping before the final Submit (a human always submits).
   Without the extension it falls back to opening the postings and marking them "applied" in the Tracker.

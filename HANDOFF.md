@@ -4,7 +4,50 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-08 (latest) — Adzuna follow-up: honest direct-by-host + never-empty list
+## Update 2026-07-11 (latest) — Two-person Jobs (Jordan + Alicia), Target Profiles, apply-link + tailoring correctness pass, apply-time fit gate
+
+Branch `feat/two-person-jobs` (5 commits). Companion extension work: Job-Assistant v1.13.35/36.
+
+- **Person switcher**: all five Jobs data types scoped per person (`jobs.<person>.*` localStorage,
+  `job_data` cloud row 1 = Jordan / 2 = Alicia; selection device-local; legacy keys migrate to
+  Jordan once). Switching remounts `JobsInner` via `key` — that remount IS the isolation mechanism.
+  Also fixed a fresh-device clobber (mount-time '[]' writes bumped updatedAt and could push empty
+  over a real cloud row; defaults are now pre-written at store init without touching updatedAt).
+  NOTE: the `job_data` TABLE was never created until now (schema run 2026-07-11 via Supabase MCP) —
+  Jobs cloud sync had been silently inactive; rows appear on each person's first edit.
+- **Target Profiles**: first-run default seeded per person (PM/Program/TPM/IT PM/Product/BA/AI-Eng,
+  Any industry, $120k+, "Katy, TX|Cypress|Sugar Land|Houston", remote-preferred-hybrid-OK via
+  remote:false + where-alternatives, full-time). `spec` marker: spec-less targets are replaced
+  once, manual saves stamp it so edits stick. Live-verified against the deployed API (Stripe TPM
+  Risk, US Remote, direct). JSearch's monthly quota was exhausted (HTTP 429) at test time;
+  Jooble/Careerjet/USAJobs keys unset (free signups, would widen coverage).
+- **Matching quality**: `titleMatches` word-boundary + 2-letter tokens kept ("AI Engineer" used to
+  degrade to bare ["engineer"] — confirmed live polluting results); `where` accepts pipe
+  alternatives (upstream geo APIs get segment 1); Adzuna explicit 40km radius.
+- **Apply-link audit** (all sources categorized; defects fixed): JSearch can no longer ship a
+  google.com/search page or an unvetted apply_options[0] as "✓ direct apply" (rows with no vetted
+  link are dropped); himalayas.app fallback rows now label as aggregator; ranking reads the honest
+  host-computed direct flag. Known + accepted: ATS "description page one click short of the form"
+  is normal (extension auto-advances); Adzuna rows stay honestly labeled "via Adzuna · may need
+  login" (Vercel-side resolution remains ~0% from datacenter IPs — extension resolves instead).
+- **Tailoring correctness**: closed-world anti-invention rule (now covers metrics/team sizes/
+  scope); NEW `groundingCheck()` audits each draft against its sources, unsupported claims shown in
+  review + job starts unselected; `matchScore` returns null (not 50) on parse failure and null is
+  never auto-skipped/auto-selected; deep-rewrite fact confirmation is opt-IN with verbatim-wording
+  extraction; reused-résumé scores recomputed (no more `|| job._score || 70`); lexicalRank keeps
+  short signal tokens (SQL/AWS/AI/QA/PMP); aiRank→lexical fallback is announced in the status line.
+- **Apply-time fit gate** (new): Apply on an untailored job scores the ACTIVE résumé vs the posting
+  (spinner → score chip + missing keywords + one-line reasoning) and recommends as-is (≥75) /
+  Quick (50–74) / Deep (<50); always overridable. Tailored jobs skip the gate. Verified on the dev
+  server with stubbed APIs (all three branches + handoff into PrepFlow).
+- **Extension handoff ordering**: `applyOne` now fires `sendApply` BEFORE `window.open` (see
+  Job-Assistant v1.13.35: registration used to race the tab's own navigation; the extension also
+  adopts already-open tabs at registration time now). Batch flow unchanged (adoption covers it).
+
+Still open: JSearch quota (resets monthly — or upgrade); optional free keys (USAJobs esp. for
+$120k+ remote federal roles); the v1.13.35 Stripe fix needs the user's live re-test.
+
+## Update 2026-07-08 — Adzuna follow-up: honest direct-by-host + never-empty list
 
 Live test of the prior change showed "Direct apply only" (defaulted ON) hid ALL 55 results because the
 Vercel-side resolver resolved 0 of 50 Adzuna rows (datacenter IP blocked, as predicted) and JSearch's 7
