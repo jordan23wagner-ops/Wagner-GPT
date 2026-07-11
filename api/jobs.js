@@ -27,8 +27,11 @@
 //   9. USAJobs              — free API key + registered email (USAJOBS_API_KEY + USAJOBS_EMAIL): US
 //                            federal jobs only, only called for country:'us'. Treated as a DIRECT
 //                            source (it's the government's own official board), not an aggregator.
+//  10. bluedoor.sh          — hosted job-postings API, no key needed at all (anonymous reads are
+//                            first-class; a key only raises the rate limit). US/Canada only. Direct
+//                            source: apply_url always resolves to the source ATS's own posting.
 //   Sources 6-9 are all silently skipped (empty results, no error) when their env var isn't set --
-//   none of them require signing up to get the other sources working.
+//   none of them require signing up to get the other sources working. bluedoor never needs one.
 //
 // POST { action:'search', titles|what, industry, where, salaryMin, salaryMax, remote, fullTime,
 //        country, resultsPerPage, category, page } -> { results:[...], count, sources:{...} }
@@ -583,6 +586,57 @@ async function fetchUsaJobs(what, where) {
       source: 'usajobs',
     }
   }).filter((j) => j.url)
+}
+
+// ── bluedoor.sh Job Postings API — hosted, daily-synced aggregator over 60k+ companies and 40+ ATS
+// platforms (including ADP, Oracle HCM, SuccessFactors — enterprise ATSes this app has no direct
+// fetcher for). Fully anonymous per its own OpenAPI contract (top-level security:[]): no signup, no
+// key. A key only raises the rate limit from 10/sec to 100/sec, well beyond what a single search
+// here needs. Live-verified: apply_url resolves to the real employer/ATS posting, not bluedoor
+// itself. Two calls per search: the job search, then a batch org lookup to resolve org_id (an opaque
+// UUID in the search response) to a real company name.
+const BLUEDOOR_BASE = 'https://api.bluedoor.sh/job-postings'
+async function fetchBluedoor(what, where, remote, country) {
+  if (country && country !== 'us' && country !== 'ca') return [] // US/Canada coverage only
+  const params = new URLSearchParams({ limit: '50', include: 'description', status: 'active' })
+  if (what) params.set('title', what)
+  if (where) params.set('location_text', where)
+  if (remote) params.set('workplace_type', 'remote')
+  const d = await fetchJson(`${BLUEDOOR_BASE}/v1/jobs/search?${params.toString()}`, { ms: 8000 })
+  const jobs = (d && d.data) || []
+  if (!jobs.length) return []
+  const orgIds = Array.from(new Set(jobs.map((j) => j.org_id).filter(Boolean)))
+  const orgNames = {}
+  if (orgIds.length) {
+    try {
+      const r = await fetch(`${BLUEDOOR_BASE}/v1/orgs/batch_lookup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org_ids: orgIds }),
+        signal: AbortSignal.timeout(6000),
+      })
+      if (r.ok) {
+        const bd = await r.json()
+        for (const row of (bd && bd.data) || []) {
+          const orgId = row.input && row.input.org_id
+          if (orgId && row.data) orgNames[orgId] = row.data.display_name || row.data.canonical_name || ''
+        }
+      }
+    } catch { /* best-effort -- jobs still return with an empty company on lookup failure */ }
+  }
+  return jobs.map((j) => ({
+    id: 'bd_' + j.job_id,
+    title: j.title || '',
+    company: orgNames[j.org_id] || '',
+    location: j.location_text || (j.workplace_type === 'remote' ? 'Remote' : ''),
+    salaryMin: j.salary_min || null, salaryMax: j.salary_max || null, salaryPredicted: false,
+    url: j.apply_url || j.source_url || '',
+    category: j.department || '', categoryTag: '',
+    contractTime: j.employment_type || '',
+    description: cleanText(j.description_text || '').slice(0, 2000),
+    created: j.source_posted_at || j.first_seen_at || '',
+    source: 'bluedoor',
+  })).filter((j) => j.url)
 }
 
 // ── Per-ATS board fetchers → normalized results ─────────────────────────────────────────────────
@@ -1358,6 +1412,7 @@ export default async function handler(req, res) {
     // just mix in irrelevant results, so each only fires for the matching country selection.
     if (country === 'gb') tasks.push(fetchReed(titles || industry, body.where).then((results) => ({ kind: 'reed', results })).catch(() => ({ kind: 'reed', results: [] })))
     if (country === 'us') tasks.push(fetchUsaJobs(titles || industry, body.where).then((results) => ({ kind: 'usajobs', results })).catch(() => ({ kind: 'usajobs', results: [] })))
+    tasks.push(fetchBluedoor(titles || industry, body.where, body.remote, country).then((results) => ({ kind: 'bluedoor', results })).catch(() => ({ kind: 'bluedoor', results: [] })))
     // Cache-hit skips the live per-company ATS fetch entirely (the slow/heavy part of every search);
     // any miss (table not set up, industry never crawled, request failed) transparently falls back to
     // today's always-live fetchBoards(), so this can only ever make results faster, never worse.
@@ -1389,7 +1444,7 @@ export default async function handler(req, res) {
     const settled = await Promise.allSettled(tasks)
     const bucket = {
       adzuna: [], jsearch: [], himalayas: [], ats: [], discovered: [], custom: [],
-      themuse: [], jooble: [], careerjet: [], reed: [], usajobs: [],
+      themuse: [], jooble: [], careerjet: [], reed: [], usajobs: [], bluedoor: [],
     }
     let adzunaConfigured = false, jsearchConfigured = false, jsearchError = null, jsearchRaw = 0
     let atsFromCache = false
@@ -1407,6 +1462,7 @@ export default async function handler(req, res) {
       else if (v.kind === 'careerjet') bucket.careerjet = v.results || []
       else if (v.kind === 'reed') bucket.reed = v.results || []
       else if (v.kind === 'usajobs') bucket.usajobs = v.results || []
+      else if (v.kind === 'bluedoor') bucket.bluedoor = v.results || []
     }
 
     // Filter the non-Adzuna sources by title + remote/location + salary/contract (Adzuna gets these
@@ -1439,14 +1495,17 @@ export default async function handler(req, res) {
     const careerjetResults = bucket.careerjet.filter(filterJob)
     const reedResults = bucket.reed.filter(filterJob)
     const usajobsResults = bucket.usajobs.filter(filterJob)
+    const bluedoorResults = bucket.bluedoor.filter(filterJob)
 
-    // Mark each result direct/aggregator; ATS boards + Himalayas + USAJobs are direct (USAJobs IS the
-    // federal government's own official job board, not a third-party aggregator over other sites'
+    // Mark each result direct/aggregator; ATS boards + Himalayas + USAJobs + bluedoor are direct
+    // (USAJobs IS the federal government's own official job board, and bluedoor's apply_url always
+    // resolves to the source ATS's own posting, not a third-party aggregator over other sites'
     // postings, the same way a company's own Workday board is direct). The Muse/Jooble/Careerjet/Reed
     // are aggregators over other companies' postings, same as Adzuna.
     boardResults.forEach((j) => { j.direct = true })
     himalayasResults.forEach((j) => { j.direct = true })
     usajobsResults.forEach((j) => { j.direct = true })
+    bluedoorResults.forEach((j) => { j.direct = true })
     bucket.adzuna.forEach((j) => { j.direct = false })
     themuseResults.forEach((j) => { j.direct = false })
     joobleResults.forEach((j) => { j.direct = false })
@@ -1455,7 +1514,7 @@ export default async function handler(req, res) {
 
     // Dedupe preferring DIRECT-link sources over any aggregator's link for the same job.
     let merged = dedupe([
-      ...boardResults, ...jsearchResults, ...himalayasResults, ...usajobsResults,
+      ...boardResults, ...jsearchResults, ...himalayasResults, ...usajobsResults, ...bluedoorResults,
       ...bucket.adzuna, ...themuseResults, ...joobleResults, ...careerjetResults, ...reedResults,
     ])
 
@@ -1511,6 +1570,7 @@ export default async function handler(req, res) {
         careerjet: careerjetResults.length, careerjetConfigured: !!CAREERJET_AFFID,
         reed: reedResults.length, reedConfigured: !!REED_API_KEY,
         usajobs: usajobsResults.length, usajobsConfigured: !!(USAJOBS_API_KEY && USAJOBS_EMAIL),
+        bluedoor: bluedoorResults.length,
         directCount: merged.filter((j) => j.direct !== false).length,
       },
     })

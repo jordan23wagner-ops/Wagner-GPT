@@ -137,6 +137,12 @@ Three sub-tabs:
     (no key), **Jooble** (`JOOBLE_KEY`), **Careerjet** (`CAREERJET_AFFID`). **Reed** (`REED_API_KEY`,
     UK jobs, only called for `country: 'gb'`) is also available. All four are free to sign up for and
     silently no-op if their env var isn't set — none are required for the rest of the Jobs tab to work.
+  - **bluedoor.sh** (no key at all — `/v1/jobs/search` is anonymous by design; a key only raises the
+    rate limit) — a hosted, daily-synced job-postings API over 60k+ companies and 40+ ATS platforms,
+    including several this app has no other coverage of (ADP, Oracle HCM, SuccessFactors). US/Canada
+    only. `apply_url` always resolves to the source ATS's own posting, so it's ranked as direct. One
+    extra call per search batch-resolves each result's `org_id` (an opaque UUID) to a real company
+    name via `/v1/orgs/batch_lookup`.
   - **Crawl cache** (optional): searches read pre-crawled ATS-board results from a Supabase table
     (`job_crawl_cache`) instead of live-fetching every company's board on every request, when that
     table has data for the requested industry. `api/jobs-crawl.js`, triggered by Vercel Cron (see

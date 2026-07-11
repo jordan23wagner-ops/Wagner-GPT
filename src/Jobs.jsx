@@ -588,6 +588,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           {sources.careerjetConfigured === false ? ' · (add CAREERJET_AFFID for more)' : ''}
           {typeof sources.usajobs === 'number' && sources.usajobsConfigured ? ` · USAJobs: ${sources.usajobs}` : ''}
           {sources.usajobsConfigured === false ? ' · (add USAJOBS_API_KEY for more)' : ''}
+          {typeof sources.bluedoor === 'number' ? ` · bluedoor: ${sources.bluedoor}` : ''}
         </div>
       )}
 
