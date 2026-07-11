@@ -54,9 +54,14 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_7-pjV
 // table doesn't exist yet (schema not run), industry never crawled, or the request itself failed --
 // so the caller can tell "no cached data, fall back to live" apart from "cached data, but empty",
 // which never regresses search results below today's always-live behavior.
+// A falsy `industry` means "All Industries" -- read the freshest crawled jobs across every industry
+// (capped) instead of one. This is what makes the "All Industries" search sweep every field at once.
 async function fetchBoardsFromCache(industry) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/job_crawl_cache?industry=eq.${encodeURIComponent(industry)}&select=*`, {
+    const q = industry
+      ? `industry=eq.${encodeURIComponent(industry)}&select=*`
+      : `select=*&order=created.desc&limit=1000`
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/job_crawl_cache?${q}`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
       signal: AbortSignal.timeout(5000),
     })
@@ -1195,7 +1200,12 @@ export default async function handler(req, res) {
     // ── search (multi-source) ──
     const titles = String(body.titles || body.what || '').trim()
     const industry = String(body.industry || '').trim()
-    const seedBoards = INDUSTRY_BOARDS[industry] || []
+    // "Any industry" / "All Industries": sweep every field at once (the aggregators aren't
+    // industry-scoped anyway; this widens the curated/registry board coverage to the union across
+    // industries, reads the cross-industry crawl cache, and drops the industry word from discovery).
+    // Seed capped so a cache-miss fallback can't fan out live to every board in one request.
+    const isAll = /^(all industries|any industry)$/i.test(industry) || !industry
+    const seedBoards = isAll ? Object.values(INDUSTRY_BOARDS).flat().slice(0, 40) : (INDUSTRY_BOARDS[industry] || [])
 
     // Kick off every source in parallel.
     const tasks = []
@@ -1214,14 +1224,15 @@ export default async function handler(req, res) {
     // today's always-live fetchBoards(), so this can only ever make results faster, never worse.
     if (seedBoards.length) {
       tasks.push((async () => {
-        const cachedRows = await fetchBoardsFromCache(industry)
+        const cachedRows = await fetchBoardsFromCache(isAll ? null : industry)
         if (cachedRows) return { kind: 'ats', results: cachedRows, atsFromCache: true }
         const live = await fetchBoards(seedBoards).catch(() => [])
         return { kind: 'ats', results: live, atsFromCache: false }
       })().catch(() => ({ kind: 'ats', results: [], atsFromCache: false })))
     }
-    // Discovery is best-effort; only when we have a query to search on.
-    const discoveryQuery = [titles, industry].filter(Boolean).join(' ').trim()
+    // Discovery is best-effort; only when we have a query to search on. In All-Industries mode the
+    // industry word is dropped from the query (it isn't a real search term).
+    const discoveryQuery = [titles, isAll ? '' : industry].filter(Boolean).join(' ').trim()
     if (discoveryQuery && (BRAVE_KEY || TAVILY_KEY)) {
       const { boards, customPages } = await cached('discover:' + discoveryQuery.toLowerCase(), () => discoverBoards(discoveryQuery))
       if (boards.length) tasks.push(fetchBoards(boards).then((results) => ({ kind: 'discovered', results })).catch(() => ({ kind: 'discovered', results: [] })))

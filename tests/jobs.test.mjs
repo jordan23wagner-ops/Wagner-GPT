@@ -97,6 +97,14 @@ globalThis.fetch = async (url, opts) => {
       { url: 'https://boards.greenhouse.io/cachedco/jobs/999', source: 'greenhouse', industry: 'Manufacturing', title: 'Plant Manager', company: 'CachedCo', location: 'Detroit, MI', salary_min: null, salary_max: null, category: '', category_tag: '', contract_time: '', description: 'Run the plant', created: '2026-07-01' },
     ])
   }
+  // "Any industry" cache read: no industry=eq filter, ordered by created desc -- returns cross-industry
+  // rows so one search sweeps every field. Two DIFFERENT industries' cached jobs come back together.
+  if (u.includes('supabase.co/rest/v1/job_crawl_cache') && u.includes('order=created.desc') && !u.includes('industry=eq')) {
+    return json([
+      { url: 'https://boards.greenhouse.io/oilco/jobs/1', source: 'greenhouse', industry: 'Oil & Gas / Energy', title: 'Project Manager', company: 'OilCo', location: 'Houston, TX', salary_min: 130000, salary_max: 160000, category: '', category_tag: '', contract_time: '', description: 'Run energy projects', created: '2026-07-05' },
+      { url: 'https://boards.greenhouse.io/medco/jobs/2', source: 'greenhouse', industry: 'Healthcare Tech', title: 'Program Manager', company: 'MedCo', location: 'Remote', salary_min: 125000, salary_max: 150000, category: '', category_tag: '', contract_time: '', description: 'Run health programs', created: '2026-07-06' },
+    ])
+  }
   // Brave discovery: a mix of a Workday tenant (with a locale segment, exercising WORKDAY_URL_RE's
   // optional locale clause), a SmartRecruiters board, a Recruitee board, and a genuinely custom
   // careers page with no known ATS behind it at all.
@@ -386,6 +394,13 @@ async function run() {
   await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Manager', industry: 'Manufacturing', country: 'us' } }, resCache)
   assert(resCache.body.results.some((r) => r.company === 'CachedCo' && r.title === 'Plant Manager' && r.source === 'greenhouse'), 'cached ATS row surfaces in results -- can only happen via the cache path, since no live-fetch mock exists for this fake company')
   assert(resCache.body.sources && resCache.body.sources.atsFromCache === true, 'sources.atsFromCache reports true on a cache hit')
+
+  // "Any industry" sweep: one search pulls jobs from MULTIPLE industries' cache at once (no industry
+  // filter). OilCo (Oil & Gas) and MedCo (Healthcare) both come back for a title-only search.
+  const resAll = mockRes()
+  await handler({ method: 'POST', headers: {}, body: { action: 'search', titles: 'Project Manager, Program Manager', industry: 'Any industry', country: 'us' } }, resAll)
+  assert(resAll.body.results.some((r) => r.company === 'OilCo') && resAll.body.results.some((r) => r.company === 'MedCo'), 'Any-industry search returns jobs from DIFFERENT industries at once (OilCo + MedCo), via the cross-industry cache read')
+  assert(resAll.body.sources && resAll.body.sources.atsFromCache === true, 'Any-industry search reports atsFromCache on the cross-industry cache hit')
 
   // Direct-company-site scraper test: Workday (enterprise ATS) + SmartRecruiters/Recruitee found via
   // broadened discovery + a genuinely custom (no known ATS) careers page via Jina+Groq extraction.
