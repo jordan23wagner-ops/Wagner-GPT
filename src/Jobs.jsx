@@ -582,6 +582,12 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           {sources.jsearchConfigured === false ? ' · (add JSEARCH_KEY for more direct links)' : ''}
           {sources.jsearchError ? <span className="text-orange-500"> · JSearch error: {String(sources.jsearchError).slice(0, 140)}</span> : ''}
           {sources.jsearchConfigured && !sources.jsearchError && sources.jsearchRaw > 0 && sources.jsearch === 0 ? <span className="text-[var(--muted)]"> · (JSearch returned {sources.jsearchRaw} but your filters excluded them — try unchecking Remote only)</span> : ''}
+          {typeof sources.jooble === 'number' && sources.joobleConfigured ? ` · Jooble: ${sources.jooble}` : ''}
+          {sources.joobleConfigured === false ? ' · (add JOOBLE_KEY for more)' : ''}
+          {typeof sources.careerjet === 'number' && sources.careerjetConfigured ? ` · Careerjet: ${sources.careerjet}` : ''}
+          {sources.careerjetConfigured === false ? ' · (add CAREERJET_AFFID for more)' : ''}
+          {typeof sources.usajobs === 'number' && sources.usajobsConfigured ? ` · USAJobs: ${sources.usajobs}` : ''}
+          {sources.usajobsConfigured === false ? ' · (add USAJOBS_API_KEY for more)' : ''}
         </div>
       )}
 
