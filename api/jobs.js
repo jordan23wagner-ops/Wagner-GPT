@@ -926,7 +926,7 @@ export async function fetchBoards(boards) {
 // a hard failure, so this doesn't need to be perfect, just a reasonable best effort.
 const WORKDAY_URL_RE = /([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:wday\/cxs\/[a-z0-9-]+\/)?(?:[a-z]{2}-[A-Z]{2}\/)?([a-z0-9_-]+)/i
 
-function boardsFromUrls(urls) {
+export function boardsFromUrls(urls) {
   const seen = new Set()
   const out = []
   const patterns = [
@@ -973,7 +973,7 @@ function boardsFromUrls(urls) {
 // call each time, and now that finalizeCustomJobCandidates + fetchCustomCareerPageViaAi's own
 // URL-verification filter reject fabricated "postings" for free too (no wasted Groq call turns into
 // a wasted result the way it used to).
-function customCareerPageCandidates(urls, cap = 6) {
+export function customCareerPageCandidates(urls, cap = 6) {
   const seen = new Set()
   const out = []
   for (const u of urls) {
@@ -993,7 +993,7 @@ const BRAVE_KEY = process.env.BRAVE_KEY || process.env.Brave || process.env.BRAV
 const TAVILY_KEY = process.env.TAVILY_KEY || process.env.TAVILY || process.env.TAVILY_API_KEY || process.env.Tavily
 const GROQ_KEY = process.env.GROQ_KEY || process.env.Groq || process.env.GROQ
 
-async function braveOrTavily(q, count) {
+export async function braveOrTavily(q, count) {
   try {
     if (BRAVE_KEY) {
       const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}&safesearch=moderate`
@@ -1279,7 +1279,7 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
 
 // Entry point used by the search handler: try structured data first (free, authoritative, no AI
 // involved at all), and only reach for the AI-extraction fallback when the page has none.
-async function fetchCustomCareerPage({ url, name }) {
+export async function fetchCustomCareerPage({ url, name }) {
   try {
     const structured = await fetchStructuredJobPostings({ url, name })
     if (structured.length) return structured
