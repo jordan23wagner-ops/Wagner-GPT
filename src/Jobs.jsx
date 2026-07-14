@@ -296,6 +296,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
   const [results, setResults] = useState([])
   const [sortBy, setSortBy] = useState('f500') // f500 | match | salary
   const [sources, setSources] = useState(null)
+  const [companyLookup, setCompanyLookup] = useState('') // the company name/domain typed into the lookup box
   const [selected, setSelected] = useState({}) // id -> true
   const [prep, setPrep] = useState(null)        // { mode, jobs } when the prep modal is open
   const [bulkPrep, setBulkPrep] = useState(null) // jobs array when the bulk-apply modal is open
@@ -398,34 +399,69 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
         list = list.filter((j) => !seen.has((j.url || j.id).toLowerCase()))
         if (!list.length) { setStatus('No more new jobs for this search.'); return }
       } else if (!list.length) { setStatus('No jobs found — try broader titles, fewer filters, or a different industry.'); return }
-      const resume = (activeResume && activeResume.text) || ''
-      setStatus(`Found ${list.length}${append ? ' more' : ''} — ranking by fit…`)
-      let scores
-      let rankNote = ''
-      if (aiFit && resume) {
-        try { scores = await aiRank(list, resume) }
-        catch { scores = lexicalRank(list, resume); rankNote = ' (keyword ranking — the AI rater was unavailable)' }
-      } else scores = lexicalRank(list, resume)
-      const byI = {}
-      scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
-      list = list.map((j, idx) => {
-        const s = byI[idx] || {}
-        const age = ageInfo(j.created)
-        const salInfo = salaryInfo(j)
-        return {
-          ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '',
-          _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j),
-          _salInfo: salInfo, _age: age, _ts: age ? age.ts : 0, // precomputed once — cards used to re-regex every render
-          _ghost: ghostJobRisk(j, age, salInfo),
-        }
-      })
-      const merged = append ? [...results, ...list] : list
+      const { decorated: list2, rankNote } = await rankAndDecorate(list)
+      const merged = append ? [...results, ...list2] : list2
       setResults(merged)
       setPage(pageN)
       const f500n = merged.filter((j) => j._f500).length
-      setStatus(`Showing ${merged.length} jobs — Fortune 500 first (${f500n}), then best fit${resume ? '' : ' (add a résumé for smarter ranking)'}.${rankNote}`)
+      setStatus(`Showing ${merged.length} jobs — Fortune 500 first (${f500n}), then best fit${((activeResume && activeResume.text)) ? '' : ' (add a résumé for smarter ranking)'}.${rankNote}`)
     } catch (err) {
       setStatus('Search failed: ' + ((err && err.message) || 'unknown') + '.')
+    } finally { setBusy(false) }
+  }
+
+  // Shared fit-ranking + card-decoration, extracted verbatim from doSearch so the company-lookup
+  // path produces IDENTICAL job objects (same _score/_f500/_ghost/etc.) and renders through the
+  // exact same card code with no changes.
+  async function rankAndDecorate(list) {
+    const resume = (activeResume && activeResume.text) || ''
+    setStatus(`Found ${list.length} — ranking by fit…`)
+    let scores
+    let rankNote = ''
+    if (aiFit && resume) {
+      try { scores = await aiRank(list, resume) }
+      catch { scores = lexicalRank(list, resume); rankNote = ' (keyword ranking — the AI rater was unavailable)' }
+    } else scores = lexicalRank(list, resume)
+    const byI = {}
+    scores.forEach((s, idx) => { const k = (typeof s.i === 'number' && s.i >= 1) ? s.i - 1 : idx; byI[k] = s })
+    const decorated = list.map((j, idx) => {
+      const s = byI[idx] || {}
+      const age = ageInfo(j.created)
+      const salInfo = salaryInfo(j)
+      return {
+        ...j, _score: typeof s.score === 'number' ? s.score : 50, _reason: s.reason || '',
+        _f500: isFortune500(j.company), _layoff: layoffFlag(j.company), _sal: salaryNumber(j),
+        _salInfo: salInfo, _age: age, _ts: age ? age.ts : 0,
+        _ghost: ghostJobRisk(j, age, salInfo),
+      }
+    })
+    return { decorated, rankNote }
+  }
+
+  // ── Company lookup: pull jobs straight from ONE company's own board/careers page (separate,
+  // additive feature — its own endpoint, its own button, deliberately NOT wired into doSearch yet).
+  async function doCompanyLookup() {
+    const company = companyLookup.trim()
+    if (!company) { setStatus('Type a company name or domain (e.g. Anthropic or anthropic.com).'); return }
+    setBusy(true)
+    setSources(null) // clear the main-search source counts so the header doesn't misdescribe these
+    setStatus(`Looking up jobs directly from ${company}…`)
+    try {
+      const resp = await fetch('/api/company-lookup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company }),
+      })
+      const d = await resp.json()
+      if (d && d.error) { setStatus(d.error); return }
+      const list = (d && d.results) || []
+      if (!list.length) { setResults([]); setStatus((d && d.message) || `No open jobs found for ${company}.`); return }
+      const { decorated, rankNote } = await rankAndDecorate(list)
+      setResults(decorated)
+      setPage(1)
+      const how = { seed: 'known board', registry: 'known board', 'ats-discovered': 'discovered ATS board', scraped: 'their careers page' }[d.method] || 'their site'
+      setStatus(`Showing ${decorated.length} jobs from ${company} (via ${how}).${rankNote}`)
+    } catch (err) {
+      setStatus('Company lookup failed: ' + ((err && err.message) || 'unknown') + '.')
     } finally { setBusy(false) }
   }
 
@@ -564,6 +600,21 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
             {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search jobs
           </button>
         </div>
+
+        {/* Company lookup — separate, additive feature (its own endpoint). Pulls jobs straight from
+            ONE company's own board/careers page instead of the aggregators. Deliberately standalone
+            for QA; will be consolidated into the main search bar later. */}
+        <div className="mt-3 pt-3 border-t border-[var(--border)] flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-[var(--muted)] flex items-center gap-1" title="Skip the job boards — pull openings straight from one company's own careers page">🏢 Straight from one company:</span>
+          <input value={companyLookup} onChange={(e) => setCompanyLookup(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') doCompanyLookup() }}
+            placeholder="Company name or domain (e.g. Anthropic or anthropic.com)"
+            className="flex-1 min-w-[220px] bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm" />
+          <button onClick={doCompanyLookup} disabled={busy}
+            className="flex items-center gap-1.5 border border-[var(--accent)] text-[var(--accent)] font-semibold px-4 py-2 rounded-lg text-sm disabled:opacity-50 hover:bg-[var(--surface-2)]">
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Look up company
+          </button>
+        </div>
       </div>
 
       <div className="text-xs px-1">
@@ -657,6 +708,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
                   {j.direct === false
                     ? <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: '#7c2d12', color: '#fed7aa' }} title="Apply opens Adzuna, which now requires an Adzuna login before forwarding to the employer — enable 'Direct apply only' to hide these">via Adzuna · may need login</span>
                     : <span className="text-[11px] px-2 py-0.5 rounded-full font-medium text-green-700 border border-green-600" title={j.resolved ? "Resolved to the employer's own posting (skips Adzuna)" : "Apply opens the employer's own posting directly"}>✓ direct apply</span>}
+                  {j.companyLookup && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white flex items-center gap-1" style={{ background: '#6d28d9' }} title="Pulled directly from this company's own careers board, not a job aggregator">🏢 company direct</span>}
                   {j._f500 && <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold text-white" style={{ background: '#1d4ed8' }} title="Fortune 500 company">★ Fortune 500</span>}
                   {j._layoff && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: '#7c2d12', color: '#fed7aa' }} title={`Recent layoffs: ${j._layoff}`}>⚠ recent layoffs</span>}
                   {j._ghost && <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1" style={{ background: j._ghost.level === 'high' ? '#7c2d12' : '#78350f', color: '#fed7aa' }} title={`Possible ghost listing — ${j._ghost.reasons.join('; ')}`}>👻 {j._ghost.level === 'high' ? 'likely ghost listing' : 'possible ghost listing'}</span>}
