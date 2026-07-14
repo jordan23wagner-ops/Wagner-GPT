@@ -196,15 +196,21 @@ function JobsInner({ person, switchPerson }) {
   }, [])
 
   // Push the active résumé (text + original file) and profile into the extension whenever they
-  // change, so autofill always fills with what THIS app has — one source of truth.
+  // change, so autofill always fills with what THIS app has — one source of truth. Must run even
+  // when this person has NO active résumé text: the extension only ever holds one profile, so if we
+  // early-returned here on person-switch, it would keep silently auto-filling as the PREVIOUS
+  // person (wrong name/email/phone/work history — a data-safety bug, not just a UX gap). So we
+  // always resync on hasExt/person change; when there's no usable résumé we still push THIS
+  // person's contact profile, with the résumé-derived fields cleared (not the old person's).
   const activeForSync = activeResume(resumes)
   useEffect(() => {
-    if (!hasExt || !activeForSync || !activeForSync.text) return
+    if (!hasExt) return
+    const hasResumeText = !!(activeForSync && activeForSync.text)
     const t = setTimeout(() => {
       sendSync({
-        resumeText: activeForSync.text,
-        resumeName: activeForSync.name,
-        resumeFile: activeForSync.file || null,
+        resumeText: hasResumeText ? activeForSync.text : '',
+        resumeName: hasResumeText ? activeForSync.name : null,
+        resumeFile: hasResumeText ? (activeForSync.file || null) : null,
         profile: loadProfile(),
       })
     }, 800)
