@@ -52,6 +52,24 @@ export function sendApply(jobs, opts = {}) {
   })
 }
 
+// Build the exact payload sendSync() posts to the extension, given the active résumé (or null) and
+// the CURRENT person's profile. Extracted as a pure function so the person-switch identity rule is
+// unit-testable without mounting React: even when the selected person has NO active résumé
+// (activeForSync null, or present but without .text), the payload MUST still carry that person's
+// `profile` (contact identity) with the résumé-derived fields CLEARED — never omitted, and never
+// left as the PREVIOUS person's values. Regressing this to a null/early-return is exactly the
+// silent wrong-person-autofill bug this guards against. Callers pass loadProfile() (which reads the
+// current person) as `profile`, so whatever the current person's identity is flows straight through.
+export function buildSyncPayload(activeForSync, profile) {
+  const hasResumeText = !!(activeForSync && activeForSync.text)
+  return {
+    resumeText: hasResumeText ? activeForSync.text : '',
+    resumeName: hasResumeText ? activeForSync.name : null,
+    resumeFile: hasResumeText ? (activeForSync.file || null) : null,
+    profile,
+  }
+}
+
 // Push the app's résumé/profile into the extension so autofill always uses what THIS app has
 // (one source of truth instead of two independent résumé stores).
 // data: { resumeText, resumeName, resumeFile: {name,type,b64}, profile }

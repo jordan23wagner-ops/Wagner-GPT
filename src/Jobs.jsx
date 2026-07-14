@@ -15,7 +15,7 @@ import {
   backendChat, stripThinking, deepSystemPrompt, deepIntro, extractConfirmedFacts,
   unresolvedGaps, gapMemoryStatus,
 } from './lib/jobsAI'
-import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, onFillStatus } from './lib/aliciaBridge'
+import { extensionPresent, extensionVersion, waitForExtension, sendApply, sendSync, buildSyncPayload, onFillStatus } from './lib/aliciaBridge'
 import { isFortune500, layoffFlag } from './lib/companyData'
 import { ghostJobRisk } from './lib/ghostJob'
 
@@ -205,14 +205,10 @@ function JobsInner({ person, switchPerson }) {
   const activeForSync = activeResume(resumes)
   useEffect(() => {
     if (!hasExt) return
-    const hasResumeText = !!(activeForSync && activeForSync.text)
     const t = setTimeout(() => {
-      sendSync({
-        resumeText: hasResumeText ? activeForSync.text : '',
-        resumeName: hasResumeText ? activeForSync.name : null,
-        resumeFile: hasResumeText ? (activeForSync.file || null) : null,
-        profile: loadProfile(),
-      })
+      // buildSyncPayload keeps the "clear résumé fields but always send THIS person's profile"
+      // rule in one testable place (see aliciaBridge). loadProfile() reads the current person.
+      sendSync(buildSyncPayload(activeForSync, loadProfile()))
     }, 800)
     return () => clearTimeout(t)
   }, [hasExt, activeForSync && activeForSync.id, activeForSync && activeForSync.text]) // eslint-disable-line react-hooks/exhaustive-deps
