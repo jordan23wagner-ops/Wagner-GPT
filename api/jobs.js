@@ -227,9 +227,27 @@ export const INDUSTRY_BOARDS = {
 
 // ── Small utilities ─────────────────────────────────────────────────────────────────────────────
 
+// Decode the common HTML entities BEFORE stripping tags. Some sources (confirmed live:
+// Greenhouse's `content` field) return their job description as ENTITY-ENCODED html --
+// `&lt;div class=&quot;x&quot;&gt;&lt;strong&gt;About&lt;/strong&gt;` rather than literal
+// `<div>...`. The old cleanText stripped `&lt;`/`&gt;`/`&quot;` as generic entities WITHOUT ever
+// recognizing them as encoded tags, leaving the tag NAMES behind as bare words -- the description
+// rendered as literal "div class= content-intro h2 strong About Anthropic ...". Decoding first
+// turns those back into real `<div>` tags that the tag-strip regex below then removes cleanly.
+// `&amp;` is decoded LAST so a double-encoded `&amp;lt;` (literal "&lt;" text) isn't collapsed to a
+// real tag. Content that's ALREADY literal html is unaffected (no entities to decode).
+function decodeHtmlEntities(s) {
+  return String(s || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+}
 // Strip HTML tags/entities/urls to readable text (ported from src/lib/rag.js cleanText).
-function cleanText(text) {
-  return String(text || '')
+export function cleanText(text) {
+  return decodeHtmlEntities(String(text || ''))
     .replace(/<[^>]+>/g, ' ')
     .replace(/&[a-zA-Z]+;/g, ' ')
     .replace(/&#\d+;/g, ' ')
