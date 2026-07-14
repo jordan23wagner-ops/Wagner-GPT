@@ -1118,9 +1118,41 @@ function finalizeCustomJobCandidates(raw, { url, name, scrapedAt }) {
 // established reader identity rather than an anonymous IP, so reusing it here should pick up
 // client-injected markup and fare better against basic bot walls, without adding a full headless-
 // browser dependency to this function.
+// ── Bounded retry for the scrape tier's own upstream fetches ────────────────────────────────────
+// The scrape tier was observed "silent-empty on retry" for the SAME company: a transient upstream
+// hiccup (network error, timeout, a 5xx, a 429 rate-limit) returns empty exactly like a genuine
+// "this company has no open postings" -- the caller can't tell the two apart, and nothing ever
+// retried the transient case. This wrapper retries ONLY that transient case:
+//   - the fetch itself throwing (DNS failure, connection reset, AbortSignal timeout) -- transient
+//   - HTTP 429 (rate-limited) or 5xx (upstream server error) -- transient
+// It deliberately does NOT retry a normal non-2xx like 404/403 -- the upstream answered, so that's
+// a genuine "not here" (retrying would just hammer the site for the same answer) -- and it never
+// touches the PARSED result (zero JobPosting nodes / zero AI-extracted jobs after a 200 OK is a
+// real "no jobs found", not retried here or anywhere in this change).
+// One extra attempt only (2 tries total) -- kept small on purpose: this fires on EVERY fetch call
+// in the scrape tier (schema.org fetch, Jina reader, Groq extraction), and the scrape loop tries up
+// to 4 candidate URLs per lookup, so a bigger retry budget multiplies fast against the serverless
+// function's own time limit. A single retry already turns "fails once, works on retry" into one
+// request instead of a user-visible empty result, without materially risking the time budget.
+const SCRAPE_RETRY_EXTRA_ATTEMPTS = 1 // additional attempts after the first -- 2 tries total
+const SCRAPE_RETRY_BACKOFF_MS = 300 // short, fixed pause before the retry
+function isTransientStatus(status) { return status === 429 || status >= 500 }
+async function fetchWithRetry(url, opts, timeoutMs) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) })
+      if (r.ok || !isTransientStatus(r.status) || attempt >= SCRAPE_RETRY_EXTRA_ATTEMPTS) return r
+      // else: transient HTTP status and a retry is still available -- fall through to backoff+retry
+    } catch (e) {
+      if (attempt >= SCRAPE_RETRY_EXTRA_ATTEMPTS) throw e // network error/timeout, out of retries
+    }
+    await new Promise((resolve) => setTimeout(resolve, SCRAPE_RETRY_BACKOFF_MS))
+  }
+}
+
 async function fetchRawHtml(pageUrl) {
   try {
-    const r = await fetch(`https://r.jina.ai/${pageUrl}`, { headers: { Accept: 'text/html', 'X-Return-Format': 'html' }, signal: AbortSignal.timeout(10000) })
+    const r = await fetchWithRetry(`https://r.jina.ai/${pageUrl}`, { headers: { Accept: 'text/html', 'X-Return-Format': 'html' } }, 10000)
     if (!r.ok) { console.log('[structured-data] jina html fetch failed', pageUrl, 'status', r.status); return '' }
     const html = await r.text()
     console.log('[structured-data] jina html fetch ok', pageUrl, 'bytes', html.length, 'has ld+json script tag:', /application\/ld\+json/i.test(html))
@@ -1220,14 +1252,14 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
     // sequential URLs (rigzone.com/jobs/.../jid-1234567 through jid-1234574) for a page whose own
     // structured data confirmed zero real JobPosting nodes existed. Markdown preserves `[text](href)`
     // links, so a real url is actually available to quote instead of invent.
-    const r = await fetch(`https://r.jina.ai/${url}`, { headers: { Accept: 'text/plain', 'X-Return-Format': 'markdown' }, signal: AbortSignal.timeout(8000) })
+    const r = await fetchWithRetry(`https://r.jina.ai/${url}`, { headers: { Accept: 'text/plain', 'X-Return-Format': 'markdown' } }, 8000)
     if (!r.ok) return []
     text = (await r.text()).slice(0, 6000)
   } catch { return [] }
   if (!text.trim()) return []
   let data
   try {
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const r = await fetchWithRetry('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1268,8 +1300,7 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
         max_tokens: 1200,
         stream: false,
       }),
-      signal: AbortSignal.timeout(15000),
-    })
+    }, 15000)
     data = r.ok ? await r.json() : null
   } catch { return [] }
   const content = data?.choices?.[0]?.message?.content || ''
@@ -1297,12 +1328,26 @@ async function fetchCustomCareerPageViaAi({ url, name }) {
 
 // Entry point used by the search handler: try structured data first (free, authoritative, no AI
 // involved at all), and only reach for the AI-extraction fallback when the page has none.
+// Wrapped in the SAME warm-lambda `cached()` used for board fetches above (10min TTL, cap 200,
+// only ever stores non-empty results) -- this is the "light caching" half of the reliability fix:
+// company-lookup.js calls this directly (uncached before this change) so an immediate re-lookup of
+// the same company on a warm instance was re-running the full scrape (schema.org fetch + Jina +
+// Groq) every time, right into the same non-determinism this change targets. Keyed on url AND name
+// (not just url) because `name` changes the result here -- finalizeCustomJobCandidates rejects any
+// posting whose company equals `name`, so the SAME page scraped for a targeted lookup (name: '',
+// see company-lookup.js) vs. for discovery (name: the real employer, to catch job-board pages that
+// host OTHER companies' postings) can legitimately return different filtered sets; sharing one
+// cache entry between those two call shapes would leak one mode's filtering into the other. Never
+// caches an empty/failed result -- a genuine "no jobs" or a fetch that still failed after retries
+// is deliberately re-tried on the next call rather than pinned as the answer for 10 minutes.
 export async function fetchCustomCareerPage({ url, name }) {
-  try {
-    const structured = await fetchStructuredJobPostings({ url, name })
-    if (structured.length) return structured
-  } catch { /* fall through to AI extraction */ }
-  return fetchCustomCareerPageViaAi({ url, name })
+  return cached(`customPage:${url}::${name || ''}`, async () => {
+    try {
+      const structured = await fetchStructuredJobPostings({ url, name })
+      if (structured.length) return structured
+    } catch { /* fall through to AI extraction */ }
+    return fetchCustomCareerPageViaAi({ url, name })
+  })
 }
 
 // ── Adzuna source ────────────────────────────────────────────────────────────────────────────────
