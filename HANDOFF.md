@@ -4,7 +4,40 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
-## Update 2026-07-11 (latest, third pass) — five new ATS platforms discoverable (Workable, SmartRecruiters, Recruitee, iCIMS, Taleo)
+## Update 2026-07-14 (latest, fifth pass) — dashboard PWA title renamed to "Jalicia-GPT"
+
+`index.html`'s `<title>` and `apple-mobile-web-app-title` meta changed from "Chat" to "Jalicia-GPT"
+(commit `59a21ca`). This landed directly on `main` outside a Claude Code session (no accompanying
+HANDOFF entry at the time — backfilled here). Affects the browser tab title and the name shown
+under the icon when installed as a home-screen PWA; no functional/runtime change. `CLAUDE.md` was
+also added this pass, mirroring the sister Job-Assistant repo's, so future sessions get persistent
+repo-specific context automatically.
+
+## Update 2026-07-14 (fourth pass) — two-person wrong-identity fix, scrape-tier reliability, test coverage
+
+Three fixes landed on `main` (all live in production; Vercel auto-deploys on push):
+
+- **Two-person wrong-identity fix** (`77c59c0`, `src/Jobs.jsx`): the extension-sync `useEffect` used
+  to early-return when the selected person had no active résumé, silently leaving the extension
+  holding the PREVIOUS person's profile — a real wrong-person-autofill risk, not just a UX gap. Now
+  it always resyncs on person-switch: résumé-derived fields clear, but the CURRENT person's contact
+  `profile` is always sent. Live-verified: build clean, no regression to the normal (has-résumé) case.
+- **Company-lookup scrape-tier reliability** (`8ae6dfd`, `api/jobs.js`): the scrape tier
+  (`fetchCustomCareerPage`) was "silent-empty on retry" — a transient upstream failure looked
+  identical to a genuine "no jobs here." Added `fetchWithRetry` (retries ONLY a thrown error or
+  429/5xx, 1 extra attempt, 300ms backoff — never retries a real empty parse) and wrapped the whole
+  function in the existing `cached()` TTL helper (10min, cap 200, non-empty-only), keyed on
+  `url + name` since `name` changes `finalizeCustomJobCandidates`'s filtering semantics.
+- **Identity-sync test coverage** (`1e66393`/`f434c12`): extracted the person-switch sync-payload
+  logic into a pure `buildSyncPayload(activeForSync, profile)` in `src/lib/aliciaBridge.js`
+  (behavior-identical extraction from `Jobs.jsx`), unit-tested via the existing zero-framework
+  `node --test` runner — no vitest/jsdom added. 5 new tests lock in the exact bug case (no résumé →
+  cleared fields + current profile, never a stale one). Also added the missing `npm test` script.
+
+All three verified via `npm run build` + `npm test` (22/22 passing) before merge; production deploy
+confirmed `READY` via Vercel MCP on the corresponding commit SHA each time.
+
+## Update 2026-07-11 (third pass) — five new ATS platforms discoverable (Workable, SmartRecruiters, Recruitee, iCIMS, Taleo)
 
 A gap audit (research across job-data APIs, open-source ATS repos, and the agentic auto-apply
 landscape — see the artifact from that conversation for the full writeup) found that `autofill.js`
