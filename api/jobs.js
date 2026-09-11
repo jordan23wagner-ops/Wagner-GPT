@@ -1379,9 +1379,7 @@ async function fetchAdzuna(body, country) {
   const perPage = Math.min(50, Math.max(1, parseInt(body.resultsPerPage, 10) || 25))
   const params = new URLSearchParams()
   params.set('results_per_page', String(perPage))
-  let what = String(body.what || body.titles || '').trim()
-  if (body.remote) what = (what + ' remote').trim()
-  if (what) params.set('what', what)
+  const whatRaw = String(body.what || body.titles || '').trim()
   if (body.whatExclude) params.set('what_exclude', String(body.whatExclude))
   if (body.where) {
     params.set('where', String(body.where))
@@ -1395,7 +1393,31 @@ async function fetchAdzuna(body, country) {
   if (body.fullTime) params.set('full_time', '1')
   params.set('sort_by', body.sortBy === 'salary' ? 'salary' : (body.sortBy === 'date' ? 'date' : 'relevance'))
   params.set('content-type', 'application/json')
-  const d = await fetchJson(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${params.toString()}`, { ms: 9000 })
+  // Fan out across the title list rather than sending it as one comma-joined `what` string.
+  // Adzuna's `what` is an AND-ish keyword match, so the joined form collapses to nothing as titles
+  // are added — LIVE-MEASURED against production on 2026-09-11, remote US search:
+  //   1 title  -> 25 results   2 titles -> 1   3 titles -> 0   7 titles -> 0
+  // That silent cliff, not the location geo-fence, is the dominant reason a multi-title search
+  // returned almost nothing. Same defect class as fetchBluedoor's, and fixed the same way.
+  // Capped at 4 to bound Adzuna's per-day call quota (each search already costs 1 call per title).
+  const adzunaTitles = whatRaw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 4)
+  const adzunaQueries = adzunaTitles.length ? adzunaTitles : ['']
+  const settledAz = await Promise.allSettled(adzunaQueries.map((t) => {
+    const p2 = new URLSearchParams(params)
+    const w = (body.remote ? (t + ' remote') : t).trim()
+    if (w) p2.set('what', w)
+    return fetchJson(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${p2.toString()}`, { ms: 9000 })
+  }))
+  const seenAz = new Set()
+  const rawAz = []
+  for (const r of settledAz) {
+    if (r.status !== 'fulfilled') continue
+    for (const j of ((r.value && r.value.results) || [])) {
+      if (j && j.id != null) { if (seenAz.has(j.id)) continue; seenAz.add(j.id) }
+      rawAz.push(j)
+    }
+  }
+  const d = { results: rawAz }
   const results = ((d && d.results) || []).map((j) => ({
     id: 'az_' + j.id,
     title: j.title || '',

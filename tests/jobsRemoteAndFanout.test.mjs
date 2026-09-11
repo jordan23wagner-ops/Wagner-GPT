@@ -143,5 +143,33 @@ const STALE_LOCATION = 'Katy, TX|Cypress|Sugar Land|Houston'
   assert(!!onsite, 'non-remote: the same Adzuna job is kept — the filter is remote-driven, not a blanket exclusion')
 }
 
+// ── 4. Adzuna fans out across titles too ──────────────────────────────────────────────────────
+// Live-measured on production 2026-09-11 (remote US): Adzuna returned 25 results for 1 title, 1 for
+// 2 titles, and 0 for 3+. The comma-joined `what` string silently collapsed the biggest single
+// source to nothing on every real multi-title search — the actual reason results were thin.
+{
+  const res = await call({
+    titles: 'Project Manager, Program Manager, Technical Program Manager, AI Engineer',
+    remote: true,
+  })
+  const azWhat = fetched
+    .filter((u) => u.includes('api.adzuna.com'))
+    .map((u) => new URL(u).searchParams.get('what'))
+
+  assert(azWhat.length >= 2, `Adzuna issued multiple what queries (got ${azWhat.length}, was always 1)`)
+  assert(azWhat.length <= 4, `Adzuna fan-out capped at 4 to bound the daily call quota (got ${azWhat.length})`)
+  assert(azWhat.every((w) => !w.includes(',')), 'no Adzuna query contains a comma-joined title list')
+  assert(azWhat.some((w) => w.startsWith('Project Manager')), 'Adzuna still queries the first title')
+  assert(azWhat.some((w) => w.startsWith('AI Engineer')), 'Adzuna also queries "AI Engineer" on its own')
+  assert(azWhat.every((w) => w.endsWith(' remote')), 'each Adzuna query keeps the remote keyword appended per-title')
+  assert(res.statusCode === 200, 'Adzuna fan-out search returns 200')
+}
+{
+  // The mock returns the SAME job id for every query — dedupe must collapse it to one row.
+  const res = await call({ titles: 'Project Manager, Program Manager', remote: false })
+  const onsite = res.body.results.filter((r) => r.company === 'Onsite Co')
+  assert(onsite.length === 1, `the same Adzuna job returned by two title queries is de-duped (got ${onsite.length})`)
+}
+
 if (fails.length) { console.error('\n' + fails.length + ' ASSERTION(S) FAILED'); process.exit(1) }
 console.log('\n# ALL ASSERTIONS PASSED')

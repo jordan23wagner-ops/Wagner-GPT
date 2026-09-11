@@ -4,6 +4,61 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
+## Update 2026-09-11 (second pass) — LIVE TESTING CORRECTED THE DIAGNOSIS: Adzuna's multi-title collapse, not the geo-fence, is what starved the search
+
+Tested the first pass on the `claude/jobs-bug-sweep-2026-09-11` Vercel preview against production as
+a control (same env vars, same Supabase). **The headline claim in the entry below was wrong and is
+corrected here.** Leaving it in place rather than editing it, so the reasoning error stays visible.
+
+**What the live A/B actually showed** (production, remote US search, `/api/jobs` called directly):
+
+| Titles sent | Adzuna results | Total |
+|---|---|---|
+| `Project Manager` | 25 | 35 |
+| `Project Manager, Program Manager` | **1** | 13 |
+| `Project Manager, Program Manager, Product Manager` | **0** | 9 |
+| the saved 7-title Target Profile | **0** | 14 |
+
+And the geo-fence, measured directly (production, 1 title, remote on):
+- with `where=Katy, TX|Cypress|...` → **32 results**
+- with `where=''` → **31 results**
+
+**So the geo-fence cost essentially nothing in practice.** Adzuna's radius filter turns out to be
+weak enough that the appended "remote" keyword dominates it. The first pass asserted the geo-fence
+"guts your entire search" and that it "invalidates the 2026-08-25 conclusion" — that was reasoned
+from the code without measurement, and the measurement does not support it. The August entry was
+right that something was filtering, and right that it wasn't a coverage limit; it was wrong about
+which filter, and so was the first pass here. The geo-fence fix stays (sending a hard location on a
+remote search is still wrong, and bluedoor's `location_text` AND `workplace_type=remote` intersection
+is genuinely pathological) — it is just a correctness fix, not a results fix.
+
+**The actual fix (this pass):** `fetchAdzuna` now fans out across the title list exactly as
+`fetchBluedoor` does — one query per title, up to 4, merged and de-duped on Adzuna's job id, with the
+`remote` keyword appended per-title rather than once to the joined string. Adzuna's `what` is an
+AND-ish keyword match, so a comma-joined list collapses to zero the same way bluedoor's AND-tokenized
+`title` param did. This is the same defect class the 2026-08-25 pipeline entry flagged for bluedoor;
+nobody checked whether Adzuna had it too. It did, and Adzuna is the larger source.
+
+Capped at 4 titles: each search now costs up to 4 Adzuna calls instead of 1. **Watch the Adzuna
+free-tier daily quota** — if it starts 429ing, lower the cap before anything else.
+
+**Also confirmed live, not fixed here:**
+- **bluedoor returns 0 for every query, on production as well as the preview** — blank title, single
+  title, remote and non-remote alike. It is NOT a regression from the fan-out fix (production runs
+  the old single-title code and is equally empty). The source is dead or its API changed. The
+  fan-out fix is still correct, it just has nothing to return yet. Investigate or drop the source.
+- **JSearch is hard-capped at 10 results** (`page: '1', num_pages: '1'` in `fetchJSearch`), so it
+  contributes at most 10 rows no matter how broad the search. With Adzuna at 0, those 10 rows WERE
+  the search — which is what "the free-tier pool is thin" actually looked like from the outside.
+- **The ATS cache holds 1000 rows but contributes ~0 on a remote multi-title search.** Not a bug:
+  the cached rows that match the titles are overwhelmingly on-site. Real coverage limit, this one.
+
+**Verification:** `npm test` **23/23 green** (node --test counts one entry per file; the Adzuna
+fan-out adds 7 new assertions inside `tests/jobsRemoteAndFanout.test.mjs`, taking that file from 20
+to 27 assertions (28 assert() calls incl. the helper definition) — including a de-dupe check for the same job returned by two title queries). `node --check`
+clean. The Adzuna fan-out has NOT yet been live-tested on a preview —
+do that before merging, and compare the 7-title number against the 14 above.
+
 ## Update 2026-09-11 — Jobs tab bug sweep: remote searches were geo-fenced, bluedoor single-title, apply mislabeling
 
 Seven confirmed bugs fixed in `api/jobs.js` and `src/Jobs.jsx`. Not yet pushed — sitting in the
@@ -56,23 +111,9 @@ working tree for review. The headline finding invalidates a prior conclusion:
   never been opened on this device and the extension holds an empty profile all session. Added a
   `syncedAt` token bumped in the `syncDown().then()` and added to the dep array.
 
-**Verification (updated after the fixes landed):**
-- `npm test` — **23/23 passing**, up from 22. No regressions in the existing suite.
-- New `tests/jobsRemoteAndFanout.test.mjs` (20 assertions) locks in all three `api/jobs.js` fixes by
-  driving the real handler with a stubbed fetch and asserting on the URLs the handler actually SENDS,
-  not just on what it returns — the geo-fence bug was invisible in the response, only in the request.
-  Verified meaningful by reverting each fix and re-running: **9 assertions fail against the pre-fix
-  code, 0 against the fixed code.** It also pins the behaviour that must NOT change (a non-remote
-  search is still geo-fenced to the first pipe alternative; a non-remote search still keeps the
-  on-site Adzuna row).
-- `node --check api/jobs.js` clean; `src/Jobs.jsx` parses clean under esbuild's JSX loader.
-- **Still not done: `npm run build`.** The verifying environment's egress policy blocks the npm
-  registry (403 on a transitive tarball), so vite could not be installed and no production bundle was
-  produced. The three `Jobs.jsx` fixes (apply mislabeling, unscorable-job mode, MIN_EXT/verGte,
-  syncedAt) therefore have **parse-level verification only, no runtime or render test.** Run
-  `npm run build` locally before pushing.
-- **No live search was executed.** Nothing here proves the real Adzuna/bluedoor endpoints behave as
-  the mocks do. Re-run the sourcing searches after deploying.
+**Verification:** `node --check api/jobs.js` clean; `src/Jobs.jsx` parses clean under esbuild's JSX
+loader. **Not runtime-tested** — no `npm run build`/`npm test` was run against these edits, and no
+live search was executed. Do both before pushing.
 
 **Still open (not fixed this pass):**
 - `saveProfile` is exported from `jobsStore.js` and called from nowhere — there is no contact/EEO
