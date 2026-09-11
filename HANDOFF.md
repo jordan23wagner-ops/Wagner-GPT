@@ -4,6 +4,129 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
+## Update 2026-09-11 (second pass) — LIVE TESTING CORRECTED THE DIAGNOSIS: Adzuna's multi-title collapse, not the geo-fence, is what starved the search
+
+Tested the first pass on the `claude/jobs-bug-sweep-2026-09-11` Vercel preview against production as
+a control (same env vars, same Supabase). **The headline claim in the entry below was wrong and is
+corrected here.** Leaving it in place rather than editing it, so the reasoning error stays visible.
+
+**What the live A/B actually showed** (production, remote US search, `/api/jobs` called directly):
+
+| Titles sent | Adzuna results | Total |
+|---|---|---|
+| `Project Manager` | 25 | 35 |
+| `Project Manager, Program Manager` | **1** | 13 |
+| `Project Manager, Program Manager, Product Manager` | **0** | 9 |
+| the saved 7-title Target Profile | **0** | 14 |
+
+And the geo-fence, measured directly (production, 1 title, remote on):
+- with `where=Katy, TX|Cypress|...` → **32 results**
+- with `where=''` → **31 results**
+
+**So the geo-fence cost essentially nothing in practice.** Adzuna's radius filter turns out to be
+weak enough that the appended "remote" keyword dominates it. The first pass asserted the geo-fence
+"guts your entire search" and that it "invalidates the 2026-08-25 conclusion" — that was reasoned
+from the code without measurement, and the measurement does not support it. The August entry was
+right that something was filtering, and right that it wasn't a coverage limit; it was wrong about
+which filter, and so was the first pass here. The geo-fence fix stays (sending a hard location on a
+remote search is still wrong, and bluedoor's `location_text` AND `workplace_type=remote` intersection
+is genuinely pathological) — it is just a correctness fix, not a results fix.
+
+**The actual fix (this pass):** `fetchAdzuna` now fans out across the title list exactly as
+`fetchBluedoor` does — one query per title, up to 4, merged and de-duped on Adzuna's job id, with the
+`remote` keyword appended per-title rather than once to the joined string. Adzuna's `what` is an
+AND-ish keyword match, so a comma-joined list collapses to zero the same way bluedoor's AND-tokenized
+`title` param did. This is the same defect class the 2026-08-25 pipeline entry flagged for bluedoor;
+nobody checked whether Adzuna had it too. It did, and Adzuna is the larger source.
+
+Capped at 4 titles: each search now costs up to 4 Adzuna calls instead of 1. **Watch the Adzuna
+free-tier daily quota** — if it starts 429ing, lower the cap before anything else.
+
+**Also confirmed live, not fixed here:**
+- **bluedoor returns 0 for every query, on production as well as the preview** — blank title, single
+  title, remote and non-remote alike. It is NOT a regression from the fan-out fix (production runs
+  the old single-title code and is equally empty). The source is dead or its API changed. The
+  fan-out fix is still correct, it just has nothing to return yet. Investigate or drop the source.
+- **JSearch is hard-capped at 10 results** (`page: '1', num_pages: '1'` in `fetchJSearch`), so it
+  contributes at most 10 rows no matter how broad the search. With Adzuna at 0, those 10 rows WERE
+  the search — which is what "the free-tier pool is thin" actually looked like from the outside.
+- **The ATS cache holds 1000 rows but contributes ~0 on a remote multi-title search.** Not a bug:
+  the cached rows that match the titles are overwhelmingly on-site. Real coverage limit, this one.
+
+**Verification:** `npm test` **23/23 green** (node --test counts one entry per file). The Adzuna
+fan-out adds 8 assertions to `tests/jobsRemoteAndFanout.test.mjs`, taking it from 20 to **28**,
+including a de-dupe check for the same job returned by two title queries. `node --check` clean. The Adzuna fan-out has NOT yet been live-tested on a preview —
+do that before merging, and compare the 7-title number against the 14 above.
+
+## Update 2026-09-11 — Jobs tab bug sweep: remote searches were geo-fenced, bluedoor single-title, apply mislabeling
+
+Seven confirmed bugs fixed in `api/jobs.js` and `src/Jobs.jsx`. Not yet pushed — sitting in the
+working tree for review. The headline finding invalidates a prior conclusion:
+
+- **Remote searches were geo-fenced upstream** (`api/jobs.js`, the `whereAlts` block). The saved
+  pipe-list location was collapsed to its first segment and sent to EVERY geo-aware source with no
+  remote check — Adzuna got `where=Katy, TX&distance=40`, JSearch got `"… in Katy, TX"`, bluedoor got
+  `location_text=Katy, TX` **AND** `workplace_type=remote`, an intersection matching almost nothing.
+  `filterJob` correctly skips the location check when `wantRemote`, which is why this looked inert on
+  inspection — the damage happened before anything came back. Now `body.remote` clears `body.where`
+  entirely; `whereAlts` is untouched for the non-remote path.
+  **This invalidates the 2026-08-25 pipeline conclusion** that the thin remote-PM result set was "a
+  real data-coverage limit, not a filter problem." Re-running the PM search at $140k returned the
+  same 3 results as $120k because both runs were geo-fenced to one Houston suburb. Re-run the
+  sourcing searches before drawing any conclusion about free-tier coverage.
+- **bluedoor now fans out over titles** (`fetchBluedoor`). Previously queried `titles[0]` only, so a
+  PM-led search could never return a pure "AI Engineer" posting from the enterprise ATSes bluedoor
+  uniquely covers — `filterJob` can only remove rows, never add unrequested ones. Now issues up to 4
+  title queries via `Promise.allSettled`, merges and de-dupes on `job_id` before the org batch lookup.
+  Capped at 4 to stay inside the anonymous rate limit. (This was the "future task, not urgent" flagged
+  on 2026-08-25.)
+- **Adzuna now goes through `filterJob`** like every other source. It was exempted on the theory that
+  its API params covered the same ground — false for `remote` (Adzuna has no remote param; we only
+  append the word "remote" to the keyword string) and loose for title (keyword match, not
+  `titleMatches`' word-boundary check). On-site jobs whose description merely contained "remote" were
+  rendering in Remote-only searches, unremovable by any filter. `sources.adzuna` now reports the
+  filtered count with `adzunaRaw` alongside, matching every other source's shape. The stale comment
+  claiming server-side coverage is corrected.
+- **Partial batch apply no longer mislabels jobs** (`PrepFlow.doApply` and `BulkApplyFlow.doApply`).
+  `sendApply` resolves `{count}` — a cardinality, NOT a prefix. `chosen.slice(0, openedCount)` assumed
+  the extension opened the first n of the batch. Open 1/3/5 of five → the app marked 1/2/3 applied, so
+  job 2 sat in the tracker as applied to a posting that never opened and would never be revisited.
+  Now all-or-nothing: marks applied only on a clean sweep, and the partial message says plainly that
+  nothing was marked. Both copies fixed identically — they remain duplicated, worth extracting.
+- **Unscorable jobs are no longer force-skipped** (`Jobs.jsx`, batch scoring). `matchScore` returns
+  `score: null` on a parse failure and `jobsAI.js`'s contract says treat null as "not scored, don't
+  auto-skip." `null >= 75` and `null >= 50` are both false, so null landed in `'weak'` — the one
+  bucket that gets forced to `skipped` and pre-unchecked. The `catch` one line below already gave a
+  THROWN failure the best treatment (`asis`); a parse failure now matches it.
+- **Extension version banner actually compares versions.** There was no comparison code anywhere in
+  the repo — one unconditional literal that also stated `v1.11.1+` while all four error paths said
+  `v1.13.37+`, so a user on v1.12 saw a green "you're fine" and then an apply failure telling them to
+  check the indicator that said they were fine. Added `MIN_EXT` + numeric per-segment `verGte` (string
+  compare is wrong: `'1.9.0' > '1.13.0'` lexically). All five call sites now read `MIN_EXT`.
+- **Extension re-syncs after `syncDown` adopts cloud data.** The sync effect fires on an 800ms timer
+  with deps `[hasExt, activeForSync.id, .text]`. If the cloud pull landed later and the adopted résumé
+  was byte-identical, deps never changed and the effect never re-ran — the extension kept the payload
+  pushed before that person's real profile arrived. Worst case: switch to a person whose data has
+  never been opened on this device and the extension holds an empty profile all session. Added a
+  `syncedAt` token bumped in the `syncDown().then()` and added to the dep array.
+
+**Verification:** `node --check api/jobs.js` clean; `src/Jobs.jsx` parses clean under esbuild's JSX
+loader. **Not runtime-tested** — no `npm run build`/`npm test` was run against these edits, and no
+live search was executed. Do both before pushing.
+
+**Still open (not fixed this pass):**
+- `saveProfile` is exported from `jobsStore.js` and called from nowhere — there is no contact/EEO
+  editor in the app, so `loadProfile()` returns `{}` and `buildSyncPayload` ships `profile: {}` for
+  both people on every sync. The per-person identity mechanism is currently inert; the guard is
+  correct, it just has nothing to guard. This caps the real-world severity of the re-sync fix above.
+- "Load more" discards Adzuna page 2 when the non-Adzuna sources alone fill the 60-row cap, then
+  reports "No more new jobs."
+- Dead backend params (`sortBy`, `whatExclude`, `distance`, `salaryMax`) the client never sends.
+  Knock-on: the UI's "Sort by → Salary" only re-sorts the 60 rows already chosen by the server's
+  direct-first ranking; it is not a salary-ordered search.
+- `exportCsv` always writes `applications.csv` with no person in the filename — the two people's
+  exports overwrite each other in Downloads.
+
 ## Update 2026-07-14 (latest, fifth pass) — dashboard PWA title renamed to "Jalicia-GPT"
 
 `index.html`'s `<title>` and `apple-mobile-web-app-title` meta changed from "Chat" to "Jalicia-GPT"

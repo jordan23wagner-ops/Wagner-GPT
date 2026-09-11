@@ -638,12 +638,30 @@ async function fetchBluedoor(what, where, remote, country) {
   // JSearch's more lenient keyword search. Query on the first title only; the app's own filterJob
   // still narrows the final result set against the FULL title list afterward, same as `where` below
   // already does for multi-alternative locations.
-  const firstTitle = String(what || '').split(',')[0].trim()
-  if (firstTitle) params.set('title', firstTitle)
   if (where) params.set('location_text', where)
   if (remote) params.set('workplace_type', 'remote')
-  const d = await fetchJson(`${BLUEDOOR_BASE}/v1/jobs/search?${params.toString()}`, { ms: 8000 })
-  const jobs = (d && d.data) || []
+  // Fan out over the first few titles and merge. Querying only titles[0] meant a search led by
+  // "Project Manager" could never return a pure "AI Engineer" posting from the enterprise ATSes
+  // (ADP/Oracle HCM) that bluedoor uniquely covers — filterJob can only REMOVE rows afterward,
+  // never add ones the API was never asked for. Capped at 4 to stay inside the anonymous rate limit.
+  const titleList = String(what || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 4)
+  const queries = titleList.length ? titleList : ['']
+  const settled = await Promise.allSettled(queries.map((t) => {
+    const p = new URLSearchParams(params)
+    if (t) p.set('title', t)
+    return fetchJson(`${BLUEDOOR_BASE}/v1/jobs/search?${p.toString()}`, { ms: 8000 })
+  }))
+  const seenJobIds = new Set()
+  const jobs = []
+  for (const s of settled) {
+    if (s.status !== 'fulfilled') continue
+    for (const j of ((s.value && s.value.data) || [])) {
+      const key = j && (j.job_id || j.id)
+      if (key && seenJobIds.has(key)) continue
+      if (key) seenJobIds.add(key)
+      jobs.push(j)
+    }
+  }
   if (!jobs.length) return []
   const orgIds = Array.from(new Set(jobs.map((j) => j.org_id).filter(Boolean)))
   const orgNames = {}
@@ -1361,9 +1379,7 @@ async function fetchAdzuna(body, country) {
   const perPage = Math.min(50, Math.max(1, parseInt(body.resultsPerPage, 10) || 25))
   const params = new URLSearchParams()
   params.set('results_per_page', String(perPage))
-  let what = String(body.what || body.titles || '').trim()
-  if (body.remote) what = (what + ' remote').trim()
-  if (what) params.set('what', what)
+  const whatRaw = String(body.what || body.titles || '').trim()
   if (body.whatExclude) params.set('what_exclude', String(body.whatExclude))
   if (body.where) {
     params.set('where', String(body.where))
@@ -1377,7 +1393,31 @@ async function fetchAdzuna(body, country) {
   if (body.fullTime) params.set('full_time', '1')
   params.set('sort_by', body.sortBy === 'salary' ? 'salary' : (body.sortBy === 'date' ? 'date' : 'relevance'))
   params.set('content-type', 'application/json')
-  const d = await fetchJson(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${params.toString()}`, { ms: 9000 })
+  // Fan out across the title list rather than sending it as one comma-joined `what` string.
+  // Adzuna's `what` is an AND-ish keyword match, so the joined form collapses to nothing as titles
+  // are added — LIVE-MEASURED against production on 2026-09-11, remote US search:
+  //   1 title  -> 25 results   2 titles -> 1   3 titles -> 0   7 titles -> 0
+  // That silent cliff, not the location geo-fence, is the dominant reason a multi-title search
+  // returned almost nothing. Same defect class as fetchBluedoor's, and fixed the same way.
+  // Capped at 4 to bound Adzuna's per-day call quota (each search already costs 1 call per title).
+  const adzunaTitles = whatRaw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 4)
+  const adzunaQueries = adzunaTitles.length ? adzunaTitles : ['']
+  const settledAz = await Promise.allSettled(adzunaQueries.map((t) => {
+    const p2 = new URLSearchParams(params)
+    const w = (body.remote ? (t + ' remote') : t).trim()
+    if (w) p2.set('what', w)
+    return fetchJson(`${ADZUNA_BASE}/${country}/search/${page}?${auth}&${p2.toString()}`, { ms: 9000 })
+  }))
+  const seenAz = new Set()
+  const rawAz = []
+  for (const r of settledAz) {
+    if (r.status !== 'fulfilled') continue
+    for (const j of ((r.value && r.value.results) || [])) {
+      if (j && j.id != null) { if (seenAz.has(j.id)) continue; seenAz.add(j.id) }
+      rawAz.push(j)
+    }
+  }
+  const d = { results: rawAz }
   const results = ((d && d.results) || []).map((j) => ({
     id: 'az_' + j.id,
     title: j.title || '',
@@ -1465,7 +1505,15 @@ export default async function handler(req, res) {
   // radius-search a single place) get only the FIRST segment. Must run before the fetch tasks are
   // created — they read body.where. No '|' → exactly the old single-substring behavior.
   const whereAlts = String(body.where || '').toLowerCase().split('|').map((s) => s.trim()).filter(Boolean)
-  if (whereAlts.length > 1) body.where = String(body.where).split('|')[0].trim()
+  // A REMOTE search must not be geo-fenced upstream. Every geo-aware source (Adzuna's radius,
+  // JSearch's "in <city>", bluedoor's location_text) treats `where` as a hard restriction, and
+  // bluedoor additionally ANDs it with workplace_type=remote — an intersection matching almost
+  // nothing. The local filterJob already skips the location check when wantRemote, so the pipe
+  // list stays in whereAlts for the non-remote path; we only stop SENDING it. (Before this, a
+  // saved "Katy, TX|..." location silently restricted every remote search to one Houston suburb,
+  // which read as "the free-tier job pool is thin" rather than as a filter bug.)
+  if (body.remote) body.where = ''
+  else if (whereAlts.length > 1) body.where = String(body.where).split('|')[0].trim()
 
   try {
     // ── categories (Adzuna) ──
@@ -1554,8 +1602,11 @@ export default async function handler(req, res) {
       else if (v.kind === 'bluedoor') bucket.bluedoor = v.results || []
     }
 
-    // Filter the non-Adzuna sources by title + remote/location + salary/contract (Adzuna gets these
-    // filters server-side via its API params; the direct sources ranked FIRST must honor them too).
+    // Filter EVERY source by title + remote/location + salary/contract. Adzuna used to be exempted
+    // on the theory that its API params covered it — false for `remote` (Adzuna has no remote
+    // parameter; we only append the WORD "remote" to the keyword string) and loose for title (a
+    // keyword match, not titleMatches' word-boundary check). The exemption let on-site jobs whose
+    // description merely contained "remote" render in a Remote-only search, unremovable by any filter.
     const terms = tokenizeTitles(titles)
     const wantRemote = !!body.remote
     const salaryFloor = parseInt(body.salaryMin, 10) || 0
@@ -1585,6 +1636,7 @@ export default async function handler(req, res) {
     const reedResults = bucket.reed.filter(filterJob)
     const usajobsResults = bucket.usajobs.filter(filterJob)
     const bluedoorResults = bucket.bluedoor.filter(filterJob)
+    const adzunaResults = bucket.adzuna.filter(filterJob)
 
     // Mark each result direct/aggregator; ATS boards + Himalayas + USAJobs + bluedoor are direct
     // (USAJobs IS the federal government's own official job board, and bluedoor's apply_url always
@@ -1595,7 +1647,7 @@ export default async function handler(req, res) {
     himalayasResults.forEach((j) => { j.direct = true })
     usajobsResults.forEach((j) => { j.direct = true })
     bluedoorResults.forEach((j) => { j.direct = true })
-    bucket.adzuna.forEach((j) => { j.direct = false })
+    adzunaResults.forEach((j) => { j.direct = false })
     themuseResults.forEach((j) => { j.direct = false })
     joobleResults.forEach((j) => { j.direct = false })
     careerjetResults.forEach((j) => { j.direct = false })
@@ -1604,7 +1656,7 @@ export default async function handler(req, res) {
     // Dedupe preferring DIRECT-link sources over any aggregator's link for the same job.
     let merged = dedupe([
       ...boardResults, ...jsearchResults, ...himalayasResults, ...usajobsResults, ...bluedoorResults,
-      ...bucket.adzuna, ...themuseResults, ...joobleResults, ...careerjetResults, ...reedResults,
+      ...adzunaResults, ...themuseResults, ...joobleResults, ...careerjetResults, ...reedResults,
     ])
 
     // Honest host-based direct flag BEFORE ranking too — rank() used to read the sources'
@@ -1648,7 +1700,7 @@ export default async function handler(req, res) {
       results: merged,
       count: merged.length,
       sources: {
-        adzuna: bucket.adzuna.length, adzunaConfigured,
+        adzuna: adzunaResults.length, adzunaRaw: bucket.adzuna.length, adzunaConfigured,
         jsearch: jsearchResults.length, jsearchConfigured, jsearchError, jsearchRaw,
         himalayas: himalayasResults.length,
         ats: bucket.ats.length, atsFromCache,
