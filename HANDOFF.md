@@ -53,10 +53,9 @@ free-tier daily quota** — if it starts 429ing, lower the cap before anything e
 - **The ATS cache holds 1000 rows but contributes ~0 on a remote multi-title search.** Not a bug:
   the cached rows that match the titles are overwhelmingly on-site. Real coverage limit, this one.
 
-**Verification:** `npm test` **23/23 green** (node --test counts one entry per file; the Adzuna
-fan-out adds 7 new assertions inside `tests/jobsRemoteAndFanout.test.mjs`, taking that file from 20
-to 27 assertions (28 assert() calls incl. the helper definition) — including a de-dupe check for the same job returned by two title queries). `node --check`
-clean. The Adzuna fan-out has NOT yet been live-tested on a preview —
+**Verification:** `npm test` **23/23 green** (node --test counts one entry per file). The Adzuna
+fan-out adds 8 assertions to `tests/jobsRemoteAndFanout.test.mjs`, taking it from 20 to **28**,
+including a de-dupe check for the same job returned by two title queries. `node --check` clean. The Adzuna fan-out has NOT yet been live-tested on a preview —
 do that before merging, and compare the 7-title number against the 14 above.
 
 ## Update 2026-09-11 — Jobs tab bug sweep: remote searches were geo-fenced, bluedoor single-title, apply mislabeling
