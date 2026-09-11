@@ -59,6 +59,18 @@ const DEFAULT_TARGET = {
   // that carries a spec, and saveTargets stamps it on every manual save so user edits stick.
   spec: 'katy-120k-2026-07',
 }
+// Minimum Alicia extension version for hands-off auto-fill. ONE definition — the banner and every
+// error message read this, so they can't drift apart (the banner used to claim v1.11.1+ while all
+// four error paths said v1.13.37+, so a user on v1.12 saw a green "you're fine" and then a failure
+// telling them to check the very indicator that said they were fine).
+const MIN_EXT = '1.13.37'
+// Numeric per-segment compare. String comparison is wrong here: '1.9.0' > '1.13.0' lexically.
+const verGte = (a, b) => {
+  const pa = String(a || '').split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = String(b || '').split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x > y }
+  return true
+}
 const MAX_BATCH = 10         // apply 1–10 at a time (targeted, high-quality)
 const APPLY_THRESHOLD = 50   // deep-rewrite auto-skip cutoff
 const GATE_STRONG = 75       // matches fitColor's green threshold — apply-as-is above this
@@ -173,6 +185,7 @@ function JobsInner({ person, switchPerson }) {
   const [memory, setMemory] = useState(loadMemory)
   const [hasExt, setHasExt] = useState(extensionPresent())
   const [extVer, setExtVer] = useState(extensionVersion())
+  const [syncedAt, setSyncedAt] = useState(0) // bumped when syncDown adopts cloud data — see below
 
   useEffect(() => {
     let alive = true
@@ -181,6 +194,11 @@ function JobsInner({ person, switchPerson }) {
       if (Array.isArray(d.resumes)) setResumes(d.resumes)
       if (Array.isArray(d.tracked)) setTracked(d.tracked)
       if (Array.isArray(d.memory)) setMemory(d.memory)
+      // The extension-sync effect fires on an 800ms timer; if this cloud pull lands later AND the
+      // adopted résumé is byte-identical to the local one, its deps never change and it never
+      // re-runs — leaving the extension holding the payload pushed before this person's real
+      // profile arrived. Bump an explicit token so the resync is ordered after the pull.
+      setSyncedAt(Date.now())
       // Target Profile prefill lives in SearchView (its own scope), not here.
     })
     waitForExtension().then((p) => { if (alive) { setHasExt(p); setExtVer(extensionVersion()) } })
@@ -211,7 +229,7 @@ function JobsInner({ person, switchPerson }) {
       sendSync(buildSyncPayload(activeForSync, loadProfile()))
     }, 800)
     return () => clearTimeout(t)
-  }, [hasExt, activeForSync && activeForSync.id, activeForSync && activeForSync.text]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hasExt, syncedAt, activeForSync && activeForSync.id, activeForSync && activeForSync.text]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { saveResumes(resumes) }, [resumes])
   useEffect(() => { saveTracked(tracked) }, [tracked])
@@ -508,7 +526,7 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
           if (ok) upsertTracked(job, { status: 'applied' })
           setStatus(ok
             ? `Alicia opened “${job.title}” and is auto-filling — review and click Submit. (On a job description page, it fills once it reaches the application form.)`
-            : `Couldn’t reach the Alicia extension to open “${job.title}” — check the extension version by the indicator above (needs v1.13.37+), reload it, or use “View posting” to open it manually. Not marked applied.`)
+            : `Couldn’t reach the Alicia extension to open “${job.title}” — check the extension version by the indicator above (needs v${MIN_EXT}+), reload it, or use “View posting” to open it manually. Not marked applied.`)
         })
     } else {
       // No extension → we open it, synchronously, off the click.
@@ -621,7 +639,9 @@ function SearchView({ activeResume, resumes, memory, setMemory, hasExt, extVer, 
 
       <div className="text-xs px-1">
         {hasExt
-          ? <span className="text-green-600">🔌 Alicia extension detected{extVer ? ` (v${extVer})` : ''} — needs v1.11.1+ for hands-off auto-fill.</span>
+          ? (verGte(extVer, MIN_EXT)
+            ? <span className="text-green-600">🔌 Alicia extension detected{extVer ? ` (v${extVer})` : ''} — ready for hands-off auto-fill.</span>
+            : <span className="text-orange-500">🔌 Alicia extension detected{extVer ? ` (v${extVer})` : ''} — update to v{MIN_EXT}+ for hands-off auto-fill.</span>)
           : <span className="text-[var(--muted)]">🔌 Alicia extension not detected — Apply opens the posting in a new tab (install/enable it for hands-off auto-fill).</span>}
       </div>
       {status && <div className="text-sm text-[var(--muted)] px-1">{status}</div>}
@@ -969,12 +989,18 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       setApplyMsg(`Asking Alicia to open and auto-fill ${chosen.length} job(s)…`)
       sendApply(payloadJobs, { resumeName: (activeResume && activeResume.name) || 'Tailored résumé' })
         .then((res) => {
-          const openedCount = res && res.count || 0
+          const openedCount = (res && res.count) || 0
           const missed = chosen.length - openedCount
-          if (openedCount) chosen.slice(0, openedCount).forEach((r) => upsertTracked(r.job, { status: 'applied' }))
-          setApplyMsg(openedCount
-            ? `Alicia opened and is auto-filling ${openedCount} tab(s) — review and click Submit on each.${missed ? ` ${missed} couldn't be opened — try those individually.` : ''}`
-            : `Couldn’t reach the Alicia extension — check its version by the indicator (needs v1.13.37+), reload it, or apply individually. Not marked applied.`)
+          // `count` is a CARDINALITY, not a prefix — nothing in the protocol says the extension
+          // opened the FIRST n of the batch. Marking chosen.slice(0, n) applied silently mislabeled
+          // whichever jobs happened to fail (a job you never applied to sits in the tracker as
+          // "applied" forever, so you never come back to it). Only mark on a clean sweep.
+          if (openedCount === chosen.length) chosen.forEach((r) => upsertTracked(r.job, { status: 'applied' }))
+          setApplyMsg(openedCount === chosen.length
+            ? `Alicia opened and is auto-filling all ${openedCount} tab(s) — review and click Submit on each.`
+            : openedCount
+              ? `Alicia opened ${openedCount} of ${chosen.length} tab(s); ${missed} couldn't be opened. None were marked applied — check the open tabs, then set status from the Tracker.`
+              : `Couldn’t reach the Alicia extension — check its version by the indicator (needs v${MIN_EXT}+), reload it, or apply individually. Not marked applied.`)
         })
     } else {
       // No extension → we have to open them ourselves, synchronously off the click. Browsers
@@ -987,7 +1013,7 @@ function PrepFlow({ mode, jobs, resumes, activeResume, memory, setMemory, hasExt
       const blockedNote = blocked ? ` ${blocked} pop-up(s) were blocked — open those from the Tracker or each card’s “View posting”.` : ''
       if (!opened) { setApplyMsg(`All ${chosen.length} pop-ups were blocked — nothing marked applied. Open them from “View posting”, or apply one at a time.`); return }
       openedRows.forEach((r) => upsertTracked(r.job, { status: 'applied', resumeId: r.resumeId }))
-      setApplyMsg(`Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v1.13.37+) for hands-off auto-fill.${blockedNote}`)
+      setApplyMsg(`Opened ${opened} posting(s) and marked applied. Install/enable the Alicia extension (v${MIN_EXT}+) for hands-off auto-fill.${blockedNote}`)
     }
   }
 
@@ -1133,7 +1159,14 @@ function BulkApplyFlow({ jobs, resumes, activeResume, memory, setMemory, hasExt,
         if (!base) return { job, score: null, missing: [], mode: 'asis' } // nothing to score against
         try {
           const m = await matchScore(base, job)
-          const mode = m.score >= GATE_STRONG ? 'asis' : m.score >= APPLY_THRESHOLD ? 'quick' : 'weak'
+          // matchScore returns score:null when the rater's output can't be parsed. jobsAI's own
+          // contract says callers must treat null as "not scored" — don't auto-skip. A bare
+          // `null >= 75` / `null >= 50` are both false, which dumped unscorable jobs into 'weak',
+          // the one bucket that gets force-skipped and pre-unchecked. The catch below already
+          // treats a THROWN failure as 'asis'; a parse failure now matches it.
+          const mode = typeof m.score !== 'number' ? 'asis'
+            : m.score >= GATE_STRONG ? 'asis'
+            : m.score >= APPLY_THRESHOLD ? 'quick' : 'weak'
           return { job, score: m.score, missing: m.missing || [], mode }
         } catch { return { job, score: null, missing: [], mode: 'asis' } } // scoring failed — don't block the batch, just don't claim a fit number
       }))
@@ -1209,10 +1242,13 @@ function BulkApplyFlow({ jobs, resumes, activeResume, memory, setMemory, hasExt,
         .then((res) => {
           const openedCount = (res && res.count) || 0
           const missed = chosen.length - openedCount
-          if (openedCount) chosen.slice(0, openedCount).forEach((r) => upsertTracked(r.job, { status: 'applied' }))
-          setApplyMsg(openedCount
-            ? `Alicia opened and is auto-filling ${openedCount} tab(s) — review and click Submit on each.${missed ? ` ${missed} couldn't be opened — try those individually.` : ''}`
-            : `Couldn't reach the Alicia extension — check its version (needs v1.13.37+), reload it, or apply individually. Not marked applied.`)
+          // See PrepFlow.doApply — `count` is a cardinality, not a prefix. All-or-nothing.
+          if (openedCount === chosen.length) chosen.forEach((r) => upsertTracked(r.job, { status: 'applied' }))
+          setApplyMsg(openedCount === chosen.length
+            ? `Alicia opened and is auto-filling all ${openedCount} tab(s) — review and click Submit on each.`
+            : openedCount
+              ? `Alicia opened ${openedCount} of ${chosen.length} tab(s); ${missed} couldn't be opened. None were marked applied — check the open tabs, then set status from the Tracker.`
+              : `Couldn't reach the Alicia extension — check its version (needs v${MIN_EXT}+), reload it, or apply individually. Not marked applied.`)
         })
     } else {
       const openedRows = []

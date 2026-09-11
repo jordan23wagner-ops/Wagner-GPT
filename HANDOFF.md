@@ -4,6 +4,89 @@ A complete, current handoff for continuing development. Wagner-GPT is a **100% f
 serverless, $0/month** AI assistant PWA built for Alicia. Everything runs on free tiers;
 the design rule is **never introduce a paid or persistent-server dependency**.
 
+## Update 2026-09-11 — Jobs tab bug sweep: remote searches were geo-fenced, bluedoor single-title, apply mislabeling
+
+Seven confirmed bugs fixed in `api/jobs.js` and `src/Jobs.jsx`. Not yet pushed — sitting in the
+working tree for review. The headline finding invalidates a prior conclusion:
+
+- **Remote searches were geo-fenced upstream** (`api/jobs.js`, the `whereAlts` block). The saved
+  pipe-list location was collapsed to its first segment and sent to EVERY geo-aware source with no
+  remote check — Adzuna got `where=Katy, TX&distance=40`, JSearch got `"… in Katy, TX"`, bluedoor got
+  `location_text=Katy, TX` **AND** `workplace_type=remote`, an intersection matching almost nothing.
+  `filterJob` correctly skips the location check when `wantRemote`, which is why this looked inert on
+  inspection — the damage happened before anything came back. Now `body.remote` clears `body.where`
+  entirely; `whereAlts` is untouched for the non-remote path.
+  **This invalidates the 2026-08-25 pipeline conclusion** that the thin remote-PM result set was "a
+  real data-coverage limit, not a filter problem." Re-running the PM search at $140k returned the
+  same 3 results as $120k because both runs were geo-fenced to one Houston suburb. Re-run the
+  sourcing searches before drawing any conclusion about free-tier coverage.
+- **bluedoor now fans out over titles** (`fetchBluedoor`). Previously queried `titles[0]` only, so a
+  PM-led search could never return a pure "AI Engineer" posting from the enterprise ATSes bluedoor
+  uniquely covers — `filterJob` can only remove rows, never add unrequested ones. Now issues up to 4
+  title queries via `Promise.allSettled`, merges and de-dupes on `job_id` before the org batch lookup.
+  Capped at 4 to stay inside the anonymous rate limit. (This was the "future task, not urgent" flagged
+  on 2026-08-25.)
+- **Adzuna now goes through `filterJob`** like every other source. It was exempted on the theory that
+  its API params covered the same ground — false for `remote` (Adzuna has no remote param; we only
+  append the word "remote" to the keyword string) and loose for title (keyword match, not
+  `titleMatches`' word-boundary check). On-site jobs whose description merely contained "remote" were
+  rendering in Remote-only searches, unremovable by any filter. `sources.adzuna` now reports the
+  filtered count with `adzunaRaw` alongside, matching every other source's shape. The stale comment
+  claiming server-side coverage is corrected.
+- **Partial batch apply no longer mislabels jobs** (`PrepFlow.doApply` and `BulkApplyFlow.doApply`).
+  `sendApply` resolves `{count}` — a cardinality, NOT a prefix. `chosen.slice(0, openedCount)` assumed
+  the extension opened the first n of the batch. Open 1/3/5 of five → the app marked 1/2/3 applied, so
+  job 2 sat in the tracker as applied to a posting that never opened and would never be revisited.
+  Now all-or-nothing: marks applied only on a clean sweep, and the partial message says plainly that
+  nothing was marked. Both copies fixed identically — they remain duplicated, worth extracting.
+- **Unscorable jobs are no longer force-skipped** (`Jobs.jsx`, batch scoring). `matchScore` returns
+  `score: null` on a parse failure and `jobsAI.js`'s contract says treat null as "not scored, don't
+  auto-skip." `null >= 75` and `null >= 50` are both false, so null landed in `'weak'` — the one
+  bucket that gets forced to `skipped` and pre-unchecked. The `catch` one line below already gave a
+  THROWN failure the best treatment (`asis`); a parse failure now matches it.
+- **Extension version banner actually compares versions.** There was no comparison code anywhere in
+  the repo — one unconditional literal that also stated `v1.11.1+` while all four error paths said
+  `v1.13.37+`, so a user on v1.12 saw a green "you're fine" and then an apply failure telling them to
+  check the indicator that said they were fine. Added `MIN_EXT` + numeric per-segment `verGte` (string
+  compare is wrong: `'1.9.0' > '1.13.0'` lexically). All five call sites now read `MIN_EXT`.
+- **Extension re-syncs after `syncDown` adopts cloud data.** The sync effect fires on an 800ms timer
+  with deps `[hasExt, activeForSync.id, .text]`. If the cloud pull landed later and the adopted résumé
+  was byte-identical, deps never changed and the effect never re-ran — the extension kept the payload
+  pushed before that person's real profile arrived. Worst case: switch to a person whose data has
+  never been opened on this device and the extension holds an empty profile all session. Added a
+  `syncedAt` token bumped in the `syncDown().then()` and added to the dep array.
+
+**Verification (updated after the fixes landed):**
+- `npm test` — **23/23 passing**, up from 22. No regressions in the existing suite.
+- New `tests/jobsRemoteAndFanout.test.mjs` (20 assertions) locks in all three `api/jobs.js` fixes by
+  driving the real handler with a stubbed fetch and asserting on the URLs the handler actually SENDS,
+  not just on what it returns — the geo-fence bug was invisible in the response, only in the request.
+  Verified meaningful by reverting each fix and re-running: **9 assertions fail against the pre-fix
+  code, 0 against the fixed code.** It also pins the behaviour that must NOT change (a non-remote
+  search is still geo-fenced to the first pipe alternative; a non-remote search still keeps the
+  on-site Adzuna row).
+- `node --check api/jobs.js` clean; `src/Jobs.jsx` parses clean under esbuild's JSX loader.
+- **Still not done: `npm run build`.** The verifying environment's egress policy blocks the npm
+  registry (403 on a transitive tarball), so vite could not be installed and no production bundle was
+  produced. The three `Jobs.jsx` fixes (apply mislabeling, unscorable-job mode, MIN_EXT/verGte,
+  syncedAt) therefore have **parse-level verification only, no runtime or render test.** Run
+  `npm run build` locally before pushing.
+- **No live search was executed.** Nothing here proves the real Adzuna/bluedoor endpoints behave as
+  the mocks do. Re-run the sourcing searches after deploying.
+
+**Still open (not fixed this pass):**
+- `saveProfile` is exported from `jobsStore.js` and called from nowhere — there is no contact/EEO
+  editor in the app, so `loadProfile()` returns `{}` and `buildSyncPayload` ships `profile: {}` for
+  both people on every sync. The per-person identity mechanism is currently inert; the guard is
+  correct, it just has nothing to guard. This caps the real-world severity of the re-sync fix above.
+- "Load more" discards Adzuna page 2 when the non-Adzuna sources alone fill the 60-row cap, then
+  reports "No more new jobs."
+- Dead backend params (`sortBy`, `whatExclude`, `distance`, `salaryMax`) the client never sends.
+  Knock-on: the UI's "Sort by → Salary" only re-sorts the 60 rows already chosen by the server's
+  direct-first ranking; it is not a salary-ordered search.
+- `exportCsv` always writes `applications.csv` with no person in the filename — the two people's
+  exports overwrite each other in Downloads.
+
 ## Update 2026-07-14 (latest, fifth pass) — dashboard PWA title renamed to "Jalicia-GPT"
 
 `index.html`'s `<title>` and `apple-mobile-web-app-title` meta changed from "Chat" to "Jalicia-GPT"
