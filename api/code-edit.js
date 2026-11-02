@@ -8,10 +8,14 @@
 // The system prompt forces "return only the full file in one fenced block" so we can
 // extract it deterministically; we still defensively strip stray prose/fences.
 
+import { requireCodingPassword } from './_codingAuth.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
+
+  if (!requireCodingPassword(req, res)) return
 
   const OLLAMA_CLOUD_KEY = process.env.OLLAMA_CLOUD_KEY
   const NVIDIA_NIM_KEY   = process.env.NVIDIA_NIM_KEY

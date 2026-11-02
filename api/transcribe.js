@@ -3,8 +3,11 @@
 // Groq Whisper large-v3-turbo is free, very fast, and far more accurate than
 // the browser Web Speech API (especially for accents and background noise).
 
+import { requireSameOrigin } from './_codingAuth.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+  if (!requireSameOrigin(req, res)) return
 
   const GROQ_KEY = process.env.GROQ_KEY
   if (!GROQ_KEY) {

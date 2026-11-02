@@ -3,7 +3,7 @@
 // Serverless endpoint that lets the PWA read and commit to GitHub repos.
 // Supports two accounts: GITHUB_TOKEN (Jordon) and GITHUB_TOKEN_ALICIA (Alicia).
 // Pass { account: 'alicia' } in the request body to use Alicia's token.
-// Same-origin only (no permissive CORS).
+// Password-gated (fails closed, see _codingAuth.js): these tokens can read private repos and commit.
 //
 // Actions (POST body { action, account?, ...args }):
 //   repos                                 -> [{ full_name, owner, repo, default_branch, private }]
@@ -12,12 +12,16 @@
 //   commit { owner, repo, path, content,  -> { committed: true, sha, commitUrl }
 //            message, sha?, branch? }
 
+import { requireCodingPassword } from './_codingAuth.js'
+
 const GH = 'https://api.github.com'
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
+
+  if (!requireCodingPassword(req, res)) return
 
   const { action, account } = req.body || {}
 

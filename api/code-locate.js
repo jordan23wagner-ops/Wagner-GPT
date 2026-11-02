@@ -1,8 +1,12 @@
 // Given a repo file tree and a plain-English instruction, ask the model which file to edit.
 // Returns { path } — just the path string, validated against the tree.
 
+import { requireCodingPassword } from './_codingAuth.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  if (!requireCodingPassword(req, res)) return
 
   const OLLAMA_KEY  = process.env.OLLAMA_CLOUD_KEY
   const NIM_KEY     = process.env.NVIDIA_NIM_KEY

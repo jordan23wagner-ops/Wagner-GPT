@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
-  Loader2, Wand2, GitCommit, X, FolderGit2, FileCode, ArrowLeft, Paperclip,
+  Loader2, Wand2, GitCommit, X, FolderGit2, FileCode, ArrowLeft, Paperclip, Lock,
 } from 'lucide-react'
 import {
-  listRepos, getTree, getFile, locateFile, editFile, commitFile,
+  listRepos, getTree, getFile, locateFile, editFile, commitFile, hasCodingPassword, setCodingPassword,
 } from './lib/coder'
 import { diffLines, diffStats } from './lib/linediff'
 
@@ -20,6 +20,8 @@ const STEP_LABELS = {
 }
 
 export default function Code() {
+  const [unlocked, setUnlocked] = useState(hasCodingPassword())
+  const [pwInput, setPwInput] = useState('')
   const [account, setAccount] = useState('jordon')
   const [repos, setRepos] = useState([])
   const [repo, setRepo] = useState(null)
@@ -40,11 +42,18 @@ export default function Code() {
   const acct = account === 'jordon' ? undefined : account
 
   useEffect(() => {
+    const lock = () => { setUnlocked(false); setRepos([]); setStatus({ type: 'error', text: 'Wrong password. Try again.' }) }
+    window.addEventListener('coding-locked', lock)
+    return () => window.removeEventListener('coding-locked', lock)
+  }, [])
+
+  useEffect(() => {
+    if (!unlocked) return
     setRepo(null); setTree(null); setProjectContext(null); resetEdit()
     listRepos(acct)
       .then(setRepos)
       .catch((err) => setStatus({ type: 'error', text: err.message }))
-  }, [account])
+  }, [account, unlocked])
 
   function resetEdit() {
     setLocatedPath(null); setFile(null); setProposal(null)
@@ -124,6 +133,31 @@ export default function Code() {
   }
 
   const busy = !!step
+
+  if (!unlocked) {
+    const submit = (e) => {
+      e.preventDefault()
+      if (!pwInput) return
+      setCodingPassword(pwInput); setPwInput(''); setStatus(null); setUnlocked(true)
+    }
+    return (
+      <div className="flex-1 overflow-y-auto bg-[var(--bg)] flex items-center justify-center p-6">
+        <form onSubmit={submit} className="w-full max-w-xs flex flex-col gap-3 text-center">
+          <Lock size={24} className="mx-auto text-[var(--accent)]" />
+          <p className="text-sm text-[var(--text)]">Enter the Coding Mode password</p>
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={pwInput}
+            onChange={(e) => setPwInput(e.target.value)}
+            className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text)]"
+          />
+          <button type="submit" className="rounded-lg px-3 py-2 text-sm font-medium bg-[var(--accent)] text-[var(--accent-text)]">Unlock</button>
+          {status && status.type === 'error' && <p className="text-xs text-red-500">{status.text}</p>}
+        </form>
+      </div>
+    )
+  }
 
   return (
     <div className="flex-1 overflow-y-auto bg-[var(--bg)]">
